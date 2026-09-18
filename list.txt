@@ -41,6 +41,7 @@ butterfly-knife-nebula-ruby.png
 butterfly-knife-nebula-sapphire.png
 butterfly-knife-rusted.png
 butterfly-knife-safari.png
+butterfly-knife-scarlet.png
 butterfly-knife-tiger-stripes.png
 butterfly-knife-vanilla.png
 butterfly-knife-violet.png
@@ -235,6 +236,7 @@ icon-xm1014.png
 icon-zeus-x27 (1).png
 icon-zeus-x27.png
 karambit-aurora.png
+karambit-blackwidow.png
 karambit-damascus.png
 karambit-doodle.png
 karambit-fade.png
@@ -253,6 +255,7 @@ karambit-rusted.png
 karambit-safari.png
 karambit-scarlet.png
 karambit-tiger-stripes.png
+karambit-vanilla.png
 karambit-violet.png
 karambit-whiteout.png
 karambit-woodland.png
@@ -272,6 +275,7 @@ m4a4-wrapped.png
 m9-bayonet-blackwidow.png
 m9-bayonet-damascus.png
 m9-bayonet-doodle.png
+m9-bayonet-fade.png
 m9-bayonet-midnight.png
 m9-bayonet-naval.png
 m9-bayonet-nebula-black-pearl.png
