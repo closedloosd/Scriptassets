@@ -72,8 +72,6 @@ famas-heirloom.png
 famas-medic.png
 famas-mind.png
 famas-wallpaper.png
-finishline-case (1).png
-finishline-case.png
 five-seven-control.png
 five-seven-icecap.png
 five-seven-mkii.png
@@ -96,7 +94,6 @@ flip-knife-vanilla.png
 flip-knife-violet.png
 flip-knife-whiteout.png
 flip-knife-woodland.png
-freedom-collection.png
 galil-ar-feral.png
 galil-ar-irid.png
 galil-ar-irradiated.png
@@ -210,7 +207,6 @@ karambit-vanilla.png
 karambit-violet.png
 karambit-whiteout.png
 karambit-woodland.png
-lore-collection.png
 m4a1-s-anodized-red.png
 m4a1-s-blackops.png
 m4a1-s-castroil.png
@@ -249,10 +245,6 @@ mac-10-midas.png
 mac-10-nailgun.png
 mac-10-ngram.png
 mag-7-vision.png
-medal-collection (1).png
-medal-collection.png
-midas-collection (1).png
-midas-collection.png
 mp9-anodized-red.png
 mp9-canyon.png
 mp9-choke-oil.png
@@ -300,7 +292,6 @@ pinpoint-collection.png
 r8-bloody8.png
 r8-regalia.png
 r8-waru.png
-Roblox_Tilt_White.png
 sawed-off-improvised.png
 sawed-off-orbit.png
 sawed-off-panthress.png
@@ -335,20 +326,12 @@ stiletto-knife-damascus.png
 stiletto-knife-doodle.png
 stiletto-knife-rusted.png
 stiletto-knife-tiger-stripes.png
-supersoaked-collection (1).png
-supersoaked-collection.png
 tec-9-medal.png
 tec-9-monarch.png
 tec-9-striker.png
 tec-9-timeless.png
 tec-9-trajectory.png
 tec-9-vice.png
-tekko-collection (1).png
-tekko-collection.png
-the-ambassador-collection (1).png
-the-ambassador-collection.png
-the-racer8-collection (1).png
-the-racer8-collection.png
 usp-s-ajax.png
 usp-s-heated.png
 usp-s-specops.png
@@ -356,7 +339,6 @@ usp-s-supersoaked.png
 usp-s-tekko.png
 usp-s-tora.png
 usp-s-wintergreen.png
-winter-2025.png
 xm1014-abstract.png
 xm1014-bloxoblasto.png
 xm1014-koi.png
@@ -366,8 +348,6 @@ xm1014-splatter.png
 zeus-x27-bitfyre.png
 zeus-x27-medscan.png
 zeus-x27-overcharge.png
-fix_temp_54.png
-fix_temp_62.png
 Karambit - Nebula 1.png
 Karambit - Nebula 2.png
 Karambit - Nebula 3.png
