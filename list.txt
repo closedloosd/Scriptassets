@@ -423,3 +423,27 @@ Butterfly Knife - Viridian 6.png
 Butterfly Knife - Viridian 7.png
 Butterfly Knife - Viridian 8.png
 Butterfly Knife - Viridian 9.png
+ben.wav
+pop.wav
+bonk.wav
+kick.wav
+ting.wav
+click.wav
+zelda.wav
+quaver.wav
+brotato.wav
+regulus.wav
+aimbooster.wav
+mouthsound.wav
+water drop.wav
+money claim.wav
+spiral knight.wav
+tavern misc1c.wav
+trident pierce.wav
+satisfying click.wav
+[minecraft] button.wav
+[minecraft] XP gain.wav
+[minecraft] bow ding.wav
+[minecraft] hitsound.wav
+[minecraft] egg throw.wav
+[minecraft] old hitsound.wav
