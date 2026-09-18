@@ -6,9 +6,6 @@ ak-47-pinpoint.png
 ak-47-rebellion.png
 ak-47-red-baron.png
 ak-47-sakura.png
-anodized-red-collection (1).png
-anodized-red-collection.png
-apex-case.png
 aug-anodized-red.png
 aug-hot-rod.png
 aug-overgrowth.png
@@ -22,10 +19,6 @@ awp-lore.png
 awp-overdrive.png
 awp-railgun.png
 awp-tekko.png
-beta-collection (1).png
-beta-collection.png
-bloxdb_banner_yellow.png
-bloxdb_logo.png
 butterfly-knife-blackwidow.png
 butterfly-knife-damascus.png
 butterfly-knife-doodle.png
@@ -47,28 +40,6 @@ butterfly-knife-vanilla.png
 butterfly-knife-violet.png
 butterfly-knife-whiteout.png
 butterfly-knife-woodland.png
-case-1.png
-charm-8-bit-heart.png
-charm-anchor.png
-charm-billiard-ball.png
-charm-bullet.png
-charm-bullseye.png
-charm-capstone.png
-charm-cassette.png
-charm-cheer.png
-charm-credit.png
-charm-f8.png
-charm-flight-tag.png
-charm-flora.png
-charm-for-sale.png
-charm-game-buddy.png
-charm-lil-nade.png
-charm-pack-1.png
-charm-relic.png
-charm-soda-pop.png
-charm-south-paw.png
-charm-treat.png
-chrysalis.png
 desert-eagle-circuit.png
 desert-eagle-freedom.png
 desert-eagle-high-octane.png
@@ -80,8 +51,6 @@ desert-eagle-racer8.png
 desert-eagle-spectrum.png
 desert-eagle-turbo.png
 desert-eagle-velocity.png
-Discord-Symbol-White (1).png
-Discord-Symbol-White.png
 driver-gloves-cardinal-weave.png
 driver-gloves-cardinal.png
 driver-gloves-cobra.png
@@ -139,7 +108,6 @@ glock-18-fuji.png
 glock-18-midas.png
 glock-18-pinpoint.png
 glock-18-yurei.png
-glove-case (1).png
 glove-case-2.png
 glove-case.png
 gut-knife-aurora.png
@@ -176,11 +144,7 @@ handwraps-hunter.png
 handwraps-meander.png
 handwraps-snakeskin.png
 handwraps-taped.png
-high-octane-collection (1).png
-high-octane-collection.png
-icon-ak-47 (1).png
 icon-ak-47.png
-icon-apex-case.png
 icon-aug.png
 icon-awp.png
 icon-butterfly-knife.png
@@ -196,7 +160,6 @@ icon-galil-ar.png
 icon-glock-18.png
 icon-glove-case-2.png
 icon-glove-case.png
-icon-gut-knife (1).png
 icon-gut-knife.png
 icon-handwraps.png
 icon-karambit.png
@@ -208,32 +171,20 @@ icon-mac-10.png
 icon-mag-7.png
 icon-mp9.png
 icon-negev.png
-icon-nova (1).png
 icon-nova.png
 icon-operator-gloves.png
 icon-p250.png
 icon-p90.png
-icon-r8-revolver (1).png
 icon-r8-revolver.png
-icon-sawed-off (1).png
 icon-sawed-off.png
 icon-sg-553.png
-icon-skeleton-knife (1).png
 icon-skeleton-knife.png
 icon-sports-gloves.png
-icon-ssg-08 (1).png
 icon-ssg-08.png
-icon-stiletto-knife (1).png
 icon-stiletto-knife.png
-icon-tec-9 (1).png
 icon-tec-9.png
-icon-usp-s (1).png
 icon-usp-s.png
-icon-winter-2025 (1).png
-icon-winter-2025.png
-icon-xm1014 (1).png
 icon-xm1014.png
-icon-zeus-x27 (1).png
 icon-zeus-x27.png
 karambit-aurora.png
 karambit-blackwidow.png
@@ -259,8 +210,6 @@ karambit-vanilla.png
 karambit-violet.png
 karambit-whiteout.png
 karambit-woodland.png
-lionheart.png
-lore-collection (1).png
 lore-collection.png
 m4a1-s-anodized-red.png
 m4a1-s-blackops.png
@@ -417,3 +366,80 @@ xm1014-splatter.png
 zeus-x27-bitfyre.png
 zeus-x27-medscan.png
 zeus-x27-overcharge.png
+fix_temp_54.png
+fix_temp_62.png
+Karambit - Nebula 1.png
+Karambit - Nebula 2.png
+Karambit - Nebula 3.png
+Karambit - Nebula 4.png
+Karambit - Nebula 5.png
+Karambit - Nebula 6.png
+Karambit - Nebula 7.png
+Karambit - Nebula 8.png
+Karambit - Nebula 9.png
+Gut Knife - Nebula 1.png
+Gut Knife - Nebula 2.png
+Gut Knife - Nebula 4.png
+Gut Knife - Nebula 5.png
+Gut Knife - Nebula 6.png
+Gut Knife - Nebula 7.png
+Gut Knife - Nebula 8.png
+Gut Knife - Nebula 9.png
+Karambit - Nebula 10.png
+Karambit - Nebula 11.png
+Gut Knife - Nebula 10.png
+Karambit - Viridian 1.png
+Karambit - Viridian 2.png
+Karambit - Viridian 3.png
+Karambit - Viridian 4.png
+Karambit - Viridian 5.png
+Karambit - Viridian 6.png
+Karambit - Viridian 7.png
+Karambit - Viridian 8.png
+Karambit - Viridian 9.png
+M9 Bayonet - Nebula 1.png
+M9 Bayonet - Nebula 2.png
+M9 Bayonet - Nebula 3.png
+M9 Bayonet - Nebula 4.png
+M9 Bayonet - Nebula 5.png
+M9 Bayonet - Nebula 6.png
+M9 Bayonet - Nebula 7.png
+M9 Bayonet - Nebula 8.png
+M9 Bayonet - Nebula 9.png
+Gut Knife - Viridian 1.png
+Gut Knife - Viridian 2.png
+Gut Knife - Viridian 3.png
+Gut Knife - Viridian 4.png
+Gut Knife - Viridian 7.png
+Gut Knife - Viridian 8.png
+Gut Knife - Viridian 9.png
+M9 Bayonet - Nebula 10.png
+M9 Bayonet - Nebula 11.png
+M9 Bayonet - Viridian 1.png
+M9 Bayonet - Viridian 2.png
+M9 Bayonet - Viridian 3.png
+M9 Bayonet - Viridian 4.png
+M9 Bayonet - Viridian 5.png
+M9 Bayonet - Viridian 6.png
+M9 Bayonet - Viridian 7.png
+M9 Bayonet - Viridian 8.png
+M9 Bayonet - Viridian 9.png
+Butterfly Knife - Nebula 1.png
+Butterfly Knife - Nebula 2.png
+Butterfly Knife - Nebula 3.png
+Butterfly Knife - Nebula 4.png
+Butterfly Knife - Nebula 5.png
+Butterfly Knife - Nebula 6.png
+Butterfly Knife - Nebula 7.png
+Butterfly Knife - Nebula 8.png
+Butterfly Knife - Nebula 9.png
+Butterfly Knife - Nebula 10.png
+Butterfly Knife - Nebula 11.png
+Butterfly Knife - Viridian 1.png
+Butterfly Knife - Viridian 2.png
+Butterfly Knife - Viridian 3.png
+Butterfly Knife - Viridian 4.png
+Butterfly Knife - Viridian 6.png
+Butterfly Knife - Viridian 7.png
+Butterfly Knife - Viridian 8.png
+Butterfly Knife - Viridian 9.png
