@@ -417,3 +417,4 @@ satisfying click.wav
 [minecraft] hitsound.wav
 [minecraft] egg throw.wav
 [minecraft] old hitsound.wav
+RedHit.png
