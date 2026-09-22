@@ -417,4 +417,23 @@ satisfying click.wav
 [minecraft] hitsound.wav
 [minecraft] egg throw.wav
 [minecraft] old hitsound.wav
-RedHit.png
+HitMarkers/RedHit.png
+bell.wav
+bubble.wav
+cod.wav
+crowbar.wav
+mcbow.wav
+neverlose.wav
+primordial.wav
+rust_headshot.wav
+skeet.wav
+stapler.wav
+zingtrio.wav
+enable.wav
+disable.wav
+enable1.wav
+disable1.wav
+enable2.wav
+disable2.wav
+enable3.wav
+disable3.wav
