@@ -9949,7 +9949,8 @@ function Automation.WarTycoonAutoBuildHover(part)
     pcall(function() hum.PlatformStand = false end)
     pcall(function() hum.Sit = false end)
     pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-    hrp.CFrame = CFrame.new(targetPos)
+    local okTpWrite = pcall(function() hrp.CFrame = CFrame.new(targetPos) end)
+    if not okTpWrite then return false, "teleport blocked" end
 
     -- [ v54 ] Rollback check
     if Config.WarTycoonBuild.VerifyTp ~= false then
@@ -10151,6 +10152,32 @@ function Automation.WarTycoonAutoBuildTryRebirth()
     return false
 end
 
+-- [ v78 ] Snapshot a pad's state so a purchase can be detected even when the
+-- cash value is not readable (no price tag / no leaderstats in this session).
+function Automation.WarTycoonAutoBuildPadSnapshot(unit)
+    local part = unit and unit.part
+    if not part or not part.Parent then return nil end
+    return {
+        canCollide = part.CanCollide,
+        transparency = part.Transparency,
+        anchored = part.Anchored,
+        name = part.Name,
+        children = unit.model and #unit.model:GetChildren() or 0,
+    }
+end
+
+function Automation.WarTycoonAutoBuildPadChanged(unit, snap)
+    if not snap then return false end
+    local part = unit and unit.part
+    if not part or not part.Parent then return true end
+    if part.CanCollide ~= snap.canCollide then return true end
+    if math.abs(part.Transparency - snap.transparency) > 0.01 then return true end
+    if part.Anchored ~= snap.anchored then return true end
+    if part.Name ~= snap.name then return true end
+    if unit.model and (not unit.model.Parent or #unit.model:GetChildren() ~= snap.children) then return true end
+    return false
+end
+
 function Automation.WarTycoonAutoBuildTryPad(base, unit)
     if not unit or not unit.part or not unit.part.Parent then return false end
     Automation.WarTycoonAutoBuildState()
@@ -10164,6 +10191,7 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
         if not Config.WarTycoonBuild.Enabled or State.Unloading or not IsCurrentInstance() then return false end
         local moneyBefore = Automation.WarTycoonAutoBuildMoney()
         local partBefore = unit.part
+        local snapBefore = Automation.WarTycoonAutoBuildPadSnapshot(unit)
         local okTp, tpErr = Automation.WarTycoonAutoBuildHover(unit.part)
         if not okTp and tpErr and tostring(tpErr):find("rolled back", 1, true) then
             Automation.WarTycoonAutoBuildLog("TP rolled back -> walking to the pad instead", Color3.fromRGB(255, 140, 0))
@@ -10177,17 +10205,24 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
         local moneyAfter = Automation.WarTycoonAutoBuildMoney()
         local gone = (partBefore == nil) or (partBefore.Parent == nil)
             or (unit.model ~= nil and unit.model.Parent == nil)
-        local paid = moneyBefore ~= nil and moneyAfter ~= nil and unit.price ~= nil
+        -- [ v78 ] a plain cash drop counts as a purchase even without a price tag
+        local cashDropped = moneyBefore ~= nil and moneyAfter ~= nil and moneyAfter < moneyBefore
+        local paidKnown = moneyBefore ~= nil and moneyAfter ~= nil and unit.price ~= nil
             and (moneyBefore - moneyAfter) >= (unit.price * 0.6)
+        local paid = paidKnown or (unit.price == nil and cashDropped)
+        -- [ v78 ] last resort when cash is unknown: the pad changed state after the touch
+        local changed = (not gone) and (not paid) and Automation.WarTycoonAutoBuildPadChanged(unit, snapBefore)
 
-        if gone or paid then
+        if gone or paid or changed then
             Automation._wtStats.purchases = Automation._wtStats.purchases + 1
-            if paid and unit.price then
+            if unit.price and (paidKnown or gone) then
                 Automation._wtStats.spent = Automation._wtStats.spent + unit.price
             end
             Automation.WarTycoonAutoBuildLog("bought: " .. tag, Color3.fromRGB(0, 255, 120))
-            Automation._wtDonePads[unit.key] = math.huge
+            -- a gone/paid pad stays done; a state-change guess is retried in 2 min
+            Automation._wtDonePads[unit.key] = (gone or paid) and math.huge or (tick() + 120)
             Automation._wtPads = nil
+            Automation._wtStuckSince = nil
             return true
         end
         Automation.WarTycoonAutoBuildLog(string.format("pad %s did not register (attempt %d/%d)", tag, i, attempts), Color3.fromRGB(255, 180, 0))
@@ -10233,6 +10268,8 @@ function Automation.WarTycoonAutoBuildLoop()
         end
         -- [ v54 ] fresh session stats on every start
         Automation._wtStats = { purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = tick() }
+        -- [ v78 ] a leftover "stuck" timer from a previous run must not trigger an instant rebirth
+        Automation._wtStuckSince = nil
         Automation.WarTycoonAutoBuildLog("started. Priority: " .. tostring(Config.WarTycoonBuild.Priority)
             .. ", TP above pad: +" .. tostring(Config.WarTycoonBuild.Hover) .. " studs", Color3.fromRGB(0, 255, 150))
         Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  starting...")
@@ -10275,16 +10312,46 @@ function Automation.WarTycoonAutoBuildLoop()
                 end
 
                 if not unit then
-                    Automation.WarTycoonAutoBuildUpdateStatus(nil, #pads == 0 and "waiting for pads" or "waiting for rebirth")
+                    -- [ v78 ] One failed pad must not wipe the base. Pads are often just on
+                    -- cooldown - rebirth only when the plot has nothing left to buy.
+                    Automation.WarTycoonAutoBuildState()
+                    -- [ v78 ] If nothing is buyable for a full minute (every pad keeps
+                    -- bouncing back), treat the base as stuck and allow a rebirth again.
+                    Automation._wtStuckSince = Automation._wtStuckSince or tick()
+                    local stuckFor = tick() - Automation._wtStuckSince
+                    local allBought = #pads > 0
+                    for _, u in ipairs(pads) do
+                        if (Automation._wtDonePads[u.key] or 0) ~= math.huge then
+                            allBought = false
+                            break
+                        end
+                    end
+                    if #pads > 0 and not allBought and stuckFor < 60 then
+                        Automation.WarTycoonAutoBuildUpdateStatus(nil, "pads on cooldown - waiting")
+                        if (tick() - (Automation._wtCooldownLog or 0)) > 20 then
+                            Automation._wtCooldownLog = tick()
+                            Automation.WarTycoonAutoBuildLog("all known pads are on cooldown - waiting instead of rebirthing", Color3.fromRGB(255, 200, 0))
+                        end
+                        task.wait(1)
+                        return
+                    end
+                    Automation._wtStuckSince = nil
+                    if #pads > 0 and not allBought then
+                        Automation.WarTycoonAutoBuildLog("pads stayed un-buyable for " .. tostring(math.floor(stuckFor)) .. "s - trying a rebirth", Color3.fromRGB(255, 200, 0))
+                    end
+                    Automation.WarTycoonAutoBuildUpdateStatus(nil, #pads == 0 and "waiting for pads" or (allBought and "base built - waiting for rebirth" or "stuck - rebirth"))
                     if #pads == 0 and (tick() - (Automation._wtNoPadLog or 0)) > 30 then
                         Automation._wtNoPadLog = tick()
                         Automation.WarTycoonAutoBuildLog("no purchase pads detected - turn on 'Dump pads to F9' to check", Color3.fromRGB(255, 170, 0))
                     end
                     if Config.WarTycoonBuild.AutoRebirth then
-                        Automation.WarTycoonAutoBuildTryRebirth()
-                        Automation._wtPads = nil
-                        Automation._wtDonePads = {}
-                        Automation._wtBaseAt = 0
+                        local didRb = Automation.WarTycoonAutoBuildTryRebirth()
+                        if didRb then
+                            -- the plot resets on rebirth, so rescan everything
+                            Automation._wtPads = nil
+                            Automation._wtDonePads = {}
+                            Automation._wtBaseAt = 0
+                        end
                     end
                     task.wait(2.5)
                     return
@@ -18205,6 +18272,10 @@ end, function(p)
     Internal.createSlider(sub, "Delay after TP", 1, 10, math.floor((Config.WarTycoonBuild.Delay or 0.35) * 10 + 0.5),
         function(v) Config.WarTycoonBuild.Delay = v / 10 end,
         function(v) return string.format("%.1f sec", v / 10) end)
+    -- [ v78 ] Attempts was read by the buy loop but had no control in the UI
+    Internal.createSlider(sub, "Retry attempts per pad", 1, 6, math.floor(tonumber(Config.WarTycoonBuild.Attempts) or 3),
+        function(v) Config.WarTycoonBuild.Attempts = v end,
+        function(v) return tostring(v) .. "x" end)
     local rowCollect = Internal.createSettingRow(sub, "Auto-collect cash (Cash Collector)")
     Internal.createiOSSwitch(rowCollect, Config.WarTycoonBuild.AutoCollect, function(v) Config.WarTycoonBuild.AutoCollect = v end, rowCollect:FindFirstChild("TextLabel"), nil, true)
     local rowShort = Internal.createSettingRow(sub, "Collect only when cash is short")
