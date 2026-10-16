@@ -1,0 +1,20413 @@
+Players = game:GetService("Players")
+LP = Players.LocalPlayer
+t = 0
+while not LP and t < 50 do
+    t = t + 1
+    task.wait(0.1)
+    LP = Players.LocalPlayer
+end
+
+FindAllTargets = nil
+
+Core = {
+    Services = {
+        Workspace = game:GetService("Workspace"),
+        Players = game:GetService("Players"),
+        RunService = game:GetService("RunService"),
+        TweenService = game:GetService("TweenService"),
+        UserInputService = game:GetService("UserInputService"),
+        HttpService = game:GetService("HttpService"),
+        Lighting = game:GetService("Lighting"),
+        CoreGui = game:GetService("CoreGui"),
+        StarterGui = game:GetService("StarterGui"),
+        CollectionService = game:GetService("CollectionService"),
+        ProximityPromptService = game:GetService("ProximityPromptService"),
+        Stats = game:GetService("Stats"),
+        Teams = game:GetService("Teams"),
+        ReplicatedStorage = game:GetService("ReplicatedStorage"),
+        SoundService = game:GetService("SoundService"),
+        VirtualInputManager = game:GetService("VirtualInputManager"),
+        -- [ v65 ] друзья: телепорт к другу и названия игр по PlaceId
+        TeleportService = game:GetService("TeleportService"),
+        MarketplaceService = game:GetService("MarketplaceService")
+    },
+    Local = {
+        Player = LP,
+        Mouse = LP and LP:GetMouse() or nil,
+        Camera = workspace.CurrentCamera
+    }
+}
+
+-- Map services and local objects to Core for legacy compatibility
+for k, v in Core.Services do
+    Core[k] = v
+end
+for k, v in Core.Local do
+    Core["Local" .. k] = v
+end
+
+-- [ АНТИ-ДУБЛЬ / ФИКС ФПС ] При повторной инъекции старый скрипт продолжал жить
+pcall(function()
+    local hosts = {}
+    if gethui then table.insert(hosts, gethui()) end
+    table.insert(hosts, game:GetService("CoreGui"))
+    for _, host in ipairs(hosts) do
+        for _, gui in ipairs(host:GetChildren()) do
+            if gui ~= nil and gui:IsA("ScreenGui") and gui.Name == "SacredVisuals_Kubchik" then
+                -- Просим СТАРЫЙ скрипт (его _G ещё не перезаписан) корректно выгрузиться
+                if _G.OvermindBeginUnload then pcall(_G.OvermindBeginUnload) end
+                task.wait(0.15)
+                pcall(function() gui:Destroy() end)
+            end
+        end
+    end
+end)
+
+-- [ ZOMBIE KILL-SWITCH / ФИКС ФПС ПОСЛЕ ПЕРЕНОСА МЕНЮ ]
+local INSTANCE_TOKEN = {}
+_G.OvermindActiveToken = INSTANCE_TOKEN
+local function IsCurrentInstance()
+    return INSTANCE_TOKEN == _G.OvermindActiveToken
+end
+
+ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SacredVisuals_Kubchik"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+pcall(function()
+    if gethui then
+        ScreenGui.Parent = gethui()
+    elseif syn and syn.protect_gui then
+        syn.protect_gui(ScreenGui)
+        ScreenGui.Parent = game:GetService("CoreGui")
+    else
+        ScreenGui.Parent = game:GetService("CoreGui")
+    end
+end)
+if not ScreenGui.Parent then
+    ScreenGui.Parent = Core.Local.Player:WaitForChild("PlayerGui")
+end
+
+-- GLOBAL HELPERS & TARGETING ENGINE
+local function hasVestDetails(character)
+    if not character then return false end
+    local armor = character:FindFirstChild("CharacterArmor")
+    if armor and armor:FindFirstChild("VestDetails") then
+        return true
+    end
+    return false
+end
+
+local function isCharacterAlly(targetChar)
+    if not targetChar then return false end
+    local lp = Core.Local.Player
+    if not lp then return false end
+
+    local targetPlayer = game:GetService("Players"):GetPlayerFromCharacter(targetChar)
+    if targetPlayer == lp then return true end
+
+    -- 1. Стандартная команда игрока через сервис Players
+    if targetPlayer and targetPlayer.Team ~= nil and lp.Team ~= nil then
+        return targetPlayer.Team == lp.Team
+    end
+
+    -- 2. Атрибуты команды на объекте игрока или персонажа (Blox Strike / большинство игр)
+    if targetPlayer then
+        local myTeamAttr = lp:GetAttribute("Team") or lp:GetAttribute("TeamName") or (lp.Character and lp.Character:GetAttribute("Team"))
+        local targetTeamAttr = targetPlayer:GetAttribute("Team") or targetPlayer:GetAttribute("TeamName") or targetChar:GetAttribute("Team")
+        if myTeamAttr ~= nil and targetTeamAttr ~= nil then
+            return myTeamAttr == targetTeamAttr
+        end
+    end
+
+    -- 3. Запасной вариант для Blox Strike (по жилетам/броне
+    if lp.Character then
+        local myHasVest = hasVestDetails(lp.Character)
+        local targetHasVest = hasVestDetails(targetChar)
+
+        if myHasVest or targetHasVest then
+            return myHasVest == targetHasVest
+        end
+    end
+
+    -- 4. Сканер спавна (TeamCache)
+    if targetPlayer and TeamCache[targetPlayer.UserId] then
+        return TeamCache[targetPlayer.UserId] == "Ally"
+    end
+
+    return false
+end
+
+local SharedIsVisibleFilter = {}
+local SharedIsVisibleRayParams = RaycastParams.new()
+SharedIsVisibleRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function isVisible(target)
+    if not target then return false end
+    local camPos = Core.Local.Camera and Core.Local.Camera.CFrame.Position
+    if not camPos then return false end
+
+    table.clear(SharedIsVisibleFilter)
+    local lpChar = Core.Local.Player and Core.Local.Player.Character
+    if lpChar then table.insert(SharedIsVisibleFilter, lpChar) end
+    if Core.Local.Camera then table.insert(SharedIsVisibleFilter, Core.Local.Camera) end
+
+    for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+        if p ~= Core.Local.Player and p.Character and isCharacterAlly(p.Character) then
+            table.insert(SharedIsVisibleFilter, p.Character)
+        end
+    end
+    SharedIsVisibleRayParams.FilterDescendantsInstances = SharedIsVisibleFilter
+    local res = workspace:Raycast(camPos, target.Position - camPos, SharedIsVisibleRayParams)
+    if res then
+        local hitModel = res.Instance:FindFirstAncestorOfClass("Model")
+        return hitModel and hitModel == target.Parent or false
+    end
+    return true
+end
+
+function FindAllTargets()
+    if State.Unloading or not IsCurrentInstance() then return end
+    local cam = Core.Local.Camera
+    local lp = Core.Local.Player
+    local lchar = lp.Character
+    if not lchar or not cam then return end
+
+    local screenCenter = cam.ViewportSize / 2
+    local sDist, sClose = math.huge, nil
+    local rDist, rClose = math.huge, nil
+    local cDist, cClose = math.huge, nil
+
+    local memesenseActive = Config.Combat.Memesense.Enabled
+    local silentCfg = Config.Combat.SilentAim
+    local rageCfg = Config.Combat.Ragebot
+
+    local allChars = {}
+    for _, p in Core.Services.Players:GetPlayers() do
+        if p ~= lp then
+            local char = p.Character
+            if char and not isCharacterAlly(char) then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                -- [ ФИКС v21 ] Dead
+                local deadAttrT = char:GetAttribute("Dead")
+                local isDead = deadAttrT == true or char:GetAttribute("Invincible") == true or (hum and hum.Health <= 0) or false
+                if not isDead and deadAttrT == nil then
+                    local hp = char:GetAttribute("Health")
+                    if hp and hp <= 0 then isDead = true end
+                end
+                if not isDead then
+                    table.insert(allChars, char)
+                end
+            end
+        end
+    end
+
+    -- Aimbot Target (Pull logic с фиксом дергания и таргетинга мертвых)
+    if memesenseActive then
+        local chosenPartName = Config.Combat.Memesense.Hitbox or "Head"
+
+        -- Валидация залоченной цели
+        if State.lockedTargetInstance and State.lockedTargetInstance.Parent then
+            local charModel = State.lockedTargetInstance:FindFirstAncestorOfClass("Model")
+            if charModel then
+                local hum = charModel:FindFirstChildOfClass("Humanoid")
+                -- [ ФИКС v21 ] та же приоритизация Dead над Health
+                local deadAttrL = charModel:GetAttribute("Dead")
+                local isDead = deadAttrL == true or charModel:GetAttribute("Invincible") == true or (hum and hum.Health <= 0) or false
+                if not isDead and deadAttrL == nil then
+                    local hp = charModel:GetAttribute("Health")
+                    if hp and hp <= 0 then isDead = true end
+                end
+                if isDead then
+                    State.lockedTargetInstance = nil
+                elseif Config.Combat.Memesense.VisibleCheck and not isVisible(State.lockedTargetInstance) then
+                    State.lockedTargetInstance = nil
+                end
+            else
+                State.lockedTargetInstance = nil
+            end
+        else
+            State.lockedTargetInstance = nil
+        end
+
+        local bestTarget = State.lockedTargetInstance
+        local bestD = math.huge
+
+        -- Если цель уже залочена
+        if bestTarget then
+            bestD = (cam.CFrame.Position - bestTarget.Position).Magnitude
+        end
+
+        for _, char in allChars do
+            local p = char:FindFirstChild(chosenPartName) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if p then
+                local passVis = true
+                if Config.Combat.Memesense.VisibleCheck and not isVisible(p) then passVis = false end
+
+                if passVis then
+                    local d = (cam.CFrame.Position - p.Position).Magnitude
+                    if d < bestD then
+                        bestD, bestTarget = d, p
+                    end
+                end
+            end
+        end
+        State.lockedTargetInstance, cClose = bestTarget, bestTarget
+    end
+
+    -- Silent & Rage
+    for _, char in allChars do
+        if silentCfg.Enabled then
+            local p = char:FindFirstChild(silentCfg.Hitbox) or char:FindFirstChild("Head")
+            if not p then
+                -- Поиск по подстроке хитбокса или головы для кастомных моделей Blox Strike
+                for _, child in ipairs(char:GetChildren()) do
+                    if child:IsA("BasePart") and (child.Name:lower():find(silentCfg.Hitbox:lower()) or child.Name:lower():find("head")) then
+                        p = child
+                        break
+                    end
+                end
+            end
+            if p then
+                local sp, on = cam:WorldToViewportPoint(p.Position)
+                -- Убираем проверку 'on' (чтобы сайлент хитбоксил даже когда цель за пределами экрана или в ...
+                local d = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                if (not silentCfg.UseFOV or d <= silentCfg.FieldOfView) and (silentCfg.Wallbang or isVisible(p)) and d < sDist then
+                    sDist, sClose = d, p
+                end
+            end
+        end
+        if rageCfg.Enabled then
+            local p = char:FindFirstChild(rageCfg.Hitbox) or char:FindFirstChild("Head")
+            if p and (not rageCfg.VisibleCheck or isVisible(p)) and (not rageCfg.WallCheck or isVisible(p)) then
+                local rd = (cam.CFrame.Position - p.Position).Magnitude
+                local pl = Core.Services.Players:GetPlayerFromCharacter(char)
+                if rageCfg.PriorityTarget ~= "[ AUTO ]" and pl and pl.Name == rageCfg.PriorityTarget then
+                    rClose, rDist = p, 0
+                elseif rd < rDist then rDist, rClose = rd, p end
+            end
+        end
+    end
+
+    State.SilentTarget, State.RageTarget, State.MemesenseTarget = sClose, rClose, cClose
+end
+
+RS = Core.Services.ReplicatedStorage
+
+State = {
+    -- UI & Interaction (Merged)
+    FPS = 60, Ping = 0, Loaded = false, IsSwitching = false,
+    MenuOpened = true,
+    Binding = false,
+    CurrentTab = "Render",
+    SelectedModule = nil,
+    Connections = {},
+    Keys = {W = false, S = false, A = false, D = false, Space = false, LeftShift = false},
+    Dragging = { Menu = false, Island = false, Speed = false, Opacity = false, Debug = false, ColorBar = false },
+    BindingModule = nil,
+    ModuleBinds = {},
+    IslandNotifyActive = false,
+
+    -- Module Registry in State
+    Modules = {},
+
+    -- Combat & Targeting (Memesense + Overmind)
+    MemesenseTarget = nil,
+    SilentTarget = nil,
+    RageTarget = nil,
+    lockedTargetInstance = nil,
+    frameCounter = 0,
+    SilentFOV = nil,
+    RageFOV = nil,
+    LegitFOV = nil,
+    CubePart = nil,
+
+    -- Visual Animations
+    _rotAngle = 0,
+    _gradientStep = 0,
+
+    -- Registry for Cleanup
+    Objects = {},
+    ESP_Elements = {},
+    DrawingRegistry = {},
+
+    -- World & Projectiles
+    GrenadeHistory = {},
+    LastImpacts = {},
+    LastReload = 0,
+    FrameCount = 0,
+
+    -- Automation (Overmind)
+    FlyPos = nil,
+    RecordedPath = {},
+    IsRecording = false,
+    IsPlaying = false,
+    PlaybackIndex = 1,
+    CurrentPlaybackY = 0,
+    Paths = {},  -- Storage for multiple paths
+    Unloading = false
+}
+
+Internal = {
+    MainFrame = nil, Sidebar = nil, SearchBox = nil, TabContainer = nil, ModuleGrid = nil,
+    KLogo = nil,
+    IslandLabel = nil, SidebarLogo = nil, LoadingLogo = nil,
+    ShowIslandNotification = nil, updateIsland = nil,
+    UIObjects = { Gradients = {}, Accents = {} },
+    UIComponents = { Tabs = {} },
+    -- World Entities Tracking for Cleanup
+    DroneObjects = {}, DroneGuis = {}, DroneHighlights = {},
+    BarrelObjects = {}, BarrelGuis = {}, BarrelHighlights = {},
+    GrenadeTracers = {},
+    MaterialLimits = {
+        [Enum.Material.Asphalt] = 0.25, [Enum.Material.Basalt] = 0.25, [Enum.Material.Brick] = 0.25,
+        [Enum.Material.Cobblestone] = 0.25, [Enum.Material.Concrete] = 0.25, [Enum.Material.CrackedLava] = 0.25,
+        [Enum.Material.DiamondPlate] = 0.25, [Enum.Material.Foil] = 0.25, [Enum.Material.Glacier] = 0.25,
+        [Enum.Material.Granite] = 0.25, [Enum.Material.Grass] = 0.25, [Enum.Material.Ground] = 0.25,
+        [Enum.Material.Ice] = 0.25, [Enum.Material.LeafyGrass] = 0.25, [Enum.Material.Limestone] = 0.25,
+        [Enum.Material.Marble] = 0.25, [Enum.Material.Metal] = 0.25, [Enum.Material.Mud] = 0.25,
+        [Enum.Material.Pavement] = 0.25, [Enum.Material.Rock] = 0.25, [Enum.Material.Salt] = 0.25,
+        [Enum.Material.Sand] = 0.25, [Enum.Material.Sandstone] = 0.25, [Enum.Material.Slate] = 0.25,
+        [Enum.Material.Snow] = 0.25, [Enum.Material.ForceField] = 0.25, [Enum.Material.Neon] = 0.25,
+        [Enum.Material.CorrodedMetal] = 0.25, [Enum.Material.Pebble] = 0.25, [Enum.Material.CeramicTiles] = 0.25,
+        [Enum.Material.Plaster] = 0.25, [Enum.Material.Plastic] = 7, [Enum.Material.SmoothPlastic] = 7,
+        [Enum.Material.Wood] = 7, [Enum.Material.WoodPlanks] = 7, [Enum.Material.Cardboard] = 7,
+        [Enum.Material.Glass] = 100, [Enum.Material.Fabric] = 100
+    },
+    MaterialVariantLimits = { ["IndoorWall"] = 0.25, ["Sandy Brick"] = 0.25 }
+}
+
+-- [ ФИКС: мышь в 1-м лице ] Невидимая Modal-кнопка (как у Obsidian/Linoria): при открытом ...
+Internal.MouseModal = Instance.new("TextButton")
+Internal.MouseModal.Name = "OvermindMouseModal"
+Internal.MouseModal.BackgroundTransparency = 1
+Internal.MouseModal.AutoButtonColor = false
+Internal.MouseModal.Modal = false
+Internal.MouseModal.Size = UDim2.fromScale(0, 0)
+Internal.MouseModal.AnchorPoint = Vector2.zero
+Internal.MouseModal.Text = ""
+Internal.MouseModal.ZIndex = -999
+Internal.MouseModal.Parent = ScreenGui
+
+-- [ ASSET MANAGER CONFIG ]
+local AssetManager = {
+    -- ВСТАВЬТЕ ВАШУ ССЫЛКУ НИЖЕ (Обязательно с "/" в конце)
+    RepoURL = "https://raw.githubusercontent.com/closedloosd/Scriptassets/main/",
+    ListFile = "list.txt",
+    BaseFolder = "Overmind/",
+    SkinsFolder = "Overmind/Skins/",
+    HitsoundsFolder = "Overmind/Hitsounds/",
+    EnableSoundsFolder = "Overmind/EnableSounds/",  -- звуки вкл/выкл модулей (папка EnableSounds на GitHub)
+    HitmarkersFolder = "Overmind/Hitmarkers/",  -- картинки-хитмаркеры (папка Hitmarkers на GitHub)
+    IconsFolder = "Overmind/Icons/",  -- [ v75 ] свои иконки вкладок рейла (папка Icons на GitHub)
+
+    Files = {},
+    DownloadQueue = {},
+    StatusLabel = nil,
+    ProgressBar = nil
+}
+
+local Automation = { lastHelperRun = 0, _wtDonePads = {} }
+-- [ v54 CRASH FIX ] _wtDonePads was only ever read/reset
+
+-- [ SNAPSHOT SYSTEM FOR RESTORATION ]
+local function getAtmosphere()
+    return game:GetService("Lighting"):FindFirstChildOfClass("Atmosphere")
+end
+local initialAtm = getAtmosphere()
+local OriginalState = {
+    Camera = { FOV = workspace.CurrentCamera.FieldOfView, Mode = Core.Local.Player.CameraMode, MaxDist = Core.Local.Player.CameraMaxZoomDistance, MinDist = Core.Local.Player.CameraMinZoomDistance },
+    Lighting = {
+        ClockTime = Core.Services.Lighting.ClockTime,
+        Brightness = Core.Services.Lighting.Brightness,
+        Ambient = Core.Services.Lighting.Ambient,
+        OutdoorAmbient = Core.Services.Lighting.OutdoorAmbient,
+        FogColor = Core.Services.Lighting.FogColor,
+        FogEnd = Core.Services.Lighting.FogEnd,
+        FogStart = Core.Services.Lighting.FogStart,
+        ColorShift_Bottom = Core.Services.Lighting.ColorShift_Bottom,
+        ColorShift_Top = Core.Services.Lighting.ColorShift_Top
+    },
+    Atmosphere = {
+        Density = initialAtm and initialAtm.Density or 0,
+        Haze = initialAtm and initialAtm.Haze or 0,
+        Glare = initialAtm and initialAtm.Glare or 0,
+        Color = initialAtm and initialAtm.Color or Color3.fromRGB(199, 170, 107),
+        Decay = initialAtm and initialAtm.Decay or Color3.fromRGB(92, 108, 128)
+    },
+    Scope = { Size = UDim2.new(1, 0, 1, 0) }
+}
+
+-- [ MEMESENSE PENETRATION ENGINE ]
+-- [ ADVANCED PENETRATION ENGINE (Wallbang) ]
+
+local function GetPenetrationStats(origin, direction, maxPen, ignoreList, targetRoot)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.CollisionGroup = "Bullet"
+    local filter = ignoreList or {Core.Local.Player.Character, Core.Local.Camera}
+    params.FilterDescendantsInstances = filter
+    local currentOrigin = origin
+    local currentDir = direction
+    local accMat = {}
+    local accVar = {}
+    local stats = {
+        TotalThickness = 0,
+        MaterialStats = {},
+        Success = false,
+        FailReason = "Max Steps",
+        EndPos = Vector3.zero
+    }
+
+    local backParams = RaycastParams.new()
+    backParams.FilterType = Enum.RaycastFilterType.Include
+    backParams.CollisionGroup = "Bullet"
+
+    for i = 1, 100 do
+        if not currentOrigin or not currentDir then break end
+        local result = workspace:Raycast(currentOrigin, currentDir * 1000, params)
+        if not result then
+            if not targetRoot then
+                stats.Success = true
+                stats.EndPos = currentOrigin + (currentDir * 1000)
+            else
+                stats.FailReason = "Void (Missed)"
+            end
+            break
+        end
+        if not result.Instance or not result.Instance.Parent then
+            stats.FailReason = "Destroyed Instance"
+            break
+        end
+        if targetRoot and result.Instance:IsDescendantOf(targetRoot) then
+            stats.Success = true
+            stats.EndPos = result.Position
+            stats.FailReason = "Hit"
+            return stats
+        end
+        table.insert(filter, result.Instance)
+        params.FilterDescendantsInstances = filter
+        local enterPos = result.Position
+        local fakeEnd = enterPos + (currentDir * 1000)
+        backParams.FilterDescendantsInstances = {result.Instance}
+        local backRes = workspace:Raycast(fakeEnd, enterPos - fakeEnd, backParams)
+        local thickness = 0.5
+        local limit = 0.25
+        local matName = result.Instance.Material.Name
+        if not backRes then
+            thickness = 5
+            stats.FailReason = "Infinite/Block"
+        else
+            thickness = (enterPos - backRes.Position).Magnitude
+            local variant = backRes.Instance.MaterialVariant
+            if variant ~= "" and Internal.MaterialVariantLimits[variant] then
+                matName = variant
+                limit = Internal.MaterialVariantLimits[variant]
+                accVar[variant] = (accVar[variant] or 0) + thickness
+                if accVar[variant] > limit + maxPen then
+                    stats.FailReason = string.format("Var: %s (%s > %s)", tostring(variant), tostring(accVar[variant]), tostring(limit + maxPen))
+                    stats.MaterialStats = {Type = "Variant", Name = variant, Thickness = accVar[variant], Limit = limit + maxPen}
+                    return stats
+                end
+            else
+                local mat = backRes.Material
+                matName = mat.Name
+                limit = Internal.MaterialLimits[mat] or 0.25
+                accMat[mat] = (accMat[mat] or 0) + thickness
+                if accMat[mat] > limit + maxPen then
+                    stats.FailReason = string.format("%s (%s / %s)", tostring(matName), tostring(accMat[mat]), tostring(limit + maxPen))
+                    stats.MaterialStats = {Type = "Material", Name = matName, Thickness = accMat[mat], Limit = limit + maxPen}
+                    return stats
+                end
+            end
+            currentOrigin = backRes.Position
+        end
+        stats.TotalThickness = stats.TotalThickness + thickness
+    end
+    return stats
+end
+
+local TeamCache = {}
+
+-- Anti-Cheat Bypass
+local function applyBypass()
+    local hook = hookfunction or (getgenv and getgenv().hookfunction)
+    if hook then
+        pcall(function()
+            local oldRaycast
+            oldRaycast = hook(workspace.Raycast, newcclosure(function(self, origin, direction, params)
+                return oldRaycast(self, origin, direction, params)
+            end))
+        end)
+    end
+
+    -- Continuous Anti-Cheat Script Disabler (excluding AntiAFK)
+    task.spawn(function()
+        local function checkAndDisable(obj)
+            if not obj then return end
+            local name = obj.Name:lower()
+            if name:find("anti") and not name:find("afk") then
+                pcall(function()
+                    if obj:IsA("BaseScript") then
+                        obj.Disabled = true
+                    end
+                    obj:Destroy()
+                end)
+            end
+        end
+
+        local function monitorCharacter(char)
+            if not char then return end
+            for _, child in ipairs(char:GetChildren()) do
+                checkAndDisable(child)
+            end
+            char.ChildAdded:Connect(checkAndDisable)
+        end
+
+        if LP then
+            if LP.Character then monitorCharacter(LP.Character) end
+            LP.CharacterAdded:Connect(monitorCharacter)
+
+            task.spawn(function()
+                local pScripts = LP:WaitForChild("PlayerScripts", 10)
+                if pScripts then
+                    for _, child in ipairs(pScripts:GetDescendants()) do
+                        checkAndDisable(child)
+                    end
+                    pScripts.DescendantAdded:Connect(checkAndDisable)
+                end
+            end)
+        end
+
+        workspace.ChildAdded:Connect(function(child)
+            task.wait(0.1)
+            if child:IsA("Model") then
+                monitorCharacter(child)
+            else
+                checkAndDisable(child)
+            end
+        end)
+
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child:IsA("Model") then
+                monitorCharacter(child)
+            else
+                checkAndDisable(child)
+            end
+        end
+    end)
+end
+pcall(applyBypass)
+
+local Theme = {
+    Background = Color3.fromRGB(13, 14, 21),
+    Panel = Color3.fromRGB(18, 19, 28),
+    Accent = Color3.fromRGB(123, 97, 255),
+    Accent2 = Color3.fromRGB(160, 100, 255),
+    Text = Color3.fromRGB(240, 240, 245),
+    Muted = Color3.fromRGB(110, 110, 130),
+    FontBold = Enum.Font.GothamBold,
+    FontMedium = Enum.Font.GothamMedium,
+    FontRegular = Enum.Font.Gotham,
+    Separator = Color3.fromRGB(70, 75, 95)
+}
+
+local function serialize(tbl)
+    local new = {}
+    for k, v in pairs(tbl) do
+        if typeof(v) == "Color3" then
+            new[k] = {__type = "Color3", r = v.R, g = v.G, b = v.B}
+        elseif typeof(v) == "EnumItem" then
+            new[k] = {__type = "EnumItem", enum = tostring(v.EnumType), name = v.Name}
+        elseif typeof(v) == "CFrame" then
+            local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = v:GetComponents()
+            new[k] = {__type = "CFrame", c = {x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22}}
+        elseif type(v) == "table" then
+            new[k] = serialize(v)
+        else
+            new[k] = v
+        end
+    end
+    return new
+end
+
+local function deserialize(tbl)
+    for k, v in pairs(tbl) do
+        if type(v) == "table" then
+            if v.__type == "Color3" then
+                tbl[k] = Color3.new(v.r, v.g, v.b)
+            elseif v.__type == "EnumItem" then
+                pcall(function() tbl[k] = Enum[v.enum:match("%.([^.]+)$")][v.name] end)
+            elseif v.__type == "CFrame" then
+                tbl[k] = CFrame.new(unpack(v.c))
+            else
+                deserialize(v)
+            end
+        end
+    end
+end
+
+-- [ ФИКС ] Config глобальный
+Config = {
+    -- [OVERMIND ORIGINALS]
+    DebugMode = false,    Island = { Enabled = true, Logo = true, Time = true, FPS = true, Ping = true, Notifications = true, DebugConsole = false, Farm = true },
+    Cheat = {
+        AutoFarm = false, AutoFarmSpeed = 50,
+        Flying = false, VerticalFly = true, FlyMode = "Fixed", FlyNoclip = false, ViewLock = true,
+        Speed = 100, SpeedHack = { Enabled = false, Value = 16 },
+        InfiniteJump = false, InfiniteJumpHold = true, Noclip = false, NoclipRestore = true,
+        -- [ v54 ] InfiniteJumpHold
+        -- [ v54 ] NoclipRestore
+        -- [ v31 ] SmartJump
+        AutoBhop = { Enabled = false, Speed = 80, AutoStrafe = false, JumpBoost = true, SmartJump = true, ShowSpeed = false },
+        GameStateDump = false,  -- [ v31 ] разовый дамп ReplicatedStorage.Database.Components.GameState в F9
+        NoFallDamage = false,
+        Highjump = { Enabled = false, Value = 50 },
+        DebugPath = true, PathColor = Color3.fromRGB(123, 97, 255)
+    },
+    GoldFarm = { Enabled = false, Speed = 150, CollectDelay = 0.5, WashDelay = 3 },
+    PathSystem = { Speed = 100, RecordInterval = 0.2, Recording = false, Playing = false, SelectedPath = nil },
+    CarCrushers = { AutoFarm = false, AutoBuy = true, CrusherName = "Pressure Pit", TargetCFrame = CFrame.new(205.893, 81.322, -532.979) },
+    WarTycoonFarm = { Enabled = false, Speed = 200, Noclip = false, TargetCFrameStr = "CFrame.new(0, 0, 0)" },
+    VehiclesFarm = { Enabled = false, AutoSpawn = true, Vehicle = "MRZR Buggy", TpAfterSpawn = false, TpCoords = "", TpDelay = 1.0 },
+    WarTycoonBuild = {
+        Enabled = false,
+        Priority = "Money",  -- Money / House / Yard / Bunker / Cheapest
+        Hover = 1.5,  -- studs ABOVE the pad top (main fix
+        Delay = 0.35,  -- pause after TP (sec)
+        Attempts = 3,  -- tries per pad
+        AutoCollect = true,  -- auto-collect cash at the Cash Collector
+        CollectWhenShort = true,  -- collect only when cash is short for the next pad
+        CollectFallback = 15,  -- fallback collect interval (sec) when prices are unknown
+        AutoRebirth = true,  -- rebirth when no pads are left
+        FireTouch = false,  -- firetouchinterest assist (if the executor supports it)
+        IgnoreShield = true,  -- never buy the Shield Generator (removes the spawn shield)
+        -- [ v54 ] reliability & limits
+        VerifyTp = true,  -- detect a server-side TP rollback and react to it
+        WalkFallback = true,  -- walk to the pad when the teleport keeps bouncing back
+        WalkSpeed = 80,  -- temporary walk speed used while walking to a pad
+        MaxSpend = 0,  -- stop after spending this much (0 = unlimited)
+        StopAfterRebirths = 0,  -- stop after N rebirths (0 = unlimited)
+        ReportFile = true,  -- write a session report to Overmind/logs/
+    },
+    SpawnSniffer = false,
+    -- [ v54 ] Community badge (see Server/badge/)
+    Badge = {
+        Enabled = false,
+        Endpoint = "https://site-f8cb0f2505414f00a5c0892490f3376d.freebuff.page/api/presence",
+        Logo = "rbxassetid://10723352321",
+        Size = 1,
+        ShowName = true,
+        IncludeSelf = false,
+        PollSeconds = 6,
+        OnlySameServer = true,
+        Color = Color3.fromRGB(123, 97, 255),
+    },
+    -- [ v65 ] Друзья: присутствие через свой Node-сервис (см. Server/)
+    Friends = {
+        Enabled = false,
+        Endpoint = "http://node4.waifly.com:25088",
+        AuthKey = "",
+        PushSeconds = 25,
+        PollSeconds = 20,
+        ShowOffline = true,
+        List = {},
+        Names = {},
+    },
+    PopForFree = {
+        Enabled = false,
+        GlassDelay = 0.25,
+        AntiAfk = true,
+        Cooldown = 2.6,
+        SpecialStepWait = 1.2,
+        SpecialTweenTime = 0.5,
+        SpecialPortalTimeout = 20,
+        SpecialLevelRetries = 3,
+        SpecialPostClearWait = 0.8
+    },
+
+    -- [COMBAT INTEGRATION]
+    Combat = {
+        Memesense = {
+            Enabled = false,
+            Keybind = Enum.KeyCode.None,
+            AimbotEnabled = false,
+            VisibleCheck = false,
+            Hitbox = "Head",
+            Triggerbot = false,
+            TriggerbotDelay = 0.01,
+            CubeChecker = false,
+            CubeColor = Color3.fromRGB(255, 0, 0),
+            CubeRainbow = false,
+            CubeSize = 1.5,
+            MaxRayDist = 20,
+            ShowTargetPlayer = false,
+            TargetDisplayMode = "Crosshair",
+            LineColor = Color3.fromRGB(0, 255, 255),
+            CrosshairColor = Color3.fromRGB(0, 255, 255),
+            ShowPenetration = false
+        },
+        SilentAim = {
+            Enabled = false,
+            Wallbang = false,
+            ShowFOV = false,
+            FOVColor = Color3.fromRGB(255, 0, 0),
+            FieldOfView = 50,
+            Hitbox = "Head",
+            TeamCheck = true
+        },
+        Ragebot = {
+            Enabled = false,
+            AutoShoot = true,
+            -- [ v34 ] AUTO FIRE
+            AutoVisible = true,
+            MinDamage = 25,
+            Hitchance = 50,
+            HitSamples = 9,
+            -- Урон оружия
+            Damage = 30,
+            HeadMult = 4,
+            BodyMult = 1,
+            LimbMult = 0.75,
+            Delay = 0.01,
+            Hitbox = "Head",
+            VisibleCheck = true,
+            TeamCheck = true,
+            WallCheck = false,
+            PriorityTarget = "[ AUTO ]",
+            ShowFOV = false,
+            FieldOfView = 800,
+            FOVColor = Color3.fromRGB(255, 255, 255)
+        },
+        AntiAim = {
+            Enabled = false,
+            -- [ v30 ] Как применять углы
+            Method = "Auto",
+            -- [ v33 ] КОМПЕНСАЦИЯ ДВИЖЕНИЯ
+            MoveComp = true,
+            PauseWhileShooting = true,  -- не подменять взгляд пока держишь ЛКМ (чтобы выстрелы шли точно)
+            -- [ v31 ] Отзеркалить AA на полученном уроне
+            TriggerOnDamage = false,
+            TriggerTime = 0.25,
+            TriggerSpin = 120,  -- амплитуда рывка в градусах
+            PitchSpoof = true,  -- [ v31 ] подменять и вертикальный угол (VerticalLook) в командах
+            DisableKey = Enum.KeyCode.CapsLock,  -- удерживай
+            Condition = "Standing",  -- "Standing"
+            YawBase = "Local View",  -- "Local View"
+            Pitch = "Down",  -- "Down", "Up", "Zero", "Jitter", "Random"
+            YawMode = "Backward",  -- "Backward"
+            YawOffset = 0,
+            JitterEnabled = true,
+            JitterMode = "Offset",  -- "Offset"
+            JitterRange = 45,
+            SpinSpeed = 360,
+            Desync = {
+                Enabled = false,
+                Amount = 58,
+                Invert = false,
+                InvertKey = Enum.KeyCode.F,
+                LBO = true,
+                Freestanding = true
+            },
+            Manuals = {
+                Enabled = true,
+                Active = "None",
+                LeftKey = Enum.KeyCode.Z,
+                RightKey = Enum.KeyCode.C,
+                BackKey = Enum.KeyCode.X,
+                ResetKey = Enum.KeyCode.V
+            },
+            Conditions = {
+                Standing = { Pitch = "Down", YawMode = "Backward", JitterMode = "Offset", JitterRange = 45 },
+                Moving = { Pitch = "Down", YawMode = "Jitter", JitterMode = "Offset", JitterRange = 30 },
+                Air = { Pitch = "Jitter", YawMode = "Spinbot", JitterMode = "Random", JitterRange = 60 },
+                Crouching = { Pitch = "Down", YawMode = "Backward", JitterMode = "Center", JitterRange = 25 },
+                SlowWalk = { Pitch = "Down", YawMode = "Backward", JitterMode = "Offset", JitterRange = 50 }
+            }
+        },
+        Triggerbot = { Enabled = false, Delay = 0.01 },
+        WeaponMods = {
+            NoRecoil = false,
+            NoSpread = false,
+            NoFlash = false,
+            NoSmoke = false,
+            InstantReload = false,
+            InfAmmo = false,
+            FireRateMultiplier = 1,
+            RapidFire = false,
+            HoldToFire = false,
+            HoldFireDelay = 0.05
+        },
+        ESP = {
+            Enabled = false,
+            Drones = false,
+            OilBarrels = false,
+            ShowTeammates = false,
+            Colors = {
+                Drones = Color3.fromRGB(255, 255, 255),
+                Oil = Color3.fromRGB(255, 200, 0)
+            },
+            Transparencies = {
+                Drones = 0.4,
+                Oil = 0.4
+            }
+        }
+    },
+
+    -- [VISUALS INTEGRATION (Drawing API)]
+    Visuals = {
+        ESP = {
+            Enabled = false,
+            TeamCheck = true,
+            ShowTeammates = false,
+            -- [ v32 ] ESP после смерти (в наблюдателях)
+            SpectatorESP = false,
+            Box = { Enabled = false, Type = "2D Box", ColorA = Color3.fromRGB(255, 255, 255), ColorB = Color3.fromRGB(0, 200, 255), Fill = false, FillGradient = false, FillColorA = Color3.fromRGB(255, 0, 0), FillColorB = Color3.fromRGB(0, 0, 255), FillRotation = false, RotationSpeed = 2, Transparency = 0.5 },
+            Names = { Enabled = false, Color = Color3.fromRGB(255, 255, 255) },
+            HealthBar = { Enabled = false, TopColor = Color3.fromRGB(0, 255, 0), BottomColor = Color3.fromRGB(255, 0, 0) },
+            HealthText = { Enabled = false, Color = Color3.fromRGB(255, 255, 255) },
+            Distance = { Enabled = false, Color = Color3.fromRGB(255, 255, 255) },
+            Weapon = { Enabled = false, Color = Color3.fromRGB(255, 255, 255), ShowIcon = false },
+            Tracers = { Enabled = false, ColorA = Color3.fromRGB(255, 255, 255), ColorB = Color3.fromRGB(255, 0, 255), Origin = "Bottom" },
+            Skeleton = { Enabled = false, ColorA = Color3.fromRGB(255, 255, 255), ColorB = Color3.fromRGB(0, 255, 255) },
+            TargetIndicator = { Enabled = false, Type = "Circular", Color = Color3.fromRGB(255, 200, 0) }
+        },
+        UniversalESP = {
+            Enabled = false,
+            TeamCheck = true,
+            Box = true,
+            Names = true,
+            Health = true,
+            Distance = true,
+            Tracers = true,
+            Skeleton = true,
+            Color = Color3.fromRGB(255, 255, 255)
+        },
+        Chams = {
+            Enabled = false,
+            TeamCheck = true,
+            -- Outline: тумблер отдельной обводки
+            Visible = { Enabled = true, Material = "Neon", Color = Color3.fromRGB(0, 255, 0), FillTransparency = 0.3, Outline = true, OutlineColor = Color3.fromRGB(0, 255, 0), OutlineTransparency = 0 },
+            Unvisible = { Enabled = true, Material = "Metal", Color = Color3.fromRGB(255, 0, 0), FillTransparency = 0.3, Outline = true, OutlineColor = Color3.fromRGB(255, 0, 0), OutlineTransparency = 0 }
+        },
+        UniversalChams = {
+            Enabled = false,
+            TeamCheck = true,
+            Color = Color3.fromRGB(0, 255, 255),
+            Outline = true,
+            FillTransparency = 0.4
+        },
+        WeaponChams = {
+            Enabled = false,
+            Color = Color3.fromRGB(0, 150, 255),
+            Material = "Glass",
+            Transparency = 0.4,
+            Reflectance = 1
+        },
+        World = {
+            Enabled = false,
+            Skybox = { Enabled = false, Preset = "Night" },
+            Weather = "None",
+            Time = { Enabled = false, Value = 12 },
+            Brightness = { Enabled = false, Value = 2 },
+            Colors = { Enabled = false, Ambient = Color3.fromRGB(100, 100, 100), Outdoor = Color3.fromRGB(100, 100, 100) },
+            NightMode = { Enabled = false, ColorA = Color3.fromRGB(255, 255, 255), ColorB = Core.Local.Player.Character and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(255, 255, 255) },
+            WorldColor = { Enabled = false, Color = Color3.fromRGB(255, 255, 255) },
+            SkyColor = { Enabled = false, Color = Color3.fromRGB(255, 255, 255) },
+            Ambient = { Custom = false, Color = Color3.fromRGB(255, 255, 255) },
+            Viewmodel = { Enabled = false, CustomOffsets = false, X = 0.2, Y = -0.155, Z = 0.075 }
+        },
+        Atmosphere = {
+            Enabled = false,
+            Density = 0.3,
+            Haze = 0,
+            Glare = 0,
+            ColorCorrection = { Enabled = false, Saturation = 0, Contrast = 0 }
+        },
+        Projectiles = {
+            Enabled = false,
+            BulletTracers = { Enabled = false, Color = Color3.fromRGB(0, 170, 255), Style = "Block", Rainbow = false, Time = 2 },
+            BulletImpacts = { Enabled = false, Color = Color3.fromRGB(255, 0, 0) },
+            GrenadeESP = {
+                Enabled = false,
+                Tracers = true,
+                Prediction = true,  -- [ v30 ] дуга предсказания броска (отдельно от трассеров)
+                Style = "Arc + Dots",  -- [ v30 ] "Arc + Dots"
+                TracerColor = Color3.fromRGB(255, 100, 0),
+                TracerColor2 = Color3.fromRGB(255, 60, 0),  -- [ v30 ] градиент
+                AutoCalibrate = true,  -- [ v31 ] измерить скорость реального броска и подставить в ThrowSpeed
+                ThrowSpeed = 90,  -- [ v30 ] скорость броска
+                GravityScale = 1,  -- [ v30 ] множитель гравитации дуги
+                SimStep = 0.04,  -- [ v30 ] шаг симуляции
+                Bounce = true,  -- [ v30 ] учитывать отскок гранаты
+                ImpactRadius = 7,  -- [ v30 ] радиус кольца на месте падения
+                DropLineHeight = 9,  -- [ v30 ] высота вертикальной планки (CS-style)
+                StartOffset = 1.5,  -- [ v30 ] отступ начала дуги от камеры
+                MolotovZone = true,
+                SmokeZone = true,
+                MolotovColor = Color3.fromRGB(255, 60, 0),
+                SmokeColor = Color3.fromRGB(180, 180, 180)
+            }
+        },
+        -- [ v31 ] Кто держит меня на прицеле
+        AimWarn = {
+            Enabled = false,
+            Color = Color3.fromRGB(255, 60, 60),
+            Angle = 25,  -- градусов
+            Distance = 220,  -- studs: на какой дистанции проверяем
+            Sound = true  -- короткий звук
+        },
+        -- [ v31 ] Лог урона и направление выстрела
+        DamageLog = {
+            Enabled = true,
+            MaxLines = 5,
+            Duration = 6,
+            ShowDirection = true,
+            FlashChams = true,
+            Sound = true
+        },
+        -- [ v31 ] Экранные индикаторы (Drawing)
+        Hud = { AntiAim = false, Speed = false },
+        Hitmarker = {
+            Enabled = false,
+            Style = "Cross",  -- "Cross", "Crosshair", "Circle", "Image"
+            Image = "RedHit",  -- имя PNG из репо (без .png)
+            Color = Color3.fromRGB(255, 255, 255),
+            Rainbow = false,
+            Duration = 2,
+            SpinSpeed = 720,
+            Size = 25,
+            Thickness = 2
+        },
+        CustomCamera = {
+            Enabled = false,
+            FOV = { Enabled = false, Value = 90 },
+            ThirdPerson = { Enabled = false, Distance = 10 }
+        },
+        Radar = { Enabled = false, Range = 150 },  -- CS-style радар
+        CustomScope = {
+            Enabled = false,
+            FOV = { Enabled = false, Value = 70 },
+            RemoveScope = false,
+            ShowScopeSniper = false,
+            -- [ ФИКС ] прежние дефолты (150/100px) рисовали гигантский крест; теперь CS-стиль
+            Crosshair = { Enabled = false, Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Length = 9, Gap = 4 }
+        }
+    },
+
+    -- [INVENTORY & MISC]
+    Inventory = {
+        Skins = { Enabled = false, KnifeID = 0, GloveID = 0 },
+        SkinChanger = { Enabled = false, Skins = {} },
+        KnifeChanger = { Enabled = false, Model = "Skeleton Knife" },
+        GloveChanger = { Enabled = false, Gloves = {}, Model = "Sports Gloves", Skin = "Default" },
+        HitSound = { Enabled = false, Volume = 1, Preset = "Default", Hitboxes = { ["Head"] = true, ["Torso"] = true, ["Arms"] = true, ["Legs"] = true } },
+        KillSound = { Enabled = false, Volume = 1, Preset = "Default" },
+        KillSay = { Enabled = false, Messages = "ez, 1, too easy, ???", TeamCheck = true, Delay = 0.15 }
+    },
+
+    -- [UI THEMING]
+    Theme = {
+        Dark = true, Opacity = 0, Blur = 15, Dim = 0,
+        Bind = Enum.KeyCode.RightShift,
+        Accent = Color3.fromRGB(123, 97, 255),
+        Accent2 = Color3.fromRGB(160, 100, 255),
+        AnimType = "Spin",
+        AnimSpeed = 1.0,
+        UISounds = true,
+        UISoundPreset = "Click",
+        UISoundVolume = 1.0,
+        ModuleSounds = true,  -- звук вкл/выкл модулей (функций)
+        ModuleSoundEnable = "enable",
+        ModuleSoundDisable = "disable",
+        ModuleSoundVolume = 0.6,
+        KeybindList = true,  -- панель активных биндов/модулей в углу экрана
+        KeybindListPos = { X = 0.985, Y = 0.35 },  -- позиция панели (относительные)
+        SpectatorList = true,  -- панель «кто наблюдает за тобой»
+        SpectatorListPos = { X = 0.985, Y = 0.55 },  -- позиция панели (относительные)
+        Cursor = "Plus"  -- Plus | Small | Dot | Cross | Arrow | None
+    },
+    Themes = {
+        Sacred = {c1 = Color3.fromRGB(123, 97, 255), c2 = Color3.fromRGB(160, 100, 255)},
+        Blue = {c1 = Color3.fromRGB(0, 170, 255), c2 = Color3.fromRGB(0, 100, 255)},
+        Green = {c1 = Color3.fromRGB(0, 255, 150), c2 = Color3.fromRGB(0, 180, 50)},
+        Red = {c1 = Color3.fromRGB(255, 50, 50), c2 = Color3.fromRGB(150, 0, 0)}
+    },
+    ModuleBinds = {}
+}
+
+DefaultConfig = serialize(Config)
+Config.ModuleBinds = Config.ModuleBinds or {}
+State.ModuleBinds = Config.ModuleBinds
+
+-- Advanced Custom Color Palette Implementation
+local openPalette  -- Forward declaration
+
+-- [ CUSTOM MENU CURSOR ]
+do
+    local UISvc = game:GetService("UserInputService")
+    local RSvc = game:GetService("RunService")
+    local CURSOR_BINDING = "Overmind_MenuCursor"
+
+    Internal.MenuCursorGui = nil
+    Internal.MenuCursorRoot = nil
+    Internal.MenuCursorCross = nil
+    Internal.MenuCursorDot = nil
+    Internal.MenuCursorImage = nil
+
+    function Internal.BuildMenuCursor()
+        if Internal.MenuCursorGui and Internal.MenuCursorGui.Parent then return end
+        local ok, host = pcall(function() return gethui and gethui() or game:GetService("CoreGui") end)
+        if not ok or not host then host = Core.Local.Player:FindFirstChild("PlayerGui") end
+
+        -- Защита от сироты
+        pcall(function()
+            local orphan = host:FindFirstChild("Overmind_MenuCursor")
+            if orphan then orphan:Destroy() end
+        end)
+
+        local cg = Instance.new("ScreenGui")
+        cg.Name = "Overmind_MenuCursor"
+        cg.ResetOnSpawn = false
+        cg.IgnoreGuiInset = true
+        cg.DisplayOrder = 9999
+        pcall(function() cg.Parent = (ScreenGui and ScreenGui.Parent) or host end)
+        Internal.MenuCursorGui = cg
+
+        local root = Instance.new("Frame")
+        root.AnchorPoint = Vector2.new(0.5, 0.5)
+        root.BackgroundTransparency = 1
+        root.Size = UDim2.fromOffset(1, 1)
+        root.Visible = false
+        root.ZIndex = 11000
+        root.Parent = cg
+        Internal.MenuCursorRoot = root
+
+        -- [Plus-крест] 2 бара
+        local cross = Instance.new("Frame")
+        cross.AnchorPoint = Vector2.new(0.5, 0.5)
+        cross.BackgroundTransparency = 1
+        cross.Position = UDim2.fromScale(0.5, 0.5)
+        cross.Size = UDim2.fromOffset(11, 11)
+        cross.ZIndex = 11001
+        cross.Parent = root
+        Internal.MenuCursorCross = cross
+
+        local function bar(vertical)
+            local dark = Instance.new("Frame")
+            dark.AnchorPoint = Vector2.new(0.5, 0.5)
+            dark.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+            dark.BorderSizePixel = 0
+            dark.Position = UDim2.fromScale(0.5, 0.5)
+            dark.Size = vertical and UDim2.new(0, 3, 1, 0) or UDim2.new(1, 0, 0, 3)
+            dark.ZIndex = 11001
+            dark.Parent = cross
+
+            local inner = Instance.new("Frame")
+            inner.AnchorPoint = Vector2.new(0.5, 0.5)
+            inner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            inner.BorderSizePixel = 0
+            inner.Position = UDim2.fromScale(0.5, 0.5)
+            inner.Size = vertical and UDim2.new(0, 1, 1, -2) or UDim2.new(1, -2, 0, 1)
+            inner.ZIndex = 11002
+            inner.Parent = dark
+        end
+        bar(false)
+        bar(true)
+
+        -- [Dot] круглая точка
+        local dot = Instance.new("Frame")
+        dot.AnchorPoint = Vector2.new(0.5, 0.5)
+        dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        dot.BorderSizePixel = 0
+        dot.Position = UDim2.fromScale(0.5, 0.5)
+        dot.Size = UDim2.fromOffset(5, 5)
+        dot.Visible = false
+        dot.ZIndex = 11003
+        dot.Parent = root
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+        local dst = Instance.new("UIStroke", dot)
+        dst.Color = Color3.fromRGB(15, 15, 15)
+        dst.Thickness = 1
+        Internal.MenuCursorDot = dot
+
+        -- [Arrow] классическая стрелка
+        local img = Instance.new("ImageLabel")
+        img.AnchorPoint = Vector2.new(0.5, 0.5)
+        img.BackgroundTransparency = 1
+        img.Position = UDim2.fromScale(0.5, 0.5)
+        img.Size = UDim2.fromOffset(16, 16)
+        img.Image = "rbxassetid://10747371927"
+        img.Visible = false
+        img.ZIndex = 11003
+        img.Parent = root
+        Internal.MenuCursorImage = img
+    end
+
+    function Internal.SetMenuCursorStyle(styleId)
+        Config.Theme.Cursor = styleId or "None"
+        if not Internal.MenuCursorRoot then return end
+        local style = styleId or "None"
+        local cross = Internal.MenuCursorCross
+        cross.Visible = (style == "Plus" or style == "Small" or style == "Cross")
+        Internal.MenuCursorDot.Visible = (style == "Dot")
+        Internal.MenuCursorImage.Visible = (style == "Arrow")
+        if cross.Visible then
+            local size = (style == "Small" and 7) or (style == "Cross" and 15) or 11
+            cross.Size = UDim2.fromOffset(size, size)
+        end
+    end
+
+    function Internal.SetMenuCursorVisible(on)
+        if on then
+            if not Internal.MenuCursorGui or not Internal.MenuCursorGui.Parent then
+                Internal.BuildMenuCursor()
+            end
+            if not Internal.MenuCursorRoot then return end
+            pcall(function() RSvc:UnbindFromRenderStep(CURSOR_BINDING) end)
+            -- [ ОПТИМИЗАЦИЯ ] замыкание для pcall создаётся ОДИН раз
+            local setIcon = function(v) pcall(function() UISvc.MouseIconEnabled = v end) end
+            RSvc:BindToRenderStep(CURSOR_BINDING, Enum.RenderPriority.Last.Value, function()
+                if State.Unloading or not IsCurrentInstance() then return end
+                local menuOpen = (Internal.MainFrame and Internal.MainFrame.Visible) or false
+                if not menuOpen then
+                    -- при закрытом меню
+                    if Internal.MenuCursorRoot.Visible then
+                        Internal.MenuCursorRoot.Visible = false
+                        setIcon(true)
+                    end
+                    return
+                end
+                local m = UISvc:GetMouseLocation()
+                Internal.MenuCursorRoot.Position = UDim2.fromOffset(m.X, m.Y)
+                if not Internal.MenuCursorRoot.Visible then
+                    Internal.MenuCursorRoot.Visible = true
+                end
+                -- удерживаем системный курсор выключенным (игра может вернуть его каждый кадр)
+                if UISvc.MouseIconEnabled then setIcon(false) end
+            end)
+        else
+            pcall(function() RSvc:UnbindFromRenderStep(CURSOR_BINDING) end)
+            if Internal.MenuCursorRoot then Internal.MenuCursorRoot.Visible = false end
+            pcall(function() UISvc.MouseIconEnabled = true end)
+        end
+    end
+
+    function Internal.DestroyMenuCursor()
+        Internal.SetMenuCursorVisible(false)
+        if Internal.MenuCursorGui then
+            pcall(function() Internal.MenuCursorGui:Destroy() end)
+        end
+        Internal.MenuCursorGui, Internal.MenuCursorRoot, Internal.MenuCursorCross, Internal.MenuCursorDot, Internal.MenuCursorImage = nil, nil, nil, nil, nil
+    end
+end
+
+-- [ НОВОЕ: UI SOUNDS ]
+Internal.CELESTIAL_SOUND_PRESETS = {
+    {Id = "Click",  Sound = "rbxassetid://6042053626"},
+    {Id = "Ping",   Sound = "rbxasset://sounds/electronicpingshort.wav"},
+    {Id = "Switch", Sound = "rbxasset://sounds/switch.wav"},
+    {Id = "Button", Sound = "rbxasset://sounds/button.wav"},
+    {Id = "Snap",   Sound = "rbxasset://sounds/snap.mp3"},
+}
+
+Internal.CelestialPlaySound = function(kind)
+    if not Config.Theme.UISounds then return end
+    -- [ ОПТИМИЗАЦИЯ ] троттл ховеров
+    if kind == "hover" then
+        local now = os.clock()
+        if (Internal._lastHoverSound or 0) > now - 0.09 then return end
+        Internal._lastHoverSound = now
+    end
+    -- Активный пресет из конфига + модуляция вида события высотой тона и громкостью
+    local presetId = Config.Theme.UISoundPreset or "Click"
+    local base
+    for _, pr in ipairs(Internal.CELESTIAL_SOUND_PRESETS) do
+        if pr.Id == presetId then base = pr break end
+    end
+    base = base or Internal.CELESTIAL_SOUND_PRESETS[1]
+    local kindCfg = {
+        hover  = {vol = 0.05, speed = 1.6},
+        click  = {vol = 0.12, speed = 1.0},
+        toggle = {vol = 0.14, speed = 0.85},
+        open   = {vol = 0.18, speed = 0.7},
+    }
+    local p = kindCfg[kind] or kindCfg.click
+    task.spawn(function()
+        pcall(function()
+            local s = Instance.new("Sound")
+            s.SoundId = base.Sound
+            s.Volume = p.vol * (Config.Theme.UISoundVolume or 1.0)
+            s.PlaybackSpeed = p.speed
+            s.Parent = Core.Services.SoundService
+            s:Play()
+            s.Ended:Connect(function() s:Destroy() end)
+            task.delay(3, function() if s.Parent then s:Destroy() end end)
+        end)
+    end)
+end
+
+-- [ НОВОЕ: ЗВУКИ ВКЛ/ВЫКЛ МОДУЛЕЙ ] WAV из репо: папка EnableSounds/ → локально ...
+Internal.MODULE_SOUNDS = Internal.MODULE_SOUNDS or {}
+function Internal.RefreshModuleSounds()
+    table.clear(Internal.MODULE_SOUNDS)
+    if listfiles and getcustomasset then
+        local folder = AssetManager.EnableSoundsFolder
+        if isfolder(folder) then
+            for _, file in ipairs(listfiles(folder)) do
+                local fname = file:match("([^/\\]+)$") or file
+                local base = fname:lower():match("^(enable%d*)%.wav$") or fname:lower():match("^(disable%d*)%.wav$")
+                if base then
+                    pcall(function() Internal.MODULE_SOUNDS[base] = getcustomasset(file) end)
+                end
+            end
+        end
+    end
+end
+Internal.RefreshModuleSounds()
+
+-- Асинхронная докачка
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if Internal.MODULE_SOUNDS["enable"] then break end
+        task.wait(5)
+        if ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() then
+            pcall(function() Internal.RefreshModuleSounds() end)
+        end
+    end
+end)
+
+-- [ v62 ] Уведомление о переключении модуля (бинды/автоматика) в Dynamic Island
+Internal.ModuleIslandNotify = function(moduleName, isEnabled)
+    if not moduleName or not Internal.ShowIslandNotification then return end
+    pcall(function()
+        Internal.ShowIslandNotification(moduleName .. " " .. (isEnabled and "on" or "off"),
+            isEnabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0))
+    end)
+end
+
+Internal.PlayModuleSound = function(enabled)
+    if not Config.Theme.ModuleSounds then return end
+    if not State.Loaded then return end
+    local name = enabled and (Config.Theme.ModuleSoundEnable or "enable") or (Config.Theme.ModuleSoundDisable or "disable")
+    local id = Internal.MODULE_SOUNDS[name]
+    if not id then
+        -- фолбэк: если выбранного нет
+        id = Internal.MODULE_SOUNDS[enabled and "enable" or "disable"]
+    end
+    if not id then return end
+    task.spawn(function()
+        pcall(function()
+            local s = Instance.new("Sound")
+            s.SoundId = id
+            s.Volume = (Config.Theme.ModuleSoundVolume or 0.6)
+            s.Parent = Core.Services.SoundService
+            s:Play()
+            s.Ended:Connect(function() s:Destroy() end)
+            task.delay(5, function() if s.Parent then s:Destroy() end end)
+        end)
+    end)
+end
+
+-- [ НОВОЕ: унифицированный хелпер ховера ]
+Internal.CelestialBindHover = function(btn)
+    if btn and btn:IsA("GuiObject") then
+        btn.MouseEnter:Connect(function() Internal.CelestialPlaySound("hover") end)
+    end
+end
+
+Internal.createSettingRow = function(parent, name)
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, 0, 0, 36)
+    Row.BackgroundTransparency = 1
+    Row.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -50, 1, 0)  -- Give more space by default
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = Color3.fromRGB(200, 200, 220)
+    Label.TextSize = 13
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.TextTruncate = Enum.TextTruncate.AtEnd  -- Keep truncation but with more space
+    Label.Parent = Row
+
+    return Row
+end
+
+Internal.createKeybind = function(parent, name, default, callback)
+    local Row = Internal.createSettingRow(parent, name)
+    local BindBtn = Instance.new("TextButton")
+    BindBtn.Size = UDim2.new(0.4, 0, 0, 26)
+    BindBtn.Position = UDim2.new(0.6, 0, 0.5, -13)
+    BindBtn.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    BindBtn.Text = (default and default.Name) or "NONE"
+    BindBtn.TextColor3 = Theme.Text
+    BindBtn.TextSize = 12
+    BindBtn.Font = Enum.Font.GothamMedium
+    BindBtn.Parent = Row
+    Instance.new("UICorner", BindBtn).CornerRadius = UDim.new(0, 6)
+    local s = Instance.new("UIStroke", BindBtn)
+    s.Color = Config.Theme.Accent
+    s.Thickness = 1
+    table.insert(Internal.UIObjects.Accents, s)
+
+    local bindConn
+    BindBtn.MouseButton1Click:Connect(function()
+        if bindConn then bindConn:Disconnect() end
+        BindBtn.Text = "..."
+        bindConn = Core.UserInputService.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Keyboard then
+                BindBtn.Text = input.KeyCode.Name
+                callback(input.KeyCode)
+                bindConn:Disconnect()
+                bindConn = nil
+            end
+        end)
+    end)
+
+    -- Фикс визуального обновления текста при загрузке конфигов
+    if name == "Menu Toggle:" then
+        local oldConfig = Config.Theme.Bind
+        task.spawn(function()
+            while task.wait(0.5) do
+                if State.Unloading then break end
+                if Config.Theme.Bind ~= oldConfig then
+                    oldConfig = Config.Theme.Bind
+                    BindBtn.Text = (Config.Theme.Bind and Config.Theme.Bind.Name) or "RIGHTSHIFT"
+                end
+            end
+        end)
+    end
+end
+
+Internal.createiOSSwitch = function(parent, default, callback, title, desc, isSubSetting)
+    local Switch = Instance.new("TextButton")
+    Switch.Name = "iOS_Switch"
+    Switch.Size = UDim2.new(0, 40, 0, 20)
+    Switch.Position = UDim2.new(1, -45, 0.5, -10)
+    Switch.BackgroundColor3 = default and Config.Theme.Accent or Color3.fromRGB(35, 36, 48)
+    Switch.Text = ""
+    Switch.AutoButtonColor = false
+    Switch.ZIndex = 10
+    Switch.Parent = parent
+    Instance.new("UICorner", Switch).CornerRadius = UDim.new(1, 0)
+    table.insert(Internal.UIObjects.Accents, Switch)
+
+    local Knob = Instance.new("Frame")
+    Knob.Size = UDim2.new(0, 16, 0, 16)
+    Knob.Position = default and UDim2.new(1, -20, 0.5, -8) or UDim2.new(0, 4, 0.5, -8)
+    Knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Knob.ZIndex = 10
+    Knob.Parent = Switch
+    Instance.new("UICorner", Knob).CornerRadius = UDim.new(1, 0)
+
+    local active = default
+    local function updateVisuals(anim)
+        Switch:SetAttribute("IsActive", active)
+        if parent and parent:IsA("GuiObject") then
+            parent:SetAttribute("IsActive", active)
+        end
+        local time = anim and 0.3 or 0
+        local switchTarget = {BackgroundColor3 = active and Config.Theme.Accent or Color3.fromRGB(35, 36, 48)}
+        local knobTarget = {Position = active and UDim2.new(1, -20, 0.5, -8) or UDim2.new(0, 4, 0.5, -8)}
+        if anim then
+            Core.TweenService:Create(Switch, TweenInfo.new(time), switchTarget):Play()
+            Core.TweenService:Create(Knob, TweenInfo.new(time), knobTarget):Play()
+            if title then Core.TweenService:Create(title, TweenInfo.new(time), {TextTransparency = active and 0 or 0.5}):Play() end
+            if desc then Core.TweenService:Create(desc, TweenInfo.new(time), {TextTransparency = active and 0.4 or 0.8}):Play() end
+        else
+            Switch.BackgroundColor3 = switchTarget.BackgroundColor3
+            Knob.Position = knobTarget.Position
+            if title then title.TextTransparency = active and 0 or 0.5 end
+            if desc then desc.TextTransparency = active and 0.4 or 0.8 end
+        end
+    end
+
+    local function setState(newState, runCallback, force)
+        if active == newState and not force then return end
+        active = newState
+        updateVisuals(true)
+        if runCallback and callback then
+            pcall(function() callback(active) end)
+        end
+    end
+
+    local function toggle()
+        active = not active
+        updateVisuals(true)
+        Internal.CelestialPlaySound("toggle")
+        if callback then callback(active) end
+        if not isSubSetting and Internal.ShowIslandNotification then
+            local notifyTitle = (title and title.Text) or parent.Name or "Unknown"
+            Internal.ShowIslandNotification(notifyTitle .. " " .. (active and "on" or "off"), active and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0))
+        end
+    end
+    Switch.MouseButton1Click:Connect(toggle)
+    updateVisuals(false)
+    return { Toggle = toggle, Set = setState }
+end
+
+
+Internal.createSubCard = function(parent)
+    local Card = Instance.new("Frame")
+    Card.Size = UDim2.new(1, 0, 0, 0)
+    Card.BackgroundColor3 = Color3.fromRGB(15, 16, 23)
+    Card.BorderSizePixel = 0
+    Card.AutomaticSize = Enum.AutomaticSize.Y
+    Card.Parent = parent
+    Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
+    local Stroke = Instance.new("UIStroke", Card)
+    Stroke.Color = Color3.fromRGB(30, 31, 45)
+    Stroke.Thickness = 1
+    local Padding = Instance.new("UIPadding", Card)
+    Padding.PaddingTop, Padding.PaddingBottom, Padding.PaddingLeft, Padding.PaddingRight = UDim.new(0, 10), UDim.new(0, 10), UDim.new(0, 12), UDim.new(0, 12)
+    local Layout = Instance.new("UIListLayout", Card)
+    Layout.Padding = UDim.new(0, 10)
+    Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    return Card
+end
+
+Internal.createSlider = function(parent, name, min, max, default, callback, displayFunc, opts)
+    -- [ v64 ] ЖИВОЙ СЛАЙДЕР: горизонтальная дорожка + вертикальная риска-индикатор, число сразу после неё.
+    -- Восьмой аргумент opts (число или таблица) расширяет поведение:
+    --   opts = 0.1                          -> шаг значения, подпись становится дробной (7.1 / 1.5 / 0.4)
+    --   opts = { Step = 0.1 }               -> то же самое
+    --   opts = { Step = 0.1, Curve = 2.2 }  -> нелинейная шкала: у малых значений дорожка растянута,
+    --                                          поэтому скорость можно выставить точно (7.1, а не рывками по 20)
+    -- Без opts слайдер ведёт себя как раньше: целые значения, линейная шкала.
+    local step, curve = 1, 1
+    if type(opts) == "number" then
+        step = opts
+    elseif type(opts) == "table" then
+        step = opts.Step or 1
+        curve = opts.Curve or 1
+    end
+    if type(step) ~= "number" or step <= 0 then step = 1 end
+    if type(curve) ~= "number" or curve <= 0 then curve = 1 end
+
+    -- [ v74 ] Единица измерения для подписи: opts = { Unit = "ms" } рисует «267.5 ms»,
+    -- как в макете Designes/slider_bar.html. Без Unit подпись прежняя, без хвоста.
+    local unit = (type(opts) == "table" and tostring(opts.Unit or "")) or ""
+
+    -- Сколько знаков после точки показывать: шаг 0.5 -> один знак, шаг 0.05 -> два
+    local decimals = 0
+    if step < 1 then
+        decimals = (math.abs(step * 10 - math.round(step * 10)) < 1e-9) and 1 or 2
+    end
+
+    local span = max - min
+    if span == 0 then span = 1 end
+
+    -- [ ФИКС ] Значение из конфига могло быть nil или за пределами диапазона
+    local startValue = math.clamp(tonumber(default) or min, min, max)
+
+    local function formatValue(v)
+        if displayFunc then return displayFunc(v) end
+        if decimals == 0 then return tostring(math.round(v)) end
+        return string.format("%." .. decimals .. "f", v)
+    end
+
+    -- Шкала: доля дорожки <-> значение. Curve = 1 -> линейно.
+    local function relToValue(rel)
+        return min + span * (rel ^ curve)
+    end
+
+    local function valueToRel(v)
+        return math.clamp((v - min) / span, 0, 1) ^ (1 / curve)
+    end
+
+    -- Округление к шагу + чистка хвостов float (7.3000000000000018 -> 7.3)
+    local function snapValue(v)
+        local q = math.floor((v - min) / step + 0.5) * step + min
+        q = math.clamp(q, min, max)
+        if decimals > 0 then
+            local mult = 10 ^ decimals
+            q = math.round(q * mult) / mult
+        end
+        return q
+    end
+
+    local Container = Instance.new("Frame")
+    Container.Size = UDim2.new(1, 0, 0, 45); Container.BackgroundTransparency = 1; Container.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -118, 0, 16); Label.BackgroundTransparency = 1; Label.Text = name; Label.TextColor3 = Color3.fromRGB(226, 232, 240); Label.TextSize = 11; Label.Font = Enum.Font.GothamMedium; Label.TextXAlignment = Enum.TextXAlignment.Left; Label.TextTruncate = Enum.TextTruncate.AtEnd; Label.Parent = Container
+
+    -- [ v74 ] Подпись значения: число + единица измерения мелким серым, как в макете.
+    local Value = Instance.new("TextLabel")
+    Value.Size = UDim2.new(0, 64, 0, 16); Value.BackgroundTransparency = 1
+    Value.Position = UDim2.new(1, unit ~= "" and -88 or -24, 0, 0)
+    Value.Text = formatValue(snapValue(startValue))
+    Value.TextColor3 = Color3.new(1, 1, 1); Value.TextSize = 11; Value.Font = Enum.Font.GothamBold; Value.TextXAlignment = Enum.TextXAlignment.Right; Value.Parent = Container
+
+    local Unit = Instance.new("TextLabel")
+    Unit.Size = UDim2.new(0, 24, 0, 16); Unit.Position = UDim2.new(1, -24, 0, 1); Unit.BackgroundTransparency = 1
+    Unit.Text = unit; Unit.Visible = unit ~= ""
+    Unit.TextColor3 = Color3.fromRGB(148, 163, 184); Unit.TextSize = 10; Unit.Font = Enum.Font.GothamBold
+    Unit.TextXAlignment = Enum.TextXAlignment.Right; Unit.Parent = Container
+
+    -- Дорожка: тонкая тёмная полоса 4px без рамки
+    local Track = Instance.new("Frame")
+    Track.Size = UDim2.new(1, 0, 0, 4); Track.Position = UDim2.new(0, 0, 0, 33); Track.BackgroundColor3 = Color3.fromRGB(22, 26, 38); Track.Parent = Container
+    Instance.new("UICorner", Track).CornerRadius = UDim.new(1, 0)
+
+    local Fill = Instance.new("Frame")
+    Fill.Name = "Fill"  -- updateAccentTheme перекрашивает акцентные элементы по имени
+    Fill.Size = UDim2.new(valueToRel(startValue), 0, 1, 0)
+    Fill.BackgroundColor3 = Config.Theme.Accent; Fill.Parent = Track
+    Fill.ClipsDescendants = true
+    Instance.new("UICorner", Fill).CornerRadius = UDim.new(1, 0)
+    table.insert(Internal.UIObjects.Accents, Fill)
+
+    local fillGrad = Instance.new("UIGradient", Fill)
+    -- [ ВАЖНО ] Имя намеренно не "Fill": перекраска акцента для "Fill" задаёт BackgroundColor3,
+    -- а у UIGradient такого свойства нет - упал бы весь цикл перекраски (он в pcall).
+    -- [ v74 ] Градиент вдоль полосы (как в макете): индиго -> фиолетовый.
+    fillGrad.Name = "SliderGrad"
+    fillGrad.Rotation = 0
+    table.insert(Internal.UIObjects.Accents, fillGrad)
+
+    -- Блик, пробегающий по заливке при наведении и перетаскивании
+    local Shine = Instance.new("Frame")
+    Shine.Name = "Shine"
+    Shine.Size = UDim2.new(0.45, 0, 1, 0)
+    Shine.Position = UDim2.new(-0.6, 0, 0, 0)
+    Shine.BackgroundColor3 = Color3.new(1, 1, 1)
+    Shine.BackgroundTransparency = 0.82
+    Shine.BorderSizePixel = 0
+    Shine.ZIndex = 2
+    Shine.Parent = Fill
+
+    -- Кружок-ползунок (в макете — белая точка с фиолетовым свечением при наведении)
+    local ThumbGlow = Instance.new("Frame")
+    ThumbGlow.Name = "Indicator"      -- акцентные элементы по имени перекрашиваются темой
+    ThumbGlow.Size = UDim2.new(0, 10, 0, 10)
+    ThumbGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+    ThumbGlow.BackgroundColor3 = Config.Theme.Accent
+    ThumbGlow.BackgroundTransparency = 1
+    ThumbGlow.ZIndex = 3
+    ThumbGlow.Parent = Container
+    Instance.new("UICorner", ThumbGlow).CornerRadius = UDim.new(1, 0)
+    table.insert(Internal.UIObjects.Accents, ThumbGlow)
+
+    local Thumb = Instance.new("Frame")
+    Thumb.Name = "Thumb"
+    Thumb.Size = UDim2.new(0, 10, 0, 10)
+    Thumb.AnchorPoint = Vector2.new(0.5, 0.5)
+    Thumb.BackgroundColor3 = Color3.new(1, 1, 1)
+    Thumb.ZIndex = 4
+    Thumb.Parent = Container
+    Instance.new("UICorner", Thumb).CornerRadius = UDim.new(1, 0)
+
+    local thumbStroke = Instance.new("UIStroke", Thumb)
+    thumbStroke.Color = Config.Theme.Accent; thumbStroke.Thickness = 1; thumbStroke.Transparency = 0.6
+    table.insert(Internal.UIObjects.Accents, thumbStroke)
+
+    -- Всплывающая подсказка со значением над ползунком (только при наведении/перетаскивании)
+    local Popup = Instance.new("TextLabel")
+    Popup.Name = "ValuePopup"
+    Popup.AnchorPoint = Vector2.new(0.5, 1)
+    Popup.AutomaticSize = Enum.AutomaticSize.X
+    Popup.Size = UDim2.new(0, 0, 0, 18)
+    Popup.BackgroundColor3 = Color3.fromRGB(24, 28, 40)
+    Popup.Text = formatValue(snapValue(startValue)) .. (unit ~= "" and (" " .. unit) or "")
+    Popup.TextColor3 = Color3.new(1, 1, 1); Popup.TextSize = 11; Popup.Font = Enum.Font.GothamBold
+    Popup.Visible = false; Popup.ZIndex = 8; Popup.Parent = Container
+    Instance.new("UICorner", Popup).CornerRadius = UDim.new(0, 8)
+    local popupPad = Instance.new("UIPadding", Popup)
+    popupPad.PaddingLeft = UDim.new(0, 6); popupPad.PaddingRight = UDim.new(0, 6)
+    local popupStroke = Instance.new("UIStroke", Popup)
+    popupStroke.Color = Color3.new(1, 1, 1); popupStroke.Thickness = 1; popupStroke.Transparency = 0.82
+
+    -- Ловим мышь по всей полосе строки (раньше - только по 4px дорожки)
+    local Hit = Instance.new("TextButton")
+    Hit.Size = UDim2.new(1, 0, 0, 26); Hit.Position = UDim2.new(0, 0, 0, 24)
+    Hit.BackgroundTransparency = 1; Hit.Text = ""; Hit.AutoButtonColor = false; Hit.Selectable = false
+    Hit.ZIndex = 5; Hit.Parent = Container
+
+    local dragging = false
+    local hot = false
+    local animToken = 0
+
+    -- [ ФИКС ] Совмещение ползунка с концом полосы (раньше ширина вычиталась дважды и имена/кап обрезались)
+    local function placeTick()
+        local w = Track.AbsoluteSize.X
+        if w <= 0 then return end
+        local left = Track.AbsolutePosition.X - Container.AbsolutePosition.X
+        local x = math.round(left + w * Fill.Size.X.Scale)
+        local y = Track.Position.Y.Offset + 2      -- центр дорожки 4px
+        Thumb.Position = UDim2.new(0, x, 0, y)
+        ThumbGlow.Position = UDim2.new(0, x, 0, y)
+        Popup.Position = UDim2.new(0, x, 0, y - 4)
+    end
+
+    local function setVisual(rel)
+        Fill.Size = UDim2.new(rel, 0, 1, 0)
+        placeTick()
+    end
+
+    local function setValueText(v)
+        Value.Text = formatValue(v)
+        Popup.Text = Value.Text .. (unit ~= "" and (" " .. unit) or "")
+    end
+
+    -- [ v74 ] Всплеск у ползунка: пружина при наведении/перетаскивании, как в макете
+    local thumbTween
+    local function setThumbScale(scale, glow)
+        if thumbTween then thumbTween:Cancel() end
+        thumbTween = Core.TweenService:Create(Thumb,
+            TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+            { Size = UDim2.new(0, math.round(10 * scale), 0, math.round(10 * scale)) })
+        thumbTween:Play()
+        Core.TweenService:Create(ThumbGlow, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { Size = UDim2.new(0, math.round(10 * scale * 2.6), 0, math.round(10 * scale * 2.6)),
+              BackgroundTransparency = glow and 0.78 or 1 }):Play()
+    end
+
+    local bumpToken = 0
+    local function bumpValue()
+        bumpToken = bumpToken + 1
+        local token = bumpToken
+        Value.TextSize = 12
+        Value.TextColor3 = Config.Theme.Accent
+        task.delay(0.15, function()
+            if token ~= bumpToken or not Value.Parent then return end
+            Value.TextSize = 11
+            Value.TextColor3 = hot and Config.Theme.Accent or Color3.new(1, 1, 1)
+        end)
+    end
+
+    local function setHot(on)
+        Value.TextColor3 = on and Config.Theme.Accent or Color3.new(1, 1, 1)
+        thumbStroke.Transparency = on and 0.25 or 0.6
+        Track.BackgroundColor3 = on and Color3.fromRGB(28, 32, 46) or Color3.fromRGB(22, 26, 38)
+        Popup.Visible = on
+        setThumbScale(on and 1.75 or 1, on)
+    end
+
+    placeTick()
+    Fill:GetPropertyChangedSignal("Size"):Connect(placeTick)
+    Track:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeTick)
+    Container:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeTick)
+
+    -- Блик бегает по заливке, пока на неё смотрят или тянут
+    task.spawn(function()
+        while Thumb.Parent and not State.Unloading do
+            if hot and Fill.Parent then
+                Shine.Position = UDim2.new(-0.6, 0, 0, 0)
+                local sweep = Core.TweenService:Create(Shine,
+                    TweenInfo.new(1.1, Enum.EasingStyle.Linear), { Position = UDim2.new(1.1, 0, 0, 0) })
+                sweep:Play()
+                sweep.Completed:Wait()
+            else
+                task.wait(0.12)
+            end
+        end
+    end)
+
+    -- [ v74 ] Волна от нажатия по дорожке (в макете — click-ripple)
+    local function ripple(input)
+        local w = Track.AbsoluteSize.X
+        if w <= 0 then return end
+        local x = math.clamp(input.Position.X - Container.AbsolutePosition.X, 0, w)
+        local ring = Instance.new("Frame")
+        ring.Name = "Ripple"
+        ring.AnchorPoint = Vector2.new(0.5, 0.5)
+        ring.Size = UDim2.new(0, 8, 0, 8)
+        ring.Position = UDim2.new(0, x, 0, Track.Position.Y.Offset + 2)
+        ring.BackgroundColor3 = Config.Theme.Accent
+        ring.BackgroundTransparency = 0.45
+        ring.ZIndex = 2
+        ring.Parent = Container
+        Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+        local grow = Core.TweenService:Create(ring,
+            TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { Size = UDim2.new(0, 26, 0, 26), BackgroundTransparency = 1 })
+        grow:Play()
+        grow.Completed:Connect(function() ring:Destroy() end)
+    end
+
+    -- Плавный доезд полосы и счётчик числа при открытии панели.
+    -- Колбэк намеренно не вызывается: в конфиге уже лежит сохранённое значение.
+    task.defer(function()
+        local token = animToken
+        local target = valueToRel(startValue)
+        local steps = 12
+        for i = 1, steps do
+            if token ~= animToken or dragging or not Fill.Parent then return end
+            local ease = i / steps
+            local rel = target * (1 - (1 - ease) ^ 3)
+            setVisual(rel)
+            setValueText(snapValue(relToValue(rel)))
+            task.wait(0.018)
+        end
+        setVisual(target)
+        setValueText(snapValue(startValue))
+    end)
+
+    local function relFromInput(input)
+        local w = Track.AbsoluteSize.X
+        if w <= 0 then return nil end
+        return math.clamp((input.Position.X - Track.AbsolutePosition.X) / w, 0, 1)
+    end
+
+    local function applyInput(input)
+        local rel = relFromInput(input)
+        if not rel then return end
+        local val = snapValue(relToValue(rel))
+        setVisual(valueToRel(val))
+        setValueText(val)
+        bumpValue()
+        callback(val)
+    end
+
+    Hit.MouseEnter:Connect(function()
+        hot = true
+        setHot(true)
+    end)
+    Hit.MouseLeave:Connect(function()
+        hot = false
+        if not dragging then setHot(false) end
+    end)
+
+    Hit.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 or dragging then return end
+        dragging = true
+        animToken = animToken + 1
+        setHot(true)
+        ripple(input)
+        applyInput(input)
+
+        local moveConn, endConn
+        moveConn = Core.UserInputService.InputChanged:Connect(function(move)
+            if move.UserInputType == Enum.UserInputType.MouseMovement then applyInput(move) end
+        end)
+        endConn = Core.UserInputService.InputEnded:Connect(function(ended)
+            if ended.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+            if moveConn then moveConn:Disconnect() end
+            endConn:Disconnect()
+            dragging = false
+            setHot(hot)
+        end)
+    end)
+end
+
+Internal.createSelector = function(parent, text, options, current, callback)
+    local row = Internal.createSettingRow(parent, text)
+    row.ZIndex = 5  -- Ensure rows can layer
+
+    local SelectorFrame = Instance.new("Frame")
+    SelectorFrame.Name = "Selector"
+    SelectorFrame.Size = UDim2.new(0, 85, 0, 24)
+    SelectorFrame.Position = UDim2.new(1, -85, 0.5, -12)
+    SelectorFrame.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    SelectorFrame.ClipsDescendants = true  -- Support truncation clipping
+    SelectorFrame.Parent = row
+    Instance.new("UICorner", SelectorFrame).CornerRadius = UDim.new(0, 6)
+
+    local MainBtn = Instance.new("TextButton")
+    MainBtn.Size = UDim2.new(1, 0, 1, 0)
+    MainBtn.BackgroundTransparency = 1
+    MainBtn.Text = "  " .. (current or "Default")
+    MainBtn.TextColor3 = Color3.new(1, 1, 1)
+    MainBtn.Font = Enum.Font.GothamMedium
+    MainBtn.TextSize = 11
+    MainBtn.TextXAlignment = Enum.TextXAlignment.Left
+    MainBtn.TextTruncate = Enum.TextTruncate.AtEnd
+    MainBtn.Parent = SelectorFrame
+
+    local Chevron = Instance.new("ImageLabel")
+    Chevron.Size = UDim2.new(0, 10, 0, 10)
+    Chevron.Position = UDim2.new(1, -18, 0.5, -5)
+    Chevron.BackgroundTransparency = 1
+    Chevron.Image = "rbxassetid://6034818372"  -- Simple arrow icon
+    Chevron.ImageColor3 = Color3.fromRGB(150, 150, 170)
+    Chevron.Parent = SelectorFrame
+
+    local DropdownList = Instance.new("ScrollingFrame")
+    DropdownList.Size = UDim2.new(1, 0, 0, 0)
+    DropdownList.Position = UDim2.new(0, 0, 1, 5)
+    DropdownList.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
+    DropdownList.BorderSizePixel = 0
+    DropdownList.Visible = false
+    DropdownList.ZIndex = 100
+    DropdownList.ScrollBarThickness = 2
+    DropdownList.ScrollBarImageColor3 = Config.Theme.Accent
+    DropdownList.CanvasSize = UDim2.new(0, 0, 0, #options * 22)
+    DropdownList.Parent = SelectorFrame
+    Instance.new("UICorner", DropdownList).CornerRadius = UDim.new(0, 6)
+    local dStroke = Instance.new("UIStroke", DropdownList)
+    dStroke.Color = Config.Theme.Accent
+    dStroke.Transparency = 0.5
+    table.insert(Internal.UIObjects.Accents, dStroke)
+
+    local dLayout = Instance.new("UIListLayout")
+    dLayout.Parent = DropdownList
+
+    local isOpen = false
+    local function toggle(state)
+        if state == isOpen then return end
+        isOpen = state
+
+        if isOpen then
+            SelectorFrame.ClipsDescendants = false  -- Allow dropdown to overflow
+            DropdownList.Visible = true
+            row.ZIndex = 10  -- Bring row to front
+            Core.TweenService:Create(DropdownList, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, math.min(#options * 22, 110))}):Play()
+            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 180}):Play()
+        else
+            local tw = Core.TweenService:Create(DropdownList, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0)})
+            tw:Play()
+            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 0}):Play()
+            tw.Completed:Connect(function()
+                if not isOpen then
+                    DropdownList.Visible = false
+                    row.ZIndex = 5
+                    SelectorFrame.ClipsDescendants = true
+                end
+            end)
+        end
+    end
+
+    MainBtn.MouseButton1Click:Connect(function() toggle(not isOpen) end)
+
+    local function updateOptions(newOptions)
+        for _, v in ipairs(DropdownList:GetChildren()) do if v:IsA("TextButton") then v:Destroy() end end
+        for _, opt in ipairs(newOptions) do
+            local OptBtn = Instance.new("TextButton")
+            OptBtn.Size = UDim2.new(1, 0, 0, 22)
+            OptBtn.BackgroundColor3 = Color3.fromRGB(30, 31, 45)
+            OptBtn.BackgroundTransparency = 1
+            OptBtn.Text = "  " .. opt
+            OptBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+            OptBtn.Font = Enum.Font.GothamMedium
+            OptBtn.TextSize = 11
+            OptBtn.TextXAlignment = Enum.TextXAlignment.Left
+            OptBtn.TextTruncate = Enum.TextTruncate.AtEnd
+            OptBtn.Parent = DropdownList
+
+            OptBtn.MouseEnter:Connect(function()
+                Core.TweenService:Create(OptBtn, TweenInfo.new(0.2), {BackgroundTransparency = 0, TextColor3 = Color3.new(1, 1, 1)}):Play()
+            end)
+            OptBtn.MouseLeave:Connect(function()
+                Core.TweenService:Create(OptBtn, TweenInfo.new(0.2), {BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(180, 180, 200)}):Play()
+            end)
+
+            OptBtn.MouseButton1Click:Connect(function()
+                MainBtn.Text = "  " .. opt
+                callback(opt)
+                toggle(false)
+            end)
+        end
+        DropdownList.CanvasSize = UDim2.new(0, 0, 0, #newOptions * 22)
+    end
+
+    updateOptions(options)
+
+    return { Button = MainBtn, Update = updateOptions }
+end
+
+Internal.createMultiSelector = function(parent, text, options, currentConfig, callback)
+    local row = Internal.createSettingRow(parent, text)
+    row.ZIndex = 5
+
+    local SelectorFrame = Instance.new("Frame")
+    SelectorFrame.Name = "MultiSelector"
+    SelectorFrame.Size = UDim2.new(0, 110, 0, 24)
+    SelectorFrame.Position = UDim2.new(1, -110, 0.5, -12)
+    SelectorFrame.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    SelectorFrame.ClipsDescendants = true
+    SelectorFrame.Parent = row
+    Instance.new("UICorner", SelectorFrame).CornerRadius = UDim.new(0, 6)
+
+    local MainBtn = Instance.new("TextButton")
+    MainBtn.Size = UDim2.new(1, 0, 1, 0)
+    MainBtn.BackgroundTransparency = 1
+    MainBtn.Text = "  Select..."
+    MainBtn.TextColor3 = Color3.new(1, 1, 1)
+    MainBtn.Font = Enum.Font.GothamMedium
+    MainBtn.TextSize = 11
+    MainBtn.TextXAlignment = Enum.TextXAlignment.Left
+    MainBtn.TextTruncate = Enum.TextTruncate.AtEnd
+    MainBtn.Parent = SelectorFrame
+
+    local Chevron = Instance.new("ImageLabel")
+    Chevron.Size = UDim2.new(0, 10, 0, 10)
+    Chevron.Position = UDim2.new(1, -18, 0.5, -5)
+    Chevron.BackgroundTransparency = 1
+    Chevron.Image = "rbxassetid://6034818372"
+    Chevron.ImageColor3 = Color3.fromRGB(150, 150, 170)
+    Chevron.Parent = SelectorFrame
+
+    local DropdownList = Instance.new("ScrollingFrame")
+    DropdownList.Size = UDim2.new(1, 0, 0, 0)
+    DropdownList.Position = UDim2.new(0, 0, 1, 5)
+    DropdownList.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
+    DropdownList.BorderSizePixel = 0
+    DropdownList.Visible = false
+    DropdownList.ZIndex = 100
+    DropdownList.ScrollBarThickness = 2
+    DropdownList.ScrollBarImageColor3 = Config.Theme.Accent
+    DropdownList.CanvasSize = UDim2.new(0, 0, 0, #options * 22)
+    DropdownList.Parent = SelectorFrame
+    Instance.new("UICorner", DropdownList).CornerRadius = UDim.new(0, 6)
+    local dStroke = Instance.new("UIStroke", DropdownList)
+    dStroke.Color = Config.Theme.Accent
+    dStroke.Transparency = 0.5
+    table.insert(Internal.UIObjects.Accents, dStroke)
+
+    local dLayout = Instance.new("UIListLayout")
+    dLayout.Parent = DropdownList
+
+    local isOpen = false
+    local function toggle(state)
+        if state == isOpen then return end
+        isOpen = state
+
+        if isOpen then
+            SelectorFrame.ClipsDescendants = false
+            DropdownList.Visible = true
+            row.ZIndex = 10
+            Core.TweenService:Create(DropdownList, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, math.min(#options * 22, 110))}):Play()
+            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 180}):Play()
+        else
+            local tw = Core.TweenService:Create(DropdownList, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0)})
+            tw:Play()
+            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 0}):Play()
+            tw.Completed:Connect(function()
+                if not isOpen then
+                    DropdownList.Visible = false
+                    row.ZIndex = 5
+                    SelectorFrame.ClipsDescendants = true
+                end
+            end)
+        end
+    end
+
+    MainBtn.MouseButton1Click:Connect(function() toggle(not isOpen) end)
+
+    local function refreshDisplayText()
+        local selected = {}
+        for _, opt in ipairs(options) do
+            if currentConfig[opt] then
+                table.insert(selected, opt)
+            end
+        end
+        if #selected == 0 then
+            MainBtn.Text = "  None"
+        else
+            MainBtn.Text = "  " .. table.concat(selected, ", ")
+        end
+    end
+
+    for _, opt in ipairs(options) do
+        local OptBtn = Instance.new("TextButton")
+        OptBtn.Size = UDim2.new(1, 0, 0, 22)
+        OptBtn.BackgroundColor3 = Color3.fromRGB(30, 31, 45)
+        OptBtn.BackgroundTransparency = 1
+        OptBtn.Text = (currentConfig[opt] and "  [X] " or "  [ ] ") .. opt
+        OptBtn.TextColor3 = currentConfig[opt] and Color3.new(1, 1, 1) or Color3.fromRGB(180, 180, 200)
+        OptBtn.Font = Enum.Font.GothamMedium
+        OptBtn.TextSize = 11
+        OptBtn.TextXAlignment = Enum.TextXAlignment.Left
+        OptBtn.TextTruncate = Enum.TextTruncate.AtEnd
+        OptBtn.Parent = DropdownList
+
+        OptBtn.MouseButton1Click:Connect(function()
+            currentConfig[opt] = not currentConfig[opt]
+            OptBtn.Text = (currentConfig[opt] and "  [X] " or "  [ ] ") .. opt
+            OptBtn.TextColor3 = currentConfig[opt] and Color3.new(1, 1, 1) or Color3.fromRGB(180, 180, 200)
+            refreshDisplayText()
+            callback(opt, currentConfig[opt])
+        end)
+    end
+
+    refreshDisplayText()
+end
+
+Internal.createLabel = function(parent, text)
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, 0, 0, 20); Label.BackgroundTransparency = 1; Label.Text = text; Label.TextColor3 = Config.Theme.Accent; Label.TextSize = 11; Label.Font = Enum.Font.GothamBold; Label.TextXAlignment = Enum.TextXAlignment.Left; Label.Parent = parent
+    return Label
+end
+
+Internal.addColorSetting = function(parent, text, color, callback)
+    local row = Internal.createSettingRow(parent, text)
+    local cp = Instance.new("TextButton")
+    cp.Size = UDim2.new(0, 16, 0, 16); cp.Position = UDim2.new(1, -40, 0.5, -8); cp.BackgroundColor3 = color; cp.Text = ""; cp.Parent = row
+    Instance.new("UICorner", cp).CornerRadius = UDim.new(0, 4)
+    local s = Instance.new("UIStroke", cp); s.Color = Color3.new(1,1,1); s.Thickness = 1
+    table.insert(Internal.UIObjects.Accents, s)
+    cp.MouseButton1Click:Connect(function() openPalette(cp, callback) end)
+    return row
+end
+
+Internal.createInput = function(parent, name, default, callback)
+    local row = Internal.createSettingRow(parent, name)
+    local InputBox = Instance.new("TextBox")
+    InputBox.Size = UDim2.new(0, 70, 0, 26)
+    InputBox.Position = UDim2.new(1, -70, 0.5, -13)
+    InputBox.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    InputBox.Text = default and tostring(default) or ""
+    InputBox.TextColor3 = Theme.Text
+    InputBox.TextSize = 13
+    InputBox.Font = Theme.FontMedium
+    InputBox.Parent = row
+    Instance.new("UICorner", InputBox).CornerRadius = UDim.new(0, 6)
+    local stroke = Instance.new("UIStroke", InputBox)
+    stroke.Color = Theme.Separator
+    stroke.Thickness = 1.2
+    InputBox.FocusLost:Connect(function()
+        local val = tonumber(InputBox.Text)
+        if val then callback(val) else InputBox.Text = tostring(default) end
+    end)
+end
+
+Internal.createStringInput = function(parent, name, default, callback)
+    local row = Internal.createSettingRow(parent, name)
+    local InputBox = Instance.new("TextBox")
+    InputBox.Size = UDim2.new(0, 120, 0, 26)
+    InputBox.Position = UDim2.new(1, -120, 0.5, -13)
+    InputBox.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    InputBox.Text = default or ""
+    InputBox.TextColor3 = Theme.Text
+    InputBox.TextSize = 10
+    InputBox.Font = Theme.FontMedium
+    InputBox.Parent = row
+    InputBox.ClearTextOnFocus = false
+    Instance.new("UICorner", InputBox).CornerRadius = UDim.new(0, 6)
+    local stroke = Instance.new("UIStroke", InputBox)
+    stroke.Color = Theme.Separator
+    stroke.Thickness = 1.2
+    InputBox.FocusLost:Connect(function() callback(InputBox.Text) end)
+end
+
+Internal.createBindSubCard = function(parent, modName)
+    local sub = Internal.createSubCard(parent)
+    sub.Name = "BindSubCard"
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, 0, 0, 30); Row.BackgroundTransparency = 1; Row.Parent = sub
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.6, 0, 1, 0); Label.BackgroundTransparency = 1; Label.Text = "Keybind:"; Label.TextColor3 = Color3.fromRGB(200, 200, 210); Label.TextSize = 11; Label.Font = Enum.Font.GothamMedium; Label.TextXAlignment = Enum.TextXAlignment.Left; Label.Parent = Row
+    local BindBtn = Instance.new("TextButton")
+    BindBtn.Name = "ModuleBindBtn"; BindBtn.Size = UDim2.new(0, 70, 0, 26); BindBtn.Position = UDim2.new(1, -104, 0.5, -13); BindBtn.BackgroundColor3 = Color3.fromRGB(35, 36, 48); BindBtn.Text = (State and State.ModuleBinds and State.ModuleBinds[modName]) and (State.ModuleBinds[modName].Key and State.ModuleBinds[modName].Key.Name or State.ModuleBinds[modName].Name or "?") or "NONE"; BindBtn.TextColor3 = Color3.new(1,1,1); BindBtn.TextSize = 11; BindBtn.Font = Enum.Font.GothamBold; BindBtn.Parent = Row
+    Instance.new("UICorner", BindBtn).CornerRadius = UDim.new(0, 6)
+    -- [ НОВОЕ ] Крестик-анбинд
+    local UnbindBtn = Instance.new("TextButton")
+    UnbindBtn.Name = "UnbindBtn"; UnbindBtn.Size = UDim2.new(0, 26, 0, 26); UnbindBtn.Position = UDim2.new(1, -30, 0.5, -13); UnbindBtn.BackgroundColor3 = Color3.fromRGB(60, 28, 32); UnbindBtn.Text = "X"; UnbindBtn.TextColor3 = Color3.fromRGB(255, 120, 130); UnbindBtn.TextSize = 12; UnbindBtn.Font = Enum.Font.GothamBold; UnbindBtn.Parent = Row
+    Instance.new("UICorner", UnbindBtn).CornerRadius = UDim.new(0, 6)
+    local function updateLabels()
+        if not State or not State.ModuleBinds or not State.Modules then return end
+        local bind = State.ModuleBinds[modName]
+        local code = bind and (type(bind) == "table" and bind.Key or bind) or nil
+        local nameText = code and code.Name or "NONE"
+        BindBtn.Text = nameText
+        local data = State.Modules[modName]
+        if data then
+            if data.BindLabel then data.BindLabel.Text = "[" .. nameText .. "]" end
+        end
+    end
+    UnbindBtn.MouseButton1Click:Connect(function()
+        if State.ModuleBinds then State.ModuleBinds[modName] = nil end
+        updateLabels()
+    end)
+    BindBtn.MouseButton1Click:Connect(function()
+        if State.BindingModule == modName then State.BindingModule = nil updateLabels() else State.BindingModule = modName BindBtn.Text = "..." end
+    end)
+    -- [ v67 ] РЕЖИМ БИНДА: сегментный переключатель Toggle | Hold
+    -- Была одна кнопка, которая читала только bind.Mode: пока бинда нет, она всегда писала
+    -- "Toggle", и выбор Hold терялся на глазах (в Island уходило "Hold", а на кнопке оставалось
+    -- "Toggle"). Теперь запасное состояние — State.BindingMode, то есть то же, из чего берётся режим
+    -- при назначении клавиши. Смена анимирована: пилюля уезжает с пружинкой, её цвет догоняет
+    -- движение, надписи перекрещиваются, по пилюле пробегает блик.
+    local MODE_W, MODE_H = 124, 26          -- дорожка (в ряд 316 px влезает свободно)
+    local MODE_PILL_W, MODE_PILL_H = 59, 20 -- половина под одно слово
+    local MODE_PAD = 3
+    local MODE_X_HOLD = MODE_PAD + MODE_PILL_W
+    local MODE_AMBER = Color3.fromRGB(255, 176, 60)   -- тот же янтарь, что у пилюли HOLD в Keybind List
+    local MODE_AMBER_DARK = Color3.fromRGB(38, 24, 6)
+    local MODE_AMBER_DEEP = Color3.fromRGB(255, 150, 30)
+
+    local modeRow = Instance.new("Frame")
+    modeRow.Size = UDim2.new(1, 0, 0, MODE_H); modeRow.BackgroundTransparency = 1; modeRow.Parent = sub
+    local modeLabel = Instance.new("TextLabel")
+    modeLabel.Size = UDim2.new(0.6, 0, 1, 0); modeLabel.BackgroundTransparency = 1; modeLabel.Text = "Bind Mode:"; modeLabel.TextColor3 = Color3.fromRGB(200, 200, 210); modeLabel.TextSize = 11; modeLabel.Font = Enum.Font.GothamMedium; modeLabel.TextXAlignment = Enum.TextXAlignment.Left; modeLabel.Parent = modeRow
+
+    local modeBtn = Instance.new("TextButton")
+    modeBtn.Name = "BindModeBtn"
+    modeBtn.Size = UDim2.fromOffset(MODE_W, MODE_H)
+    modeBtn.Position = UDim2.new(1, -(MODE_W + 4), 0.5, -MODE_H / 2)
+    modeBtn.BackgroundColor3 = Color3.fromRGB(23, 24, 32)   -- дорожка
+    modeBtn.Text = ""
+    modeBtn.AutoButtonColor = false
+    modeBtn.Parent = modeRow
+    Instance.new("UICorner", modeBtn).CornerRadius = UDim.new(0, 7)
+    local modeTrackStroke = Instance.new("UIStroke", modeBtn)
+    modeTrackStroke.Color = Color3.fromRGB(35, 36, 48)
+    modeTrackStroke.Thickness = 1
+
+    -- пилюля-бегунок, под ней два слоя заливки: тема (Toggle) и янтарь (Hold)
+    local modePill = Instance.new("Frame")
+    modePill.Name = "ModePill"
+    modePill.Size = UDim2.fromOffset(MODE_PILL_W, MODE_PILL_H)
+    modePill.Position = UDim2.fromOffset(MODE_PAD, MODE_PAD)
+    modePill.BackgroundColor3 = Color3.new(1, 1, 1)
+    modePill.BorderSizePixel = 0
+    modePill.ZIndex = 1
+    modePill.Parent = modeBtn
+    Instance.new("UICorner", modePill).CornerRadius = UDim.new(0, 5)
+    local modePillStroke = Instance.new("UIStroke", modePill)
+    modePillStroke.Color = Color3.new(1, 1, 1)
+    modePillStroke.Thickness = 1
+    modePillStroke.Transparency = 0.88
+
+    local modeFillTheme = Instance.new("Frame")
+    modeFillTheme.Name = "ThemeFill"
+    modeFillTheme.Size = UDim2.fromScale(1, 1)
+    modeFillTheme.BackgroundColor3 = Color3.new(1, 1, 1)
+    modeFillTheme.BorderSizePixel = 0
+    modeFillTheme.Parent = modePill
+    Instance.new("UICorner", modeFillTheme).CornerRadius = UDim.new(0, 5)
+    local modeGradTheme = Instance.new("UIGradient")
+    modeGradTheme.Rotation = 90
+    modeGradTheme.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Config.Theme.Accent),
+        ColorSequenceKeypoint.new(0.5, Config.Theme.Accent2 or Config.Theme.Accent),
+        ColorSequenceKeypoint.new(1, Config.Theme.Accent)
+    })
+    modeGradTheme.Parent = modeFillTheme
+    -- регистрируем градиент: при смене темы он перекрашивается сам (ветка UIGradient в updateAccentTheme)
+    table.insert(Internal.UIObjects.Accents, modeGradTheme)
+
+    local modeFillHold = Instance.new("Frame")
+    modeFillHold.Name = "HoldFill"
+    modeFillHold.Size = UDim2.fromScale(1, 1)
+    modeFillHold.BackgroundColor3 = Color3.new(1, 1, 1)
+    modeFillHold.BorderSizePixel = 0
+    modeFillHold.BackgroundTransparency = 1
+    modeFillHold.Parent = modePill
+    Instance.new("UICorner", modeFillHold).CornerRadius = UDim.new(0, 5)
+    local modeGradHold = Instance.new("UIGradient")
+    modeGradHold.Rotation = 90
+    modeGradHold.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, MODE_AMBER),
+        ColorSequenceKeypoint.new(0.5, MODE_AMBER_DEEP),
+        ColorSequenceKeypoint.new(1, MODE_AMBER)
+    })
+    modeGradHold.Parent = modeFillHold
+
+    -- блик, который пробегает по пилюле в момент переключения
+    local modeSheen = Instance.new("Frame")
+    modeSheen.Name = "ModeSheen"
+    modeSheen.Size = UDim2.fromScale(1, 1)
+    modeSheen.BackgroundColor3 = Color3.new(1, 1, 1)
+    modeSheen.BorderSizePixel = 0
+    modeSheen.BackgroundTransparency = 1
+    modeSheen.Parent = modePill
+    Instance.new("UICorner", modeSheen).CornerRadius = UDim.new(0, 5)
+    local modeSheenGrad = Instance.new("UIGradient")
+    modeSheenGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(0.40, 0.70),
+        NumberSequenceKeypoint.new(0.50, 0.35),
+        NumberSequenceKeypoint.new(0.60, 0.70),
+        NumberSequenceKeypoint.new(1, 1)
+    })
+    modeSheenGrad.Parent = modeSheen
+
+    -- надписи лежат НАД пилюлей и не ездят вместе с ней
+    local modeLblToggle = Instance.new("TextLabel")
+    modeLblToggle.Name = "ModeLabelToggle"
+    modeLblToggle.Size = UDim2.fromOffset(MODE_PILL_W, MODE_PILL_H)
+    modeLblToggle.Position = UDim2.fromOffset(MODE_PAD, MODE_PAD)
+    modeLblToggle.BackgroundTransparency = 1
+    modeLblToggle.Text = "Toggle"
+    modeLblToggle.TextColor3 = Color3.new(1, 1, 1)
+    modeLblToggle.TextSize = 11
+    modeLblToggle.Font = Enum.Font.GothamBold
+    modeLblToggle.ZIndex = 2
+    modeLblToggle.Parent = modeBtn
+
+    local modeLblHold = Instance.new("TextLabel")
+    modeLblHold.Name = "ModeLabelHold"
+    modeLblHold.Size = UDim2.fromOffset(MODE_PILL_W, MODE_PILL_H)
+    modeLblHold.Position = UDim2.fromOffset(MODE_X_HOLD, MODE_PAD)
+    modeLblHold.BackgroundTransparency = 1
+    modeLblHold.Text = "Hold"
+    modeLblHold.TextColor3 = Color3.fromRGB(142, 142, 147)
+    modeLblHold.TextSize = 11
+    modeLblHold.Font = Enum.Font.GothamBold
+    modeLblHold.ZIndex = 2
+    modeLblHold.Parent = modeBtn
+
+    -- текущий режим: свой у бинда, иначе общий выбор (тот, что попадёт в бинд при назначении клавиши)
+    local function currentMode()
+        local bind = State.ModuleBinds and State.ModuleBinds[modName]
+        if type(bind) == "table" then return (bind.Mode == "Hold") and "Hold" or "Toggle" end
+        return (State.BindingMode == "Hold") and "Hold" or "Toggle"
+    end
+
+    local function applyMode(animate)
+        local isHold = currentMode() == "Hold"
+        local targetX = isHold and MODE_X_HOLD or MODE_PAD
+
+        if animate then
+            -- пружинка: пилюля уезжает чуть дальше и возвращается
+            Core.TweenService:Create(modePill, TweenInfo.new(0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                Position = UDim2.fromOffset(targetX, MODE_PAD)
+            }):Play()
+            -- цвет стартует с задержкой 0.08 с — кажется, что пилюля «загорается» на новом месте
+            local chaseIn = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, false, 0.08)
+            Core.TweenService:Create(modeFillTheme, chaseIn, { BackgroundTransparency = isHold and 1 or 0 }):Play()
+            Core.TweenService:Create(modeFillHold, chaseIn, { BackgroundTransparency = isHold and 0 or 1 }):Play()
+            Core.TweenService:Create(modeLblToggle, TweenInfo.new(0.26), {
+                TextColor3 = isHold and Color3.fromRGB(142, 142, 147) or Color3.new(1, 1, 1)
+            }):Play()
+            Core.TweenService:Create(modeLblHold, TweenInfo.new(0.26), {
+                TextColor3 = isHold and MODE_AMBER_DARK or Color3.fromRGB(142, 142, 147)
+            }):Play()
+            -- короткое свечение: рамка пилюли вспыхивает и гаснет
+            Core.TweenService:Create(modePillStroke, TweenInfo.new(0.12), { Transparency = 0.35 }):Play()
+            task.delay(0.16, function()
+                -- панель могла закрыться прямо во время анимации
+                if not modePillStroke.Parent then return end
+                Core.TweenService:Create(modePillStroke, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 0.88 }):Play()
+            end)
+            -- блик слева направо
+            modeSheen.BackgroundTransparency = 0
+            modeSheenGrad.Offset = Vector2.new(-1, 0)
+            local sweep = Core.TweenService:Create(modeSheenGrad, TweenInfo.new(0.44, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Offset = Vector2.new(1, 0) })
+            sweep:Play()
+            sweep.Completed:Connect(function() modeSheen.BackgroundTransparency = 1 end)
+        else
+            modePill.Position = UDim2.fromOffset(targetX, MODE_PAD)
+            modeFillTheme.BackgroundTransparency = isHold and 1 or 0
+            modeFillHold.BackgroundTransparency = isHold and 0 or 1
+            modeLblToggle.TextColor3 = isHold and Color3.fromRGB(142, 142, 147) or Color3.new(1, 1, 1)
+            modeLblHold.TextColor3 = isHold and MODE_AMBER_DARK or Color3.fromRGB(142, 142, 147)
+        end
+    end
+    applyMode(false)
+
+    modeBtn.MouseButton1Click:Connect(function()
+        local bind = State.ModuleBinds and State.ModuleBinds[modName]
+        if type(bind) == "table" then
+            bind.Mode = (bind.Mode == "Hold") and "Toggle" or "Hold"
+        else
+            -- бинда ещё нет: меняем общий выбор, он подставится при назначении клавиши
+            State.BindingMode = (State.BindingMode == "Hold") and "Toggle" or "Hold"
+        end
+        applyMode(true)
+        -- режим лежит в Config.ModuleBinds, поэтому сохраняем конфиг как при обычном бинде
+        if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+        if Internal.ShowIslandNotification then
+            local m = currentMode()
+            pcall(function() Internal.ShowIslandNotification("Bind mode: " .. m, (m == "Hold") and MODE_AMBER or Config.Theme.Accent) end)
+        end
+    end)
+    return sub
+end
+
+-- [ KEYBIND LIST ]
+do
+    Internal.KBLGui = nil
+    Internal.KBLHolder = nil
+    Internal.KBLBadge = nil
+    Internal.KBLRows = {}  -- [modName] = {Frame
+
+    function Internal.BuildKeybindList()
+        if Internal.KBLGui and Internal.KBLGui.Parent then return end
+        local ok, host = pcall(function() return gethui and gethui() or game:GetService("CoreGui") end)
+        if not ok or not host then host = Core.Local.Player:FindFirstChild("PlayerGui") end
+        pcall(function()
+            local orphan = host:FindFirstChild("Overmind_KeybindList")
+            if orphan then orphan:Destroy() end
+        end)
+
+        local cg = Instance.new("ScreenGui")
+        cg.Name = "Overmind_KeybindList"
+        cg.ResetOnSpawn = false
+        cg.DisplayOrder = 9000
+        pcall(function() cg.Parent = (ScreenGui and ScreenGui.Parent) or host end)
+        Internal.KBLGui = cg
+
+        local holder = Instance.new("Frame")
+        holder.Name = "KBLHolder"
+        holder.AnchorPoint = Vector2.new(1, 0)
+        holder.Position = UDim2.new(Config.Theme.KeybindListPos.X or 0.985, 0, Config.Theme.KeybindListPos.Y or 0.35, 0)
+        holder.Size = UDim2.new(0, 208, 0, 0)
+        holder.AutomaticSize = Enum.AutomaticSize.Y
+        holder.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+        holder.BackgroundTransparency = 0.12
+        holder.BorderSizePixel = 0
+        holder.Visible = false
+        holder.Active = true
+        holder.Parent = cg
+        Internal.KBLHolder = holder
+        Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 12)
+        local stroke = Instance.new("UIStroke", holder)
+        stroke.Color = Color3.fromRGB(40, 40, 54)
+        stroke.Thickness = 1
+
+        -- [ v63 ] мягкая подсветка сверху: градиент от акцента к фону
+        local tint = Instance.new("Frame")
+        tint.Name = "Tint"
+        tint.Size = UDim2.new(1, 0, 0, 36)
+        tint.BackgroundColor3 = Color3.new(1, 1, 1)
+        tint.BorderSizePixel = 0
+        tint.ZIndex = 1
+        tint.Parent = holder
+        Instance.new("UICorner", tint).CornerRadius = UDim.new(0, 12)
+        local tintGrad = Instance.new("UIGradient")
+        tintGrad.Name = "KBLTint"
+        tintGrad.Rotation = 25
+        tintGrad.Color = ColorSequence.new(Config.Theme.Accent, Config.Theme.Accent)
+        tintGrad.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.9),
+            NumberSequenceKeypoint.new(1, 1)
+        })
+        tintGrad.Parent = tint
+        table.insert(Internal.UIObjects.Accents, tintGrad)
+
+        -- [ ЗАГОЛОВОК ] акцентная черта + название + счётчик биндов
+        local header = Instance.new("TextLabel")
+        header.Name = "Header"
+        header.Size = UDim2.new(1, 0, 0, 32)
+        header.BackgroundTransparency = 1
+        header.Text = "KEYBINDS"
+        header.TextColor3 = Color3.fromRGB(236, 236, 246)
+        header.TextSize = 11
+        header.Font = Enum.Font.GothamBold
+        header.TextXAlignment = Enum.TextXAlignment.Left
+        header.TextYAlignment = Enum.TextYAlignment.Center
+        header.ZIndex = 3
+        header.Parent = holder
+        local hp = Instance.new("UIPadding", header)
+        hp.PaddingLeft = UDim.new(0, 22)
+
+        local hAccent = Instance.new("Frame")
+        hAccent.Name = "Indicator"  -- имя важно: перекрашивается вместе с темой
+        hAccent.Size = UDim2.fromOffset(3, 13)
+        hAccent.Position = UDim2.new(0, 12, 0.5, -7)
+        hAccent.BackgroundColor3 = Config.Theme.Accent
+        hAccent.BorderSizePixel = 0
+        hAccent.ZIndex = 4
+        hAccent.Parent = header
+        Instance.new("UICorner", hAccent).CornerRadius = UDim.new(1, 0)
+        table.insert(Internal.UIObjects.Accents, hAccent)
+
+        local badge = Instance.new("TextLabel")
+        badge.Name = "Badge"  -- имя важно: фон перекрашивается вместе с темой
+        badge.AnchorPoint = Vector2.new(1, 0.5)
+        badge.Position = UDim2.new(1, -12, 0.5, 0)
+        badge.Size = UDim2.fromOffset(20, 15)
+        badge.BackgroundColor3 = Config.Theme.Accent
+        badge.BackgroundTransparency = 0.82
+        badge.Text = "0"
+        badge.TextColor3 = Color3.fromRGB(240, 240, 250)
+        badge.TextSize = 9
+        badge.Font = Enum.Font.GothamBold
+        badge.ZIndex = 4
+        badge.Parent = header
+        Instance.new("UICorner", badge).CornerRadius = UDim.new(1, 0)
+        table.insert(Internal.UIObjects.Accents, badge)
+        Internal.KBLBadge = badge
+
+        local hDiv = Instance.new("Frame")
+        hDiv.Name = "HeaderDivider"
+        hDiv.Size = UDim2.new(1, -24, 0, 1)
+        hDiv.Position = UDim2.new(0, 12, 0, 31)
+        hDiv.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        hDiv.BorderSizePixel = 0
+        hDiv.ZIndex = 2
+        hDiv.Parent = holder
+
+        local list = Instance.new("ScrollingFrame")
+        list.Name = "List"
+        list.Position = UDim2.new(0, 0, 0, 32)  -- строго под заголовком
+        list.Size = UDim2.new(1, 0, 0, 0)
+        list.AutomaticSize = Enum.AutomaticSize.Y
+        list.CanvasSize = UDim2.new(0, 0, 0, 0)
+        list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        list.ScrollBarThickness = 2
+        list.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 88)
+        list.ScrollingDirection = Enum.ScrollingDirection.Y
+        list.ElasticBehavior = Enum.ElasticBehavior.Never
+        list.BackgroundTransparency = 1
+        list.BorderSizePixel = 0
+        list.ZIndex = 2
+        list.Parent = holder
+        -- [ v63 ] выше ~7 строк список не растёт, а скроллится
+        local listCap = Instance.new("UISizeConstraint", list)
+        listCap.MaxSize = Vector2.new(100000, 216)
+        local lay = Instance.new("UIListLayout", list)
+        lay.Padding = UDim.new(0, 2)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        lay.Name = "KBLLayout"
+        local listPad = Instance.new("UIPadding", list)
+        listPad.PaddingTop = UDim.new(0, 6)
+        listPad.PaddingBottom = UDim.new(0, 8)
+
+        -- Перетаскивание панели
+        do
+            local dragging, dragStart, startPos = false, nil, nil
+            header.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    dragging = true; dragStart = input.Position; startPos = holder.Position
+                end
+            end)
+            header.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    dragging = false
+                    Config.Theme.KeybindListPos = { X = holder.Position.X.Scale, Y = holder.Position.Y.Scale }
+                    if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+                end
+            end)
+            Core.Services.UserInputService.InputChanged:Connect(function(input)
+                if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                    local delta = input.Position - dragStart
+                    holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+                end
+            end)
+        end
+    end
+
+    -- [ SPECTATOR LIST ] панель «кто наблюдает за тобой»
+    Internal.SpectRows = {}  -- [player] = {Frame
+    Internal.SpectOrder = {}  -- [player] = n (стабильный порядок строк)
+
+    function Internal.BuildSpectatorList()
+        if Internal.SpectGui and Internal.SpectGui.Parent then return end
+        local ok, host = pcall(function() return gethui and gethui() or game:GetService("CoreGui") end)
+        if not ok or not host then host = Core.Local.Player:FindFirstChild("PlayerGui") end
+        pcall(function()
+            local orphan = host:FindFirstChild("Overmind_SpectatorList")
+            if orphan then orphan:Destroy() end
+        end)
+
+        local cg = Instance.new("ScreenGui")
+        cg.Name = "Overmind_SpectatorList"
+        cg.ResetOnSpawn = false
+        cg.DisplayOrder = 8900
+        pcall(function() cg.Parent = (ScreenGui and ScreenGui.Parent) or host end)
+        Internal.SpectGui = cg
+
+        local holder = Instance.new("Frame")
+        holder.Name = "SpectHolder"
+        holder.AnchorPoint = Vector2.new(1, 0)
+        holder.Position = UDim2.new(Config.Theme.SpectatorListPos.X or 0.985, 0, Config.Theme.SpectatorListPos.Y or 0.55, 0)
+        holder.Size = UDim2.new(0, 190, 0, 0)
+        holder.AutomaticSize = Enum.AutomaticSize.Y
+        holder.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+        holder.BackgroundTransparency = 0.25
+        holder.BorderSizePixel = 0
+        holder.Visible = false
+        holder.Active = true
+        holder.Parent = cg
+        Internal.SpectHolder = holder
+        Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 8)
+        local stroke = Instance.new("UIStroke", holder)
+        stroke.Color = Color3.fromRGB(60, 60, 80)
+        stroke.Thickness = 1
+
+        -- Заголовок
+        local header = Instance.new("TextLabel")
+        header.Name = "Header"
+        header.Size = UDim2.new(1, 0, 0, 26)
+        header.BackgroundTransparency = 1
+        header.Text = "spectators"
+        header.TextColor3 = Config.Theme.Accent
+        header.TextSize = 12
+        header.Font = Enum.Font.GothamBold
+        header.TextXAlignment = Enum.TextXAlignment.Left
+        header.Parent = holder
+        local hp = Instance.new("UIPadding", header)
+        hp.PaddingLeft = UDim.new(0, 10)
+        -- счётчик справа в заголовке
+        local count = Instance.new("TextLabel")
+        count.Name = "Count"
+        count.AnchorPoint = Vector2.new(1, 0.5)
+        count.Position = UDim2.new(1, -10, 0.5, 0)
+        count.Size = UDim2.new(0, 30, 0, 16)
+        count.BackgroundTransparency = 1
+        count.Text = "0"
+        count.TextColor3 = Color3.fromRGB(150, 150, 170)
+        count.TextSize = 11
+        count.Font = Enum.Font.GothamBold
+        count.TextXAlignment = Enum.TextXAlignment.Right
+        count.Parent = header
+        Internal.SpectCount = count
+
+        local list = Instance.new("Frame")
+        list.Name = "List"
+        list.Position = UDim2.new(0, 0, 0, 26)
+        list.Size = UDim2.new(1, 0, 0, 0)
+        list.AutomaticSize = Enum.AutomaticSize.Y
+        list.BackgroundTransparency = 1
+        list.Parent = holder
+        local lay = Instance.new("UIListLayout", list)
+        lay.Padding = UDim.new(0, 2)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        local listPad = Instance.new("UIPadding", list)
+        listPad.PaddingBottom = UDim.new(0, 8)
+
+        -- Drag за заголовок (как у Keybind List)
+        do
+            local dragging = false
+            local dragStart, startPos
+            header.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                    dragging = true
+                    dragStart = input.Position
+                    startPos = holder.Position
+                end
+            end)
+            header.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                    dragging = false
+                    Config.Theme.SpectatorListPos = { X = holder.Position.X.Scale, Y = holder.Position.Y.Scale }
+                    if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+                end
+            end)
+            Core.Services.UserInputService.InputChanged:Connect(function(input)
+                if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                    local delta = input.Position - dragStart
+                    holder.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+                end
+            end)
+        end
+    end
+
+    -- Аватар-инициалы
+    local function buildSpectRow(parent, playerName)
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(1, 0, 0, 24)
+        f.BackgroundColor3 = Color3.fromRGB(28, 29, 40)
+        f.BackgroundTransparency = 0.2
+        f.BorderSizePixel = 0
+        f.Parent = parent
+        Instance.new("UICorner", f).CornerRadius = UDim.new(0, 6)
+        -- аватар-инициалы
+        local av = Instance.new("TextLabel")
+        av.Name = "Avatar"
+        av.Size = UDim2.new(0, 16, 0, 16)
+        av.Position = UDim2.new(0, 4, 0.5, -8)
+        av.BackgroundColor3 = Color3.fromHSV((playerName:byte() % 36) / 36, 0.55, 0.75)
+        av.Text = playerName:sub(1, 1):upper()
+        av.TextColor3 = Color3.fromRGB(255, 255, 255)
+        av.TextSize = 9
+        av.Font = Enum.Font.GothamBold
+        av.Parent = f
+        Instance.new("UICorner", av).CornerRadius = UDim.new(1, 0)
+        -- ник
+        local nl = Instance.new("TextLabel")
+        nl.Name = "Name"
+        nl.Position = UDim2.new(0, 26, 0, 0)
+        nl.Size = UDim2.new(1, -60, 1, 0)
+        nl.BackgroundTransparency = 1
+        nl.Text = playerName
+        nl.TextColor3 = Color3.fromRGB(220, 220, 235)
+        nl.TextSize = 10
+        nl.Font = Enum.Font.GothamMedium
+        nl.TextXAlignment = Enum.TextXAlignment.Left
+        nl.TextTruncate = Enum.TextTruncate.AtEnd
+        nl.Parent = f
+        -- тело/камера (наблюдает телом или свободной камерой)
+        local mode = Instance.new("TextLabel")
+        mode.Name = "Mode"
+        mode.AnchorPoint = Vector2.new(1, 0.5)
+        mode.Position = UDim2.new(1, -6, 0.5, 0)
+        mode.Size = UDim2.new(0, 28, 1, 0)
+        mode.BackgroundTransparency = 1
+        mode.Text = ""
+        mode.TextColor3 = Color3.fromRGB(140, 140, 160)
+        mode.TextSize = 9
+        mode.Font = Enum.Font.GothamBold
+        mode.TextXAlignment = Enum.TextXAlignment.Right
+        mode.Parent = f
+        return f
+    end
+
+    -- Плавное появление/удаление строки (slide+fade)
+    Internal.SpectAdd = function(player, modeText)
+        local holder = Internal.SpectHolder
+        if not holder or not holder.Parent then return end
+        local list = holder:FindFirstChild("List")
+        if not list then return end
+        local entry = Internal.SpectRows[player]
+        if entry and entry.Frame and entry.Frame.Parent then
+            if entry.ModeLabel and modeText then entry.ModeLabel.Text = modeText end
+            return
+        end
+        Internal.SpectOrder[player] = (Internal.SpectOrder._next or 0) + 1
+        Internal.SpectOrder._next = Internal.SpectOrder[player]
+        local f = buildSpectRow(list, player.Name)
+        f.LayoutOrder = Internal.SpectOrder[player]
+        -- старт анимации
+        f.Position = UDim2.new(0, -14, 0, 0)
+        local modeLabel = f:FindFirstChild("Mode")
+        if modeLabel and modeText then modeLabel.Text = modeText end
+        Internal.SpectRows[player] = { Frame = f, ModeLabel = modeLabel }
+        -- tween-in
+        task.spawn(function()
+            local ts = game:GetService("TweenService")
+            local tIn = ts:Create(f, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+                { Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 0.2 })
+            tIn:Play()
+        end)
+        if Internal.SpectCount then Internal.SpectCount.Text = tostring(Internal._spectatorCount or 0) end
+    end
+
+    Internal.SpectRemove = function(player)
+        local entry = Internal.SpectRows and Internal.SpectRows[player]
+        if not entry then return end
+        Internal.SpectRows[player] = nil
+        local f = entry.Frame
+        if f and f.Parent then
+            task.spawn(function()
+                local ts = game:GetService("TweenService")
+                local tOut = ts:Create(f, TweenInfo.new(0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+                    { Position = UDim2.new(0, -14, 0, 0), BackgroundTransparency = 1 })
+                tOut:Play()
+                tOut.Completed:Wait()
+                if f and f.Parent then f:Destroy() end
+            end)
+        end
+        if Internal.SpectCount then Internal.SpectCount.Text = tostring(Internal._spectatorCount or 0) end
+    end
+
+    -- Луп: 5 раз/с определяет
+    Internal.StartSpectatorListLoop = function()
+        task.spawn(function()
+            while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+                task.wait(0.2)
+                local enabled = Config.Theme.SpectatorList ~= false
+                local holder = Internal.SpectHolder
+                if not enabled or not holder or not holder.Parent then
+                    if not enabled and Internal.SpectRows then
+                        for pl in pairs(Internal.SpectRows) do Internal.SpectRemove(pl) end
+                    end
+                    continue
+                end
+                pcall(function()
+                    local lp = Core.Local.Player
+                    local myChar = lp.Character
+                    local current = {}
+                    -- я должен быть жив (наблюдать за мёртвым собой бессмысленно)
+                    local iAmAlive = myChar and myChar.Parent and myChar:GetAttribute("Dead") ~= true
+                    if iAmAlive then
+                        for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+                            if p ~= lp then
+                                local ch = p.Character
+                                if ch and ch.Parent and ch:GetAttribute("Dead") == true then
+                                    -- мёртв и ещё НЕ ушёл в меню/не покинул матч
+                                    local camSubject = workspace.CurrentCamera and workspace.CurrentCamera.CameraSubject
+                                    local modeText = ""
+                                    if camSubject and camSubject.Parent then
+                                        local subjModel = camSubject:IsA("Model") and camSubject or camSubject:FindFirstAncestorOfClass("Model")
+                                        if subjModel == ch then
+                                            modeText = "body"
+                                        else
+                                            modeText = "free"
+                                        end
+                                    end
+                                    current[p] = true
+                                    Internal.SpectAdd(p, modeText)
+                                end
+                            end
+                        end
+                    end
+                    -- убрать тех
+                    for pl in pairs(Internal.SpectRows) do
+                        if not current[pl] then Internal.SpectRemove(pl) end
+                    end
+                    -- счётчик
+                    local n = 0
+                    for _ in pairs(current) do n = n + 1 end
+                    Internal._spectatorCount = n
+                    if Internal.SpectCount then Internal.SpectCount.Text = tostring(n) end
+                    holder.Visible = n > 0
+                end)
+            end
+        end)
+    end
+
+    -- Вставить/обновить строку модуля в панели
+    -- [ v63 ] строка модуля: кейкап + имя + пилюля состояния
+    Internal.KBLSet = function(modName, keyText, mode, order, isActive)
+        if not Internal.KBLHolder or not Internal.KBLHolder.Parent then return end
+        local row = Internal.KBLRows[modName]
+        if not row or not row.Frame.Parent then
+            local list = Internal.KBLHolder:FindFirstChild("List")
+            if not list then return end
+            local f = Instance.new("Frame")
+            f.Name = "KBLRow_" .. modName
+            f.Size = UDim2.new(1, -16, 0, 26)
+            f.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            f.BackgroundTransparency = 1
+            f.BorderSizePixel = 0
+            f.Parent = list
+            Instance.new("UICorner", f).CornerRadius = UDim.new(0, 7)
+
+            local bar = Instance.new("Frame")
+            bar.Name = "Bar"
+            bar.Size = UDim2.fromOffset(2, 12)
+            bar.Position = UDim2.new(0, 6, 0.5, -6)
+            bar.BackgroundColor3 = Config.Theme.Accent
+            bar.BorderSizePixel = 0
+            bar.ZIndex = 2
+            bar.Parent = f
+            Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+            local cap = Instance.new("Frame")
+            cap.Name = "KeyCap"
+            cap.Size = UDim2.fromOffset(34, 18)
+            cap.Position = UDim2.new(0, 14, 0.5, -9)
+            cap.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+            cap.BorderSizePixel = 0
+            cap.ZIndex = 2
+            cap.Parent = f
+            Instance.new("UICorner", cap).CornerRadius = UDim.new(0, 5)
+            local capStroke = Instance.new("UIStroke", cap)
+            capStroke.Color = Color3.fromRGB(58, 58, 74)
+            capStroke.Thickness = 1
+
+            local kl = Instance.new("TextLabel")
+            kl.Name = "KeyLabel"
+            kl.Size = UDim2.fromScale(1, 1)
+            kl.BackgroundTransparency = 1
+            kl.Text = ""
+            kl.TextColor3 = Config.Theme.Accent
+            kl.TextSize = 9
+            kl.Font = Enum.Font.GothamBold
+            kl.TextTruncate = Enum.TextTruncate.AtEnd
+            kl.ZIndex = 3
+            kl.Parent = cap
+
+            local nl = Instance.new("TextLabel")
+            nl.Name = "NameLabel"
+            nl.Size = UDim2.new(1, -106, 1, 0)
+            nl.Position = UDim2.new(0, 50, 0, 0)
+            nl.BackgroundTransparency = 1
+            nl.Text = modName
+            nl.TextColor3 = Color3.fromRGB(232, 232, 242)
+            nl.TextSize = 10
+            nl.Font = Enum.Font.GothamMedium
+            nl.TextXAlignment = Enum.TextXAlignment.Left
+            nl.TextTruncate = Enum.TextTruncate.AtEnd
+            nl.ZIndex = 2
+            nl.Parent = f
+
+            local sl = Instance.new("TextLabel")
+            sl.Name = "StatePill"
+            sl.AnchorPoint = Vector2.new(1, 0.5)
+            sl.Position = UDim2.new(1, -12, 0.5, 0)
+            sl.Size = UDim2.fromOffset(28, 15)
+            sl.AutomaticSize = Enum.AutomaticSize.X
+            sl.BackgroundColor3 = Color3.fromRGB(45, 200, 120)
+            sl.BackgroundTransparency = 0.85
+            sl.Text = "ON"
+            sl.TextColor3 = Color3.fromRGB(150, 255, 190)
+            sl.TextSize = 9
+            sl.Font = Enum.Font.GothamBold
+            sl.TextXAlignment = Enum.TextXAlignment.Center
+            sl.ZIndex = 2
+            sl.Parent = f
+            Instance.new("UICorner", sl).CornerRadius = UDim.new(1, 0)
+            local sp = Instance.new("UIPadding", sl)
+            sp.PaddingLeft = UDim.new(0, 7)
+            sp.PaddingRight = UDim.new(0, 7)
+
+            f.MouseEnter:Connect(function()
+                Core.TweenService:Create(f, TweenInfo.new(0.15), { BackgroundTransparency = 0.94 }):Play()
+            end)
+            f.MouseLeave:Connect(function()
+                Core.TweenService:Create(f, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
+            end)
+
+            row = { Frame = f, KeyLabel = kl, NameLabel = nl, StateLabel = sl, Bar = bar }
+            Internal.KBLRows[modName] = row
+        end
+        row.Frame.LayoutOrder = order or 50
+
+        -- [ v63 ] клавиша: короткая подпись вместо "[RightShift]"
+        local keyDisplay = tostring(keyText or "")
+        keyDisplay = (keyDisplay:gsub("^Left", "L"):gsub("^Right", "R"):gsub("Control", "Ctrl"):gsub("MouseButton", "M"))
+        if row.KeyLabel.Text ~= keyDisplay then row.KeyLabel.Text = keyDisplay end
+        if row.KeyLabel.TextColor3 ~= Config.Theme.Accent then row.KeyLabel.TextColor3 = Config.Theme.Accent end
+        if row.Bar.BackgroundColor3 ~= Config.Theme.Accent then row.Bar.BackgroundColor3 = Config.Theme.Accent end
+
+        -- [ v63 ] пилюля состояния: ON / OFF / HOLD
+        local isHold = (mode == "Hold")
+        local pillText, pillBg, pillTextColor
+        if isHold then
+            pillText = "HOLD"
+            pillBg = isActive and Color3.fromRGB(255, 176, 60) or Color3.fromRGB(86, 86, 102)
+            pillTextColor = isActive and Color3.fromRGB(38, 24, 6) or Color3.fromRGB(176, 176, 190)
+        else
+            pillText = isActive and "ON" or "OFF"
+            pillBg = isActive and Color3.fromRGB(45, 200, 120) or Color3.fromRGB(86, 86, 102)
+            pillTextColor = isActive and Color3.fromRGB(8, 34, 20) or Color3.fromRGB(176, 176, 190)
+        end
+        if row.StateLabel.Text ~= pillText then row.StateLabel.Text = pillText end
+        if row.StateLabel.TextColor3 ~= pillTextColor then row.StateLabel.TextColor3 = pillTextColor end
+        if row.StateLabel.BackgroundColor3 ~= pillBg then row.StateLabel.BackgroundColor3 = pillBg end
+        local pillTr = isActive and 0.12 or 0.6
+        if row.StateLabel.BackgroundTransparency ~= pillTr then row.StateLabel.BackgroundTransparency = pillTr end
+
+        local nameColor = isActive and Color3.fromRGB(232, 232, 242) or Color3.fromRGB(126, 126, 142)
+        if row.NameLabel.TextColor3 ~= nameColor then row.NameLabel.TextColor3 = nameColor end
+        row.Bar.BackgroundTransparency = isActive and 0 or 1
+    end
+
+    Internal.KBLRemove = function(modName)
+        local row = Internal.KBLRows and Internal.KBLRows[modName]
+        if row then
+            pcall(function() row.Frame:Destroy() end)
+            Internal.KBLRows[modName] = nil
+        end
+    end
+
+    -- Апдейтер
+    Internal.StartKeybindListLoop = function()
+        task.spawn(function()
+            while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+                task.wait(0.1)
+                local enabled = Config.Theme.KeybindList ~= false
+                if not enabled or not Internal.KBLHolder or not Internal.KBLHolder.Parent then
+                    if not enabled then for name in pairs(Internal.KBLRows or {}) do Internal.KBLRemove(name) end end
+                    continue
+                end
+                -- собираем ТОЛЬКО модули с биндами и в включённом состоянии
+                local entries = {}
+                for modName, data in pairs(State.Modules or {}) do
+                    local bind = State.ModuleBinds and State.ModuleBinds[modName]
+                    if bind then
+                        local isActive = data.Card and data.Card:GetAttribute("IsActive") == true
+                        -- Hold-режим
+                        local bindMode = (type(bind) == "table" and bind.Mode) or "Toggle"
+                        if isActive or bindMode == "Hold" then
+                            local keyText = ""
+                            if type(bind) == "table" then
+                                keyText = (bind.Key and bind.Key.Name) or ""
+                            elseif bind.Name then
+                                keyText = bind.Name
+                            end
+                            table.insert(entries, { Name = modName, Key = keyText, Mode = bindMode })
+                        end
+                    end
+                end
+                -- панель видна только когда есть что показать
+                if Internal.KBLHolder then Internal.KBLHolder.Visible = (#entries > 0) end
+                table.sort(entries, function(a, b) return a.Name < b.Name end)
+                -- обновляем/удаляем строки; hold без активности
+                local seen = {}
+                for i, e in ipairs(entries) do
+                    seen[e.Name] = true
+                    local data = State.Modules[e.Name]
+                    local isActive = data and data.Card and data.Card:GetAttribute("IsActive") == true
+                    Internal.KBLSet(e.Name, e.Key, e.Mode, i, isActive)
+                end
+                if Internal.KBLBadge then Internal.KBLBadge.Text = tostring(#entries) end
+                for name in pairs(Internal.KBLRows) do
+                    if not seen[name] then Internal.KBLRemove(name) end
+                end
+            end
+            -- финальная уборка при выгрузке
+            for name in pairs(Internal.KBLRows or {}) do Internal.KBLRemove(name) end
+            if Internal.KBLGui then pcall(function() Internal.KBLGui:Destroy() end) Internal.KBLGui = nil end
+            Internal.KBLBadge = nil
+        end)
+    end
+end
+
+-- [ CHEAT RADAR ]
+do
+    Internal.RadarGui = nil
+    Internal.RadarFrame = nil
+    Internal.RadarPlot = nil
+    Internal.RadarDots = {}  -- [characterModel] = dotFrame
+
+    local RADAR_RANGE_DEFAULT = 150  -- studs до края радара
+
+    function Internal.RadarRemoveDot(ch)
+        local dot = Internal.RadarDots and Internal.RadarDots[ch]
+        if dot then
+            pcall(function() dot:Destroy() end)
+            Internal.RadarDots[ch] = nil
+        end
+    end
+
+    function Internal.BuildRadar()
+        if Internal.RadarGui and Internal.RadarGui.Parent then return end
+        local ok, host = pcall(function() return gethui and gethui() or game:GetService("CoreGui") end)
+        if not ok or not host then host = Core.Local.Player:FindFirstChild("PlayerGui") end
+        pcall(function()
+            local orphan = host:FindFirstChild("Overmind_Radar")
+            if orphan then orphan:Destroy() end
+        end)
+
+        local cg = Instance.new("ScreenGui")
+        cg.Name = "Overmind_Radar"
+        cg.ResetOnSpawn = false
+        cg.DisplayOrder = 8900
+        pcall(function() cg.Parent = (ScreenGui and ScreenGui.Parent) or host end)
+        Internal.RadarGui = cg
+
+        local f = Instance.new("Frame")
+        f.Name = "RadarFrame"
+        f.AnchorPoint = Vector2.new(0, 1)
+        f.Position = UDim2.new(0, 20, 1, -20)  -- левый нижний угол
+        f.Size = UDim2.fromOffset(170, 170)
+        f.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+        f.BackgroundTransparency = 0.25
+        f.BorderSizePixel = 0
+        f.Active = true
+        f.Parent = cg
+        Internal.RadarFrame = f
+        Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+        local stroke = Instance.new("UIStroke", f)
+        stroke.Color = Color3.fromRGB(60, 60, 85)
+        stroke.Thickness = 1
+
+        -- Мы (центр)
+        local meDot = Instance.new("Frame")
+        meDot.Name = "MeDot"
+        meDot.AnchorPoint = Vector2.new(0.5, 0.5)
+        meDot.Position = UDim2.fromScale(0.5, 0.5)
+        meDot.Size = UDim2.fromOffset(7, 7)
+        meDot.BackgroundColor3 = Color3.fromRGB(120, 200, 255)
+        meDot.BorderSizePixel = 0
+        meDot.ZIndex = 3
+        meDot.Parent = f
+        Instance.new("UICorner", meDot).CornerRadius = UDim.new(1, 0)
+
+        -- Конус взгляда (куда смотрим
+        local cone = Instance.new("Frame")
+        cone.Name = "ViewCone"
+        cone.AnchorPoint = Vector2.new(0.5, 1)
+        cone.Position = UDim2.fromScale(0.5, 0.5)
+        cone.Size = UDim2.fromOffset(30, 60)
+        cone.BackgroundTransparency = 1
+        cone.ZIndex = 2
+        cone.Parent = f
+        local coneImg = Instance.new("ImageLabel")
+        coneImg.Size = UDim2.fromScale(1, 1)
+        coneImg.BackgroundTransparency = 1
+        coneImg.Image = "rbxassetid://8535486207"  -- треугольник
+        coneImg.ImageColor3 = Color3.fromRGB(255, 80, 80)
+        coneImg.ImageTransparency = 0.6
+        coneImg.ZIndex = 2
+        coneImg.Parent = cone
+        Internal.RadarCone = cone
+
+        -- Слот точек врагов
+        local plot = Instance.new("Frame")
+        plot.Name = "Plot"
+        plot.Size = UDim2.fromScale(1, 1)
+        plot.BackgroundTransparency = 1
+        plot.ClipsDescendants = true
+        plot.ZIndex = 4
+        plot.Parent = f
+        Internal.RadarPlot = plot
+
+        -- Перетаскивание
+        do
+            local dragging, dragStart, startPos = false, nil, nil
+            f.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    dragging = true; dragStart = input.Position; startPos = f.Position
+                end
+            end)
+            f.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+            end)
+            Core.Services.UserInputService.InputChanged:Connect(function(input)
+                if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                    local delta = input.Position - dragStart
+                    f.Position = UDim2.new(0, startPos.X.Offset + delta.X, 1, startPos.Y.Offset + delta.Y)
+                end
+            end)
+        end
+    end
+
+    function Internal.UpdateRadar()
+        if State.Unloading or not IsCurrentInstance() then return end
+        if not Internal.RadarPlot or not Internal.RadarPlot.Parent then return end
+        local enabled = Config.Visuals.Radar and Config.Visuals.Radar.Enabled
+        if Internal.RadarFrame then Internal.RadarFrame.Visible = (enabled == true) end
+        if not enabled then
+            for ch in pairs(Internal.RadarDots) do Internal.RadarRemoveDot(ch) end
+            return
+        end
+        local lpChar = Core.Local.Player.Character
+        local myRoot = lpChar and lpChar:FindFirstChild("HumanoidRootPart")
+        local cam = workspace.CurrentCamera
+        if not myRoot or not cam then return end
+
+        local range = math.clamp(Config.Visuals.Radar.Range or RADAR_RANGE_DEFAULT, 50, 1000)
+
+        -- Угол камеры один раз за кадр
+        local camLook = cam.CFrame.LookVector
+        local camAngle = math.atan2(-camLook.X, -camLook.Z)
+
+        local seen = {}
+        for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+            if p ~= Core.Local.Player then
+                local ch = p.Character
+                local chRoot = ch and ch:FindFirstChild("HumanoidRootPart")
+                if ch and chRoot and not isCharacterAlly(ch) then
+                    local hum = ch:FindFirstChildOfClass("Humanoid")
+                    local isDead = ch:GetAttribute("Dead") or ch:GetAttribute("Invincible") or (hum and hum.Health <= 0)
+                    if not isDead then
+                        seen[ch] = true
+                        local rel = chRoot.Position - myRoot.Position
+                        local dist = rel.Magnitude
+                        if dist <= range then
+                            -- Поворачиваем точку так
+                            local relAngle = math.atan2(rel.X, rel.Z)
+                            local screenAngle = relAngle - camAngle
+                            local rx = math.sin(screenAngle) * dist
+                            local ry = math.cos(screenAngle) * dist
+                            local nx = (rx / range) * 0.5
+                            local ny = (ry / range) * 0.5
+                            local dot = Internal.RadarDots[ch]
+                            if not dot or not dot.Parent then
+                                dot = Instance.new("Frame")
+                                dot.Size = UDim2.fromOffset(6, 6)
+                                dot.AnchorPoint = Vector2.new(0.5, 0.5)
+                                dot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+                                dot.BorderSizePixel = 0
+                                dot.ZIndex = 5
+                                dot.Parent = Internal.RadarPlot
+                                Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+                                Internal.RadarDots[ch] = dot
+                            end
+                            dot.Position = UDim2.fromScale(0.5 + nx, 0.5 - ny)
+                            dot.Visible = true
+                        end
+                    end
+                end
+            end
+        end
+        for ch in pairs(Internal.RadarDots) do
+            if not seen[ch] then Internal.RadarRemoveDot(ch) end
+        end
+    end
+
+    Internal.StartRadarLoop = function()
+        task.spawn(function()
+            while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+                task.wait(0.05)
+                pcall(Internal.UpdateRadar)
+            end
+            for ch in pairs(Internal.RadarDots or {}) do Internal.RadarRemoveDot(ch) end
+            if Internal.RadarGui then pcall(function() Internal.RadarGui:Destroy() end) Internal.RadarGui = nil end
+        end)
+    end
+end
+
+
+
+
+-- SCREEN GUI INITIALIZATION
+
+-- METATABLE HOOK FOR THIRD PERSON CAMERA (Блокировка зума от игры)
+task.spawn(function()
+    if getrawmetatable and setreadonly and hookmetamethod then
+        local mt = getrawmetatable(game)
+        local oldNewIndex = mt.__newindex
+        -- [ v36 ] сохраняем старый __newindex
+        if _G.OvermindCameraNewIndex ~= oldNewIndex then
+            _G.OvermindCameraNewIndex = oldNewIndex
+        end
+        setreadonly(mt, false)
+        mt.__newindex = newcclosure(function(self, key, value)
+            local tpCfg = Config.Visuals.CustomCamera
+            if self == Core.Local.Player and tpCfg.Enabled and tpCfg.ThirdPerson.Enabled then
+                if key == "CameraMode" then
+                    return oldNewIndex(self, key, Enum.CameraMode.Classic)
+                elseif key == "CameraMaxZoomDistance" or key == "CameraMinZoomDistance" then
+                    local dist = math.clamp(tpCfg.ThirdPerson.Distance or 10, 5, 50)
+                    return oldNewIndex(self, key, dist)
+                end
+            end
+            return oldNewIndex(self, key, value)
+        end)
+        setreadonly(mt, true)
+        State._cameraNewIndexCold = mt
+    end
+end)
+
+
+-- CUSTOM SCOPE CROSSHAIR GUI INITIALIZATION
+scopeCrosshairGui = game:GetService("CoreGui"):FindFirstChild("Overmind_GdcScopeCrosshair") or Instance.new("ScreenGui")
+scopeCrosshairGui.Name = "Overmind_GdcScopeCrosshair"
+scopeCrosshairGui.ResetOnSpawn = false
+scopeCrosshairGui.IgnoreGuiInset = true
+pcall(function()
+    scopeCrosshairGui.Parent = game:GetService("CoreGui")
+end)
+
+scContainer = Instance.new("Frame", scopeCrosshairGui)
+scContainer.BackgroundTransparency = 1
+scContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+scContainer.Position = UDim2.new(0.5, 0, 0.5, 0)
+scContainer.Size = UDim2.new(0, 0, 0, 0)
+
+leftLine = Instance.new("Frame", scContainer)
+leftLine.AnchorPoint = Vector2.new(1, 0.5)
+leftLine.BorderSizePixel = 0
+
+rightLine = Instance.new("Frame", scContainer)
+rightLine.AnchorPoint = Vector2.new(0, 0.5)
+rightLine.BorderSizePixel = 0
+
+topLine = Instance.new("Frame", scContainer)
+topLine.AnchorPoint = Vector2.new(0.5, 1)
+topLine.BorderSizePixel = 0
+
+bottomLine = Instance.new("Frame", scContainer)
+bottomLine.AnchorPoint = Vector2.new(0.5, 0)
+bottomLine.BorderSizePixel = 0
+
+
+local function updateAccentTheme(input)
+    local c1, c2
+    if type(input) == "string" then
+        local colors_preset = Config.Themes[input]
+        if input == "White" then colors_preset = {c1 = Color3.fromRGB(255, 255, 255), c2 = Color3.fromRGB(200, 200, 200)}
+        elseif input == "Orange" then colors_preset = {c1 = Color3.fromRGB(255, 160, 50), c2 = Color3.fromRGB(255, 100, 0)}
+        elseif input == "Cyan" then colors_preset = {c1 = Color3.fromRGB(0, 200, 255), c2 = Color3.fromRGB(0, 100, 255)}
+        elseif input == "Teal" then colors_preset = {c1 = Color3.fromRGB(0, 255, 200), c2 = Color3.fromRGB(0, 150, 150)}
+        elseif input == "Pink" then colors_preset = {c1 = Color3.fromRGB(255, 100, 200), c2 = Color3.fromRGB(200, 50, 150)}
+        elseif input == "Red" then colors_preset = {c1 = Color3.fromRGB(255, 60, 60), c2 = Color3.fromRGB(150, 0, 0)}
+        elseif input == "Gradient" then colors_preset = {c1 = Color3.fromRGB(0, 255, 255), c2 = Color3.fromRGB(150, 255, 100)}
+        end
+        c1 = colors_preset and colors_preset.c1 or Config.Theme.Accent
+        c2 = colors_preset and colors_preset.c2 or Config.Theme.Accent2
+    else
+        c1 = input
+        c2 = input
+    end
+
+    Config.Theme.Accent = c1
+    Config.Theme.Accent2 = c2
+
+    local seq = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, c1),
+        ColorSequenceKeypoint.new(0.5, c2),
+        ColorSequenceKeypoint.new(1, c1)
+    })
+
+    local ti = TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+    -- Efficient iteration using registry
+    pcall(function()
+        for i = #Internal.UIObjects.Accents, 1, -1 do
+            local obj = Internal.UIObjects.Accents[i]
+            if not obj or not obj.Parent then
+                table.remove(Internal.UIObjects.Accents, i)
+                continue
+            end
+
+            if obj:IsA("UIStroke") then
+                Core.TweenService:Create(obj, ti, {Color = c1}):Play()
+            elseif obj.Name == "iOS_Switch" then
+                if obj:GetAttribute("IsActive") == true then
+                    Core.TweenService:Create(obj, ti, {BackgroundColor3 = c1}):Play()
+                end
+            elseif obj.Name == "Fill" or obj.Name == "Badge" or obj.Name == "Indicator" or obj.Name == "Internal.KLogo" then
+                Core.TweenService:Create(obj, ti, {BackgroundColor3 = c1}):Play()
+            elseif obj.Name == "RankText" then
+                -- [ v64 ] подпись ранга в профиле: у User - цветом темы (синяя тема -> синий), у Dev не регистрируется и остаётся красной
+                Core.TweenService:Create(obj, ti, {TextColor3 = c1}):Play()
+            elseif obj:IsA("UIGradient") then
+                obj.Color = seq
+            elseif obj:IsA("ScrollingFrame") then
+                obj.ScrollBarImageColor3 = c1
+            elseif obj:IsA("ImageLabel") then
+                -- [ v57 ] свечение активной полоски сайдбара и прочие картинки-акценты
+                Core.TweenService:Create(obj, ti, {ImageColor3 = c1}):Play()
+            end
+        end
+    end)
+end
+
+-- Advanced Custom Color Palette Implementation
+PaletteFrame = nil
+do
+    local currentPaletteCallback = nil
+    local activePaletteBtn = nil
+    local GuiService = game:GetService("GuiService")
+
+    PaletteFrame = Instance.new("Frame")
+    PaletteFrame.Name = "PaletteFrame"
+    PaletteFrame.Size = UDim2.new(0, 190, 0, 276)  -- Увеличили высоту с 260 до 276
+    PaletteFrame.BackgroundColor3 = Theme.Panel
+    PaletteFrame.BorderSizePixel = 0
+    PaletteFrame.Visible = false
+    PaletteFrame.Active = true
+    PaletteFrame.ZIndex = 3000
+    PaletteFrame.Parent = ScreenGui
+
+    Instance.new("UICorner", PaletteFrame).CornerRadius = UDim.new(0, 8)
+    local ps = Instance.new("UIStroke", PaletteFrame)
+    ps.Color = Color3.fromRGB(45, 46, 60)
+    ps.Thickness = 1
+
+    local ClosePalette = Instance.new("TextButton")
+    ClosePalette.Name = "ClosePalette"
+    ClosePalette.Size = UDim2.new(0, 24, 0, 24)
+    ClosePalette.Position = UDim2.new(0, 4, 0, 2)  -- Переместили влево (отступ 4 от левого края)
+    ClosePalette.BackgroundTransparency = 1
+    ClosePalette.Text = "×"
+    ClosePalette.TextColor3 = Color3.fromRGB(255, 60, 60)
+    ClosePalette.TextSize = 24
+    ClosePalette.Font = Enum.Font.GothamBold
+    ClosePalette.ZIndex = 50000
+    ClosePalette.Parent = PaletteFrame
+    ClosePalette.MouseButton1Click:Connect(function() PaletteFrame.Visible = false end)
+
+    -- S/V Square (Main Picker)
+    local SatValPicker = Instance.new("ImageLabel")
+    SatValPicker.Name = "SatValPicker"
+    SatValPicker.Size = UDim2.new(0, 150, 0, 150)
+    SatValPicker.Position = UDim2.new(0, 10, 0, 26)  -- Опустили пониже для зазора под крестик
+    SatValPicker.BackgroundColor3 = Color3.new(1, 0, 0)  -- Base Hue
+    SatValPicker.Image = "rbxassetid://4155801252"
+    SatValPicker.Parent = PaletteFrame
+
+    local SVPicker = Instance.new("Frame")
+    SVPicker.Name = "SVPicker"
+    SVPicker.Size = UDim2.new(0, 6, 0, 6)
+    SVPicker.AnchorPoint = Vector2.new(0.5, 0.5)
+    SVPicker.BackgroundColor3 = Color3.new(1, 1, 1)
+    SVPicker.ZIndex = 15005
+    SVPicker.Parent = SatValPicker
+    Instance.new("UICorner", SVPicker).CornerRadius = UDim.new(1, 0)
+    local svStroke = Instance.new("UIStroke", SVPicker)
+    svStroke.Color = Color3.new(0, 0, 0)
+    svStroke.Thickness = 1
+
+    local SVButton = Instance.new("TextButton")
+    SVButton.Size = UDim2.new(1, 0, 1, 0)
+    SVButton.BackgroundTransparency = 1
+    SVButton.Text = ""
+    SVButton.Parent = SatValPicker
+
+    -- Hue Slider (Vertical)
+    local HueSlider = Instance.new("Frame")
+    HueSlider.Name = "HueSlider"
+    HueSlider.Size = UDim2.new(0, 12, 0, 150)
+    HueSlider.Position = UDim2.new(0, 168, 0, 10)
+    HueSlider.BackgroundColor3 = Color3.new(1, 1, 1)
+    HueSlider.Parent = PaletteFrame
+    Instance.new("UICorner", HueSlider).CornerRadius = UDim.new(0, 4)
+
+    local HueGrad = Instance.new("UIGradient")
+    HueGrad.Rotation = 90
+    HueGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+        ColorSequenceKeypoint.new(0.167, Color3.fromRGB(255, 255, 0)),
+        ColorSequenceKeypoint.new(0.333, Color3.fromRGB(0, 255, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 255, 255)),
+        ColorSequenceKeypoint.new(0.667, Color3.fromRGB(0, 0, 255)),
+        ColorSequenceKeypoint.new(0.833, Color3.fromRGB(255, 0, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0))
+    })
+    HueGrad.Parent = HueSlider
+
+    local HueKnob = Instance.new("Frame")
+    HueKnob.Size = UDim2.new(1, 4, 0, 2)
+    HueKnob.Position = UDim2.new(0.5, 0, 0, 0)
+    HueKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    HueKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+    HueKnob.ZIndex = 15005
+    HueKnob.Parent = HueSlider
+    Instance.new("UIStroke", HueKnob).Thickness = 1
+
+    local HueButton = Instance.new("TextButton")
+    HueButton.Size = UDim2.new(1, 0, 1, 0)
+    HueButton.BackgroundTransparency = 1
+    HueButton.Text = ""
+    HueButton.Parent = HueSlider
+
+    -- Opacity Slider (Horizontal)
+    local OpacitySlider = Instance.new("Frame")
+    OpacitySlider.Name = "OpacitySlider"
+    OpacitySlider.Size = UDim2.new(0, 170, 0, 12)
+    OpacitySlider.Position = UDim2.new(0, 10, 0, 170)
+    OpacitySlider.BackgroundColor3 = Color3.new(1, 1, 1)
+    OpacitySlider.Parent = PaletteFrame
+    Instance.new("UICorner", OpacitySlider).CornerRadius = UDim.new(0, 4)
+
+    local AGradient = Instance.new("UIGradient")
+    AGradient.Parent = OpacitySlider
+
+    local AKnob = Instance.new("Frame")
+    AKnob.Size = UDim2.new(0, 2, 1, 4)
+    AKnob.Position = UDim2.new(1, 0, 0.5, 0)
+    AKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+    AKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+    AKnob.ZIndex = 15005
+    AKnob.Parent = OpacitySlider
+    Instance.new("UIStroke", AKnob).Thickness = 1
+
+    local OButton = Instance.new("TextButton")
+    OButton.Size = UDim2.new(1, 0, 1, 0)
+    OButton.BackgroundTransparency = 1
+    OButton.Text = ""
+    OButton.Parent = OpacitySlider
+
+    -- Inputs
+    local HexInput = Instance.new("TextBox")
+    HexInput.Size = UDim2.new(0, 80, 0, 25)
+    HexInput.Position = UDim2.new(0, 10, 0, 195)
+    HexInput.BackgroundColor3 = Color3.fromRGB(30, 31, 40)
+    HexInput.TextColor3 = Theme.Text
+    HexInput.Font = Theme.FontRegular
+    HexInput.TextSize = 12
+    HexInput.ClearTextOnFocus = false
+    HexInput.Parent = PaletteFrame
+    Instance.new("UICorner", HexInput).CornerRadius = UDim.new(0, 4)
+
+    local RGBInput = Instance.new("TextBox")
+    RGBInput.Size = UDim2.new(0, 80, 0, 25)
+    RGBInput.Position = UDim2.new(0, 100, 0, 195)
+    RGBInput.BackgroundColor3 = Color3.fromRGB(30, 31, 40)
+    RGBInput.TextColor3 = Theme.Text
+    RGBInput.Font = Theme.FontRegular
+    RGBInput.TextSize = 10
+    RGBInput.ClearTextOnFocus = false
+    RGBInput.Parent = PaletteFrame
+    Instance.new("UICorner", RGBInput).CornerRadius = UDim.new(0, 4)
+
+    local CopyBtn = Instance.new("TextButton")
+    CopyBtn.Size = UDim2.new(0, 170, 0, 25)
+    CopyBtn.Position = UDim2.new(0, 10, 0, 225)
+    CopyBtn.BackgroundColor3 = Color3.fromRGB(40, 41, 50)
+    CopyBtn.Text = "Copy color"
+    CopyBtn.TextColor3 = Theme.Text
+    CopyBtn.Font = Theme.FontMedium
+    CopyBtn.TextSize = 11
+    CopyBtn.Parent = PaletteFrame
+    Instance.new("UICorner", CopyBtn).CornerRadius = UDim.new(0, 4)
+
+    local currentH, currentS, currentV, currentA = 0, 1, 1, 1
+
+    local function getMousePos()
+        local mouse = Core.UserInputService:GetMouseLocation()
+        if ScreenGui.IgnoreGuiInset then
+            return mouse - GuiService:GetGuiInset()
+        end
+        return mouse
+    end
+
+    local function Color3ToHex(color)
+        return string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
+    end
+
+    local function updateInputs(color)
+        HexInput.Text = Color3ToHex(color)
+        RGBInput.Text = string.format("%d, %d, %d", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
+    end
+
+    local function updateVisuals()
+        local baseColor = Color3.fromHSV(currentH, 1, 1)
+        local finalColor = Color3.fromHSV(currentH, currentS, currentV)
+
+        SatValPicker.BackgroundColor3 = baseColor
+        SVPicker.Position = UDim2.new(currentS, 0, 1 - currentV, 0)
+        HueKnob.Position = UDim2.new(0.5, 0, currentH, 0)
+        AKnob.Position = UDim2.new(currentA, 0, 0.5, 0)
+
+        AGradient.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.new(0,0,0)),
+            ColorSequenceKeypoint.new(1, finalColor)
+        })
+
+        -- [FIX] Sync button color and update config
+        if activePaletteBtn then
+            activePaletteBtn.BackgroundColor3 = finalColor
+        end
+
+        if currentPaletteCallback then
+            currentPaletteCallback(finalColor, currentA)
+        else
+            updateAccentTheme(finalColor)
+        end
+        updateInputs(finalColor)
+    end
+
+    local function handleSV()
+        local mouse = getMousePos()
+        local rel = mouse - SatValPicker.AbsolutePosition
+        currentS = math.clamp(rel.X / SatValPicker.AbsoluteSize.X, 0, 1)
+        currentV = 1 - math.clamp(rel.Y / SatValPicker.AbsoluteSize.Y, 0, 1)
+        updateVisuals()
+    end
+
+    local function handleHue()
+        local mouse = getMousePos()
+        local rel = mouse - HueSlider.AbsolutePosition
+        currentH = math.clamp(rel.Y / HueSlider.AbsoluteSize.Y, 0, 1)
+        updateVisuals()
+    end
+
+    local function handleAlpha()
+        local mouse = getMousePos()
+        local rel = mouse - OpacitySlider.AbsolutePosition
+        currentA = math.clamp(rel.X / OpacitySlider.AbsoluteSize.X, 0, 1)
+        updateVisuals()
+    end
+
+    SVButton.MouseButton1Down:Connect(function()
+        handleSV()
+        local con = Core.RunService.RenderStepped:Connect(handleSV)
+        local endCon; endCon = Core.UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                con:Disconnect()
+                endCon:Disconnect()
+            end
+        end)
+    end)
+
+    HueButton.MouseButton1Down:Connect(function()
+        handleHue()
+        local con = Core.RunService.RenderStepped:Connect(handleHue)
+        local endCon; endCon = Core.UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                con:Disconnect()
+                endCon:Disconnect()
+            end
+        end)
+    end)
+
+    OButton.MouseButton1Down:Connect(function()
+        handleAlpha()
+        local con = Core.RunService.RenderStepped:Connect(handleAlpha)
+        local endCon; endCon = Core.UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                con:Disconnect()
+                endCon:Disconnect()
+            end
+        end)
+    end)
+
+    HexInput.FocusLost:Connect(function(enter)
+        if enter then
+            pcall(function()
+                local hex = HexInput.Text:gsub("#", "")
+                local r = tonumber(hex:sub(1, 2), 16) / 255
+                local g = tonumber(hex:sub(3, 4), 16) / 255
+                local b = tonumber(hex:sub(5, 6), 16) / 255
+                local h, s, v = Color3.new(r, g, b):ToHSV()
+                currentH, currentS, currentV = h, s, v
+                updateVisuals()
+            end)
+        end
+    end)
+
+    CopyBtn.MouseButton1Click:Connect(function()
+        if setclipboard then setclipboard(HexInput.Text) end
+    end)
+
+    openPalette = function(btn, callback)
+        if PaletteFrame.Visible and activePaletteBtn == btn then
+            PaletteFrame.Visible = false
+            activePaletteBtn = nil
+            currentPaletteCallback = nil
+            return
+        end
+
+        PaletteFrame.Visible = true
+        activePaletteBtn = btn
+        currentPaletteCallback = callback
+
+        local bPos = btn.AbsolutePosition
+        PaletteFrame.Position = UDim2.new(0, bPos.X - PaletteFrame.Size.X.Offset/2 + btn.AbsoluteSize.X/2, 0, bPos.Y - PaletteFrame.Size.Y.Offset - 10)
+
+        pcall(function()
+            local color = btn.BackgroundColor3
+            local h, s, v = color:ToHSV()
+            currentH, currentS, currentV = h, s, v
+            currentA = 1  -- Default to full opacity for now or fetch from attribute
+            updateVisuals()
+        end)
+    end
+end
+
+-- Состояние
+
+-- Инициализация FOV Drawing объектов
+local function createDrawing(type, props)
+    if not State.DrawingRegistry then State.DrawingRegistry = {} end
+    local ok, obj = pcall(function() return Drawing and Drawing.new(type) end)
+    if ok and obj then
+        if type == "Text" then obj.Center = true; obj.Outline = true end
+        obj.Transparency = 1
+        obj.Visible = false
+        obj.ZIndex = 10
+
+        if props then
+            for k, v in pairs(props) do
+                pcall(function() obj[k] = v end)
+            end
+        end
+        table.insert(State.DrawingRegistry, obj)
+        return obj
+    end
+    local dummy = {}
+    return setmetatable(dummy, {
+        __newindex = function() end,
+        __index = function(_, k)
+            if k == "Remove" or k == "Destroy" then return function() end end
+            return nil
+        end
+    })
+end
+
+State.SilentFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = Config.Combat.SilentAim.FieldOfView, Color = Config.Combat.SilentAim.FOVColor })
+State.RageFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = Config.Combat.Ragebot.FieldOfView, Color = Config.Combat.Ragebot.FOVColor })
+State.LegitFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = 100, Color = Color3.new(1,1,1) })
+State.PenText = createDrawing("Text", { Visible = false, Center = true, Size = 18, Font = 2, Color = Color3.fromRGB(0, 255, 0), Outline = true })
+
+-- Initialize Cube Checker Part
+pcall(function()
+    local p = Instance.new("Part")
+    p.Name = "Memesense_Cube"
+    p.Anchored = true
+    p.CanCollide = false
+    p.CanQuery = false
+    p.CastShadow = false
+    p.Transparency = 1
+    p.Material = Enum.Material.Neon
+    p.Size = Vector3.new(1.5, 1.5, 0.01)
+
+    local gui = Instance.new("SurfaceGui", p)
+    gui.AlwaysOnTop = true
+    local frame = Instance.new("Frame", gui)
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+
+    State.CubePart = p
+end)
+
+
+local function toggleMenu(state)
+    if not Internal.MainFrame then return end
+
+    if state then
+        -- Refresh current tab when opening
+        if _G.SelectTab then
+            _G.SelectTab(State.CurrentTab, true)
+        end
+    end
+
+    local blur = game:GetService("Lighting"):FindFirstChild("KubchikBlur") or BlurEffect
+    local dim = Internal.MainFrame.Parent and Internal.MainFrame.Parent:FindFirstChild("KubchikDim")	if state then
+		Internal.CelestialPlaySound("open")
+		-- Разлочиваем мышь от камеры (работает в 1-м лице
+		pcall(function() Internal.MouseModal.Modal = true end)
+		-- Кастомный курсор меню (как в Memesens/Obsidian)
+		if Internal.SetMenuCursorVisible and (Config.Theme.Cursor or "Plus") ~= "None" then
+            Internal.SetMenuCursorVisible(true)
+            pcall(function() Internal.SetMenuCursorStyle(Config.Theme.Cursor or "Plus") end)
+        end
+        Internal.MainFrame.Visible = true  -- Показываем сразу перед анимацией
+        if blur then
+            blur.Enabled = true
+            Core.TweenService:Create(blur, TweenInfo.new(0.25), {Size = Config.Theme.Blur}):Play()
+        end
+
+        Internal.MainFrame.Size = UDim2.fromOffset(800, 500)
+        Core.TweenService:Create(Internal.MainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {GroupTransparency = 0, Size = UDim2.fromOffset(880, 560)}):Play()
+
+        if dim then
+            Core.TweenService:Create(dim, TweenInfo.new(0.25), {BackgroundTransparency = 1 - Config.Theme.Dim}):Play()
+        end
+        if Internal.Celestial and Internal.Celestial.SettingsFrame then
+            Internal.Celestial.SettingsFrame:Destroy()
+            Internal.Celestial.SettingsFrame = nil
+            Internal.Celestial.ActiveSettingsModule = nil
+            Internal.Celestial.SettingsScroll = nil
+            State.SelectedModule = nil
+        end	else
+		local tweenTime = 0.15
+		pcall(function() Internal.MouseModal.Modal = false end)
+		if Internal.SetMenuCursorVisible then Internal.SetMenuCursorVisible(false) end
+        -- Анимация закрытия (свертывание)
+        Core.TweenService:Create(Internal.MainFrame, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {GroupTransparency = 1, Size = UDim2.fromOffset(800, 500)}):Play()
+
+        if PaletteFrame then PaletteFrame.Visible = false end
+
+        if blur then
+            local bt = Core.TweenService:Create(blur, TweenInfo.new(tweenTime), {Size = 0})
+            bt:Play()
+            bt.Completed:Once(function()
+                if not Internal.MainFrame.Visible and blur then blur.Enabled = false end
+            end)
+        end
+        if dim then
+            Core.TweenService:Create(dim, TweenInfo.new(tweenTime), {BackgroundTransparency = 1}):Play()
+        end
+        if Internal.Celestial and Internal.Celestial.SettingsFrame then
+            Internal.Celestial.SettingsFrame:Destroy()
+            Internal.Celestial.SettingsFrame = nil
+            Internal.Celestial.ActiveSettingsModule = nil
+            Internal.Celestial.SettingsScroll = nil
+            State.SelectedModule = nil
+        end
+
+        -- Ждем завершения анимации и только потом скрываем
+        task.delay(tweenTime, function()
+            if not state then
+                Internal.MainFrame.Visible = false
+            end
+        end)
+    end
+end
+
+-- ЗАГРУЗОЧНЫЙ ЭКРАН (из Logic.txt)
+BackgroundDim, BlurEffect = nil, nil
+(function()
+    -- Фоновый blur/dim (из Logic)
+    BackgroundDim = Instance.new("Frame")
+    BackgroundDim.Name = "KubchikDim"
+    BackgroundDim.Size = UDim2.new(1, 0, 1, 0)
+    BackgroundDim.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    BackgroundDim.BackgroundTransparency = 1
+    BackgroundDim.ZIndex = -1
+    BackgroundDim.Parent = ScreenGui
+
+    BlurEffect = game:GetService("Lighting"):FindFirstChild("KubchikBlur") or Instance.new("BlurEffect")
+    BlurEffect.Name = "KubchikBlur"
+    BlurEffect.Size = 0
+    BlurEffect.Parent = game:GetService("Lighting")
+
+    -- Загрузочный экран (анимированный)
+    local LoadingBackdrop = Instance.new("Frame")
+    LoadingBackdrop.Name = "LoadingBackdrop"
+    LoadingBackdrop.Size = UDim2.new(1, 0, 1, 0)
+    LoadingBackdrop.BackgroundColor3 = Color3.fromRGB(5, 6, 12)
+    LoadingBackdrop.BorderSizePixel = 0
+    LoadingBackdrop.ZIndex = 5000
+    LoadingBackdrop.Parent = ScreenGui
+
+    -- Стильный логотип "O" для Overmind
+    local LogoContainer = Instance.new("Frame")
+    LogoContainer.Size = UDim2.new(0, 150, 0, 150)
+    LogoContainer.Position = UDim2.new(0.5, 0, 0.45, -80)
+    LogoContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+    LogoContainer.BackgroundTransparency = 1
+    LogoContainer.ZIndex = 5001
+    LogoContainer.Parent = LoadingBackdrop
+
+    local OuterRing = Instance.new("Frame")
+    OuterRing.Size = UDim2.new(1, 0, 1, 0)
+    OuterRing.BackgroundTransparency = 1
+    OuterRing.Parent = LogoContainer
+    local OuterStroke = Instance.new("UIStroke")
+    OuterStroke.Color = Theme.Accent
+    OuterStroke.Thickness = 4
+    OuterStroke.Parent = OuterRing
+    Instance.new("UICorner", OuterRing).CornerRadius = UDim.new(1, 0)
+
+    local InnerCircle = Instance.new("ImageLabel")
+    InnerCircle.Name = "Internal.LoadingLogo"
+    InnerCircle.Size = UDim2.new(0.6, 0, 0.6, 0)
+    InnerCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+    InnerCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    InnerCircle.BackgroundTransparency = 1
+    InnerCircle.Image = "rbxassetid://10723352321"  -- fallback
+    InnerCircle.Parent = LogoContainer
+    Internal.LoadingLogo = InnerCircle
+    Instance.new("UICorner", InnerCircle).CornerRadius = UDim.new(1, 0)
+    local InnerGlow = Instance.new("UIStroke")
+    InnerGlow.Color = Color3.fromRGB(255, 255, 255)
+    InnerGlow.Thickness = 1
+    InnerGlow.Parent = InnerCircle
+
+    local HUDCircle = Instance.new("ImageLabel")
+    HUDCircle.Name = "HUDCircle"
+    HUDCircle.Size = UDim2.new(0, 400, 0, 400)
+    HUDCircle.Position = UDim2.new(0.5, 0, 0.45, 0)
+    HUDCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    HUDCircle.BackgroundTransparency = 1
+    HUDCircle.Image = "rbxassetid://6015118429"
+    HUDCircle.ImageColor3 = Theme.Accent
+    HUDCircle.ImageTransparency = 0.7
+    HUDCircle.ZIndex = 5001
+    HUDCircle.Parent = LoadingBackdrop
+
+    local LoadingMainTitle = Instance.new("TextLabel")
+    LoadingMainTitle.Size = UDim2.new(1, 0, 0, 60)
+    LoadingMainTitle.Position = UDim2.new(0.5, 0, 0.45, 120)
+    LoadingMainTitle.AnchorPoint = Vector2.new(0.5, 0.5)
+    LoadingMainTitle.BackgroundTransparency = 1
+    LoadingMainTitle.Text = "OVERMIND"
+    LoadingMainTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LoadingMainTitle.TextSize = 55
+    LoadingMainTitle.Font = Theme.FontBold
+    LoadingMainTitle.TextTransparency = 0
+    LoadingMainTitle.ZIndex = 5003
+    LoadingMainTitle.Parent = LoadingBackdrop
+
+    local LoadingSubTitle = Instance.new("TextLabel")
+    LoadingSubTitle.Size = UDim2.new(1, 0, 0, 20)
+    LoadingSubTitle.Position = UDim2.new(0.5, 0, 0.45, 165)
+    LoadingSubTitle.AnchorPoint = Vector2.new(0.5, 0.5)
+    LoadingSubTitle.BackgroundTransparency = 1
+    LoadingSubTitle.Text = "SYSTEM INITIALIZING"
+    LoadingSubTitle.TextColor3 = Color3.fromRGB(200, 230, 255)
+    LoadingSubTitle.TextSize = 16
+    LoadingSubTitle.Font = Enum.Font.GothamBold
+    LoadingSubTitle.TextTransparency = 1
+    LoadingSubTitle.ZIndex = 5003
+    LoadingSubTitle.Parent = LoadingBackdrop
+
+    local LoadingStatus = Instance.new("TextLabel")
+    LoadingStatus.Size = UDim2.new(1, 0, 0, 20)
+    LoadingStatus.Position = UDim2.new(0.5, 0, 0.45, 195)
+    LoadingStatus.AnchorPoint = Vector2.new(0.5, 0.5)
+    LoadingStatus.BackgroundTransparency = 1
+    LoadingStatus.Text = "PREPARING..."
+    LoadingStatus.TextColor3 = Color3.fromRGB(0, 255, 255)
+    LoadingStatus.TextSize = 11
+    LoadingStatus.Font = Enum.Font.GothamBold
+    LoadingStatus.ZIndex = 5003
+    LoadingStatus.Parent = LoadingBackdrop
+
+    local ProgressBarBG = Instance.new("Frame")
+    ProgressBarBG.Name = "ProgressBarBG"
+    ProgressBarBG.Size = UDim2.new(0, 260, 0, 4)
+    ProgressBarBG.Position = UDim2.new(0.5, 0, 0.45, 220)
+    ProgressBarBG.AnchorPoint = Vector2.new(0.5, 0.5)
+    ProgressBarBG.BackgroundColor3 = Color3.fromRGB(10, 15, 25)
+    ProgressBarBG.BorderSizePixel = 0
+    ProgressBarBG.ZIndex = 5003
+    ProgressBarBG.Parent = LoadingBackdrop
+    Instance.new("UICorner", ProgressBarBG).CornerRadius = UDim.new(1, 0)
+
+    local ProgressBarFill = Instance.new("Frame")
+    ProgressBarFill.Name = "ProgressBarFill"
+    ProgressBarFill.Size = UDim2.new(0, 0, 1, 0)
+    ProgressBarFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    ProgressBarFill.BorderSizePixel = 0
+    ProgressBarFill.ZIndex = 5004
+    ProgressBarFill.Parent = ProgressBarBG
+    Instance.new("UICorner", ProgressBarFill).CornerRadius = UDim.new(1, 0)
+
+    local PFillGrad = Instance.new("UIGradient")
+    PFillGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 255, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 150, 255))
+    })
+    PFillGrad.Parent = ProgressBarFill
+
+    local PFillGlow = Instance.new("ImageLabel")
+    PFillGlow.Size = UDim2.new(1.2, 0, 4, 0)
+    PFillGlow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    PFillGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+    PFillGlow.BackgroundTransparency = 1
+    PFillGlow.Image = "rbxassetid://6014264734"
+    PFillGlow.ImageColor3 = Color3.fromRGB(0, 255, 255)
+    PFillGlow.ImageTransparency = 0.6
+    PFillGlow.Parent = ProgressBarFill
+
+    -- Анимация загрузки
+    task.spawn(function()
+        local fragments = {}
+        for i = 1, 40 do
+            local p = Instance.new("Frame")
+            p.Size = UDim2.new(0, 5, 0, 5)
+            local angle = math.rad(math.random(0, 360))
+            local dist = math.random(250, 450)
+            p.Position = UDim2.new(0.5, math.cos(angle) * dist, 0.45, math.sin(angle) * dist)
+            p.BackgroundColor3 = Color3.fromRGB(0, 255, 255)
+            p.BorderSizePixel = 0
+            p.ZIndex = 5005
+            p.Parent = LoadingBackdrop
+
+            Core.TweenService:Create(p, TweenInfo.new(1, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
+                Position = UDim2.new(0.5, 0, 0.45, 0),
+                BackgroundTransparency = 1,
+                Rotation = 360
+            }):Play()
+            table.insert(fragments, p)
+        end
+        task.wait(1)
+        for _, v in fragments do v:Destroy() end
+
+        LoadingStatus.Text = "CHECKING ASSETS..."
+        Core.TweenService:Create(LogoContainer, TweenInfo.new(0.5), {BackgroundTransparency = 1}):Play()
+        Core.TweenService:Create(HUDCircle, TweenInfo.new(0.5), {ImageTransparency = 0.7}):Play()
+        Core.TweenService:Create(LoadingMainTitle, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+        Core.TweenService:Create(LoadingSubTitle, TweenInfo.new(0.5), {TextTransparency = 0}):Play()
+
+        -- Интеграция Asset Verification
+        pcall(function()
+            if not isfolder(AssetManager.BaseFolder) then makefolder(AssetManager.BaseFolder) end
+            if not isfolder(AssetManager.SkinsFolder) then makefolder(AssetManager.SkinsFolder) end
+            if not isfolder(AssetManager.HitsoundsFolder) then makefolder(AssetManager.HitsoundsFolder) end
+            if not isfolder(AssetManager.EnableSoundsFolder) then makefolder(AssetManager.EnableSoundsFolder) end
+            if not isfolder(AssetManager.HitmarkersFolder) then makefolder(AssetManager.HitmarkersFolder) end
+            if not isfolder(AssetManager.IconsFolder) then makefolder(AssetManager.IconsFolder) end
+
+            local listURL = AssetManager.RepoURL .. AssetManager.ListFile
+            local success, content = pcall(function() return game:HttpGet(listURL) end)
+
+            if success and content then
+                -- [FIX] Reverting to line-based parsing and ensuring no hidden characters
+                AssetManager.Files = {}
+                for line in content:gmatch("[^\r\n]+") do
+                    local clean = line:gsub("^%s*(.-)%s*$", "%1"):gsub("[\128-\255]", "")  -- Trim and remove non-ASCII
+                    if #clean > 3 and clean:find("%.") then
+                        table.insert(AssetManager.Files, clean)
+                    end
+                end
+
+                local total = #AssetManager.Files
+                local toDownload = {}
+
+                -- Phase 1: Robust recursive verification
+                local existing = {}
+                local function scanRecursive(dir)
+                    local ok, files = pcall(listfiles, dir)
+                    if not ok or not files then return end
+
+                    for _, f in ipairs(files) do
+                        local name = f:match("([^/\\]+)$") or f
+                        local fullPath = f
+                        if not f:find("/") and not f:find("\\") then
+                            fullPath = dir .. "/" .. f
+                        end
+
+                        if isfolder(fullPath) then
+                            scanRecursive(fullPath)
+                        else
+                            existing[name:lower()] = true
+                        end
+                    end
+                end
+
+                _G.Log("Checking local files...", Color3.fromRGB(255, 255, 0))
+                scanRecursive("Overmind")
+
+                for i, fullPath in ipairs(AssetManager.Files) do
+                    local fileName = fullPath:match("([^/\\]+)$") or fullPath
+                    local isWav = fileName:lower():find("%.wav") or fileName:lower():find("%.mp3")
+                    -- [ МАРШРУТИЗАЦИЯ ] папки на GitHub → локальные папки
+                    local destFolder
+                    local lowerPath = fullPath:lower()
+                    if lowerPath:find("^enablesounds/") then
+                        destFolder = AssetManager.EnableSoundsFolder
+                    elseif lowerPath:find("^hitmarkers/") then
+                        destFolder = AssetManager.HitmarkersFolder
+                    elseif lowerPath:find("^icons/") then
+                        destFolder = AssetManager.IconsFolder
+                    else
+                        destFolder = isWav and AssetManager.HitsoundsFolder or AssetManager.SkinsFolder
+                    end
+
+                    -- [ ФИКС ] существование проверяем по конечному пути (isfile)
+                    local alreadyHere = isfile and isfile(destFolder .. fileName)
+                    if not alreadyHere then
+                        table.insert(toDownload, {
+                            urlPath = fullPath:gsub(" ", "%%20"),  -- URL Encode spaces
+                            localName = fileName,
+                            dest = destFolder
+                        })
+                        -- Debug missing files in F9 console
+                        print("[ASSET MANAGER] Missing: " .. fileName)
+                    end
+
+                    if i % 50 == 0 or i == total then
+                        LoadingStatus.Text = string.format("VERIFYING: %d/%d", i, total)
+                        local pct = (i / total) * 0.4
+                        Core.TweenService:Create(ProgressBarFill, TweenInfo.new(0.1), {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+                    end
+                end
+
+                -- Phase 2: Multi-threaded download with correct paths
+                if #toDownload > 0 then
+                    _G.Log("Missing " .. #toDownload .. " assets. Starting download...", Color3.fromRGB(255, 150, 0))
+                    local totalDL = #toDownload
+                    local completed = 0
+                    local activeThreads = 0
+                    local maxThreads = 8  -- Increased thread count for speed
+
+                    local queue = {}
+                    for _, data in ipairs(toDownload) do table.insert(queue, data) end
+
+                    while completed < totalDL do
+                        if #queue > 0 and activeThreads < maxThreads then
+                            local data = table.remove(queue, 1)
+                            activeThreads = activeThreads + 1
+
+                            task.spawn(function()
+                                local downloadURL = AssetManager.RepoURL .. data.urlPath
+                                local s, res = pcall(function() return game:HttpGet(downloadURL) end)
+
+                if s and res and type(res) == "string" and #res > 100 then
+                    local writeSuccess = pcall(function()
+                        if not isfolder(data.dest) then makefolder(data.dest) end
+                        writefile(data.dest .. data.localName, res)
+                    end)
+                    if not writeSuccess then
+                        print("[ASSET MANAGER] Write error: " .. data.localName)
+                    end
+                else
+                    print("[ASSET MANAGER] Failed download source: " .. tostring(data.localName))
+                end
+
+                -- ГАРАНТИРОВАННОЕ ВЫПОЛНЕНИЕ (Блок Finally)
+                completed = completed + 1
+                activeThreads = activeThreads - 1
+
+                if completed % 5 == 0 or completed == totalDL then
+                    LoadingStatus.Text = string.format("DOWNLOADING: %d/%d", completed, totalDL)
+                    local pct = 0.4 + ((completed / totalDL) * 0.6)
+                    pcall(function()
+                        Core.TweenService:Create(ProgressBarFill, TweenInfo.new(0.2), {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+                    end)
+                end
+            end)
+        end
+        task.wait()
+    end
+                else
+                    _G.Log("All assets verified. Loading script...", Color3.fromRGB(0, 255, 100))
+                    Core.TweenService:Create(ProgressBarFill, TweenInfo.new(0.5), {Size = UDim2.new(1, 0, 1, 0)}):Play()
+                end
+            else
+                _G.Log("Asset list failed. Skipping check.", Color3.fromRGB(255, 100, 100))
+                Core.TweenService:Create(ProgressBarFill, TweenInfo.new(1), {Size = UDim2.new(1, 0, 1, 0)}):Play()
+            end
+        end)
+
+        task.wait(0.5)
+        LoadingStatus.Text = "READY"
+        task.wait(0.5)
+
+        local fadeOut = TweenInfo.new(0.5)
+        for _, obj in LoadingBackdrop:GetDescendants() do
+            pcall(function()
+                if obj:IsA("ImageLabel") or obj:IsA("ViewportFrame") then Core.TweenService:Create(obj, fadeOut, {ImageTransparency = 1}):Play()
+                elseif obj:IsA("TextLabel") then Core.TweenService:Create(obj, fadeOut, {TextTransparency = 1}):Play()
+                elseif obj:IsA("Frame") then Core.TweenService:Create(obj, fadeOut, {BackgroundTransparency = 1}):Play() end
+            end)
+        end
+        Core.TweenService:Create(LoadingBackdrop, fadeOut, {BackgroundTransparency = 1}):Play()
+        task.wait(0.5)
+        LoadingBackdrop:Destroy()
+        Internal.LoadingLogo = nil
+        State.Loaded = true
+        toggleMenu(true)
+    end)
+end)()
+
+-- GUI: CELESTIAL EDITION (перенесено из Guicode.luau
+
+-- [ ФОРВАРД-ДЕКЛАРАЦИЯ ПАНЕЛИ ПАРАМЕТРОВ ПКМ ]
+local CelestialOpenRightSettingsPanel  -- defined below
+
+-- [ CELESTIAL THEMES ]
+local ThemesList = {
+    {Name = "Purple Blue", Colors = {"#5433FF", "#00FFFF"}, Index = 1},
+    {Name = "Candy", Colors = {"#FC00FF", "#00DBDE"}, Index = 2},
+    {Name = "Lilac", Colors = {"#C8A2C8", "#B93B8F"}, Index = 3},
+    {Name = "Mint Crimson", Colors = {"#0ABFBC", "#FC354C"}, Index = 4},
+    {Name = "Superman", Colors = {"#0099F7", "#F11712"}, Index = 5},
+    {Name = "Ruby", Colors = {"#E0115F", "#9B111E"}, Index = 6},
+    {Name = "Cosmos", Colors = {"#C33764", "#1D2671"}, Index = 7},
+    {Name = "Amethyst Yellow", Colors = {"#8E43AD", "#F0EC8B"}, Index = 8},
+    {Name = "Peach", Colors = {"#FFCBA4", "#F47C64"}, Index = 9},
+    {Name = "Lavender", Colors = {"#B57EDC", "#7F50C0"}, Index = 10},
+    {Name = "Lunada", Colors = {"#5433FF", "#A5FECB"}, Index = 11},
+    {Name = "Purple Sea", Colors = {"#8360C3", "#2EBF91"}, Index = 12},
+    {Name = "Sunset", Colors = {"#FF4500", "#FFA500"}, Index = 13},
+    {Name = "Orange Pink", Colors = {"#FF6347", "#FF69B4"}, Index = 14},
+    {Name = "Blueberry", Colors = {"#29293D", "#5A5A7A"}, Index = 15},
+    {Name = "Eucalyptus", Colors = {"#44D7A8", "#006442"}, Index = 16},
+    {Name = "Mint Chocolate", Colors = {"#98FB98", "#006400"}, Index = 17},
+    {Name = "Raspberry Smoothie", Colors = {"#FFB6C1", "#FF1493"}, Index = 18},
+    {Name = "Frostbite", Colors = {"#00FFFF", "#003333"}, Index = 19},
+    {Name = "Cold Berry", Colors = {"#D5CCEA", "#491F7A"}, Index = 20},
+    {Name = "Stormy Sea", Colors = {"#4158D0", "#C850C0"}, Index = 21},
+    {Name = "Sunset Glow", Colors = {"#FF4500", "#1E0E00"}, Index = 22},
+    {Name = "Crimson Dawn", Colors = {"#B3001B", "#0F080F"}, Index = 23},
+    {Name = "Crimson Beach", Colors = {"#8C001A", "#FF5733"}, Index = 24},
+    {Name = "Moss", Colors = {"#134E5E", "#71B280"}, Index = 25},
+    {Name = "Coral", Colors = {"#FF7F50", "#FF4500"}, Index = 26},
+    {Name = "Golden Night", Colors = {"#FFD100", "#202020"}, Index = 27}
+}
+
+local CurrentCelestialTheme = ThemesList[4]  -- Дефолт: Мятно-малиновый
+
+-- [ ПАЛИТРА CELESTIAL ]
+local CelestialPalette = {
+    WindowBg = Color3.fromHex("#08080A"),
+    SidebarBg = Color3.fromHex("#040405"),
+    CardBg = Color3.fromHex("#0B0B0D"),
+    CardBorder = Color3.fromHex("#131316"),
+    Text = Color3.fromHex("#FFFFFF"),
+    SubText = Color3.fromHex("#8E8E93"),
+    CategoryText = Color3.fromHex("#444446"),
+    SliderTrack = Color3.fromHex("#222224"),
+    OptionBg = Color3.fromHex("#16161A")
+}
+
+local CelestialFonts = {
+    Bold = Font.fromEnum(Enum.Font.FredokaOne),
+    Medium = Font.fromEnum(Enum.Font.FredokaOne),
+    Regular = Font.fromEnum(Enum.Font.FredokaOne)
+}
+
+-- [ v65 ] СТРАНИЦА ДРУЗЕЙ. Отдельная функция: у IIFE сайдбара уже 150 local,
+-- а в Luau лимит 200 на функцию, поэтому страницу собираем здесь.
+Internal.FriendsBuildPage = function(parent)
+    local group = Instance.new("CanvasGroup")
+    group.Name = "Friends_Group"
+    group.Size = UDim2.new(1, 0, 1, -35)
+    group.Position = UDim2.fromOffset(0, 35)
+    group.BackgroundTransparency = 1
+    group.GroupTransparency = 1
+    group.Visible = false
+    group.ZIndex = 5
+    group.Parent = parent
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "FriendsScroll"
+    scroll.Size = UDim2.fromScale(1, 1)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Color3.fromHex("#1C1C1F")
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ZIndex = 5
+    scroll.Parent = group
+
+    local pad = Instance.new("UIPadding", scroll)
+    pad.PaddingLeft = UDim.new(0, 15)
+    pad.PaddingRight = UDim.new(0, 15)
+    pad.PaddingTop = UDim.new(0, 12)
+    pad.PaddingBottom = UDim.new(0, 15)
+
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local header = Instance.new("Frame")
+    header.Name = "FriendsHeader"
+    header.Size = UDim2.new(1, 0, 0, 22)
+    header.BackgroundTransparency = 1
+    header.LayoutOrder = 1
+    header.Parent = scroll
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(0, 130, 1, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "FRIENDS"
+    title.TextColor3 = CelestialPalette.Text
+    title.FontFace = CelestialFonts.Bold
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = header
+
+    local count = Instance.new("TextLabel")
+    count.Name = "FriendsCount"
+    count.AnchorPoint = Vector2.new(1, 0)
+    count.Position = UDim2.new(1, -96, 0, 2)
+    count.Size = UDim2.new(0, 220, 0, 18)
+    count.BackgroundTransparency = 1
+    count.Text = "0 online / 0"
+    count.TextColor3 = CelestialPalette.SubText
+    count.FontFace = CelestialFonts.Medium
+    count.TextSize = 11
+    count.TextXAlignment = Enum.TextXAlignment.Right
+    count.Parent = header
+
+    local refresh = Instance.new("TextButton")
+    refresh.Name = "FriendsRefresh"
+    refresh.AnchorPoint = Vector2.new(1, 0)
+    refresh.Position = UDim2.new(1, 0, 0, 0)
+    refresh.Size = UDim2.fromOffset(88, 22)
+    refresh.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    refresh.Text = "REFRESH"
+    refresh.TextColor3 = CelestialPalette.Text
+    refresh.FontFace = CelestialFonts.Bold
+    refresh.TextSize = 10
+    refresh.AutoButtonColor = false
+    refresh.Parent = header
+    Instance.new("UICorner", refresh).CornerRadius = UDim.new(0, 6)
+    local refreshStroke = Instance.new("UIStroke", refresh)
+    refreshStroke.Color = Config.Theme.Accent
+    refreshStroke.Thickness = 1
+    table.insert(Internal.UIObjects.Accents, refreshStroke)
+
+    local addRow = Instance.new("Frame")
+    addRow.Name = "FriendsAddRow"
+    addRow.Size = UDim2.new(1, 0, 0, 32)
+    addRow.BackgroundTransparency = 1
+    addRow.LayoutOrder = 2
+    addRow.Parent = scroll
+
+    local input = Instance.new("TextBox")
+    input.Name = "FriendsInput"
+    input.Size = UDim2.new(1, -108, 1, 0)
+    input.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
+    input.Text = ""
+    input.PlaceholderText = "User ID or nickname - a request goes to them"
+    input.PlaceholderColor3 = CelestialPalette.CategoryText
+    input.TextColor3 = CelestialPalette.Text
+    input.FontFace = CelestialFonts.Medium
+    input.TextSize = 11
+    input.TextXAlignment = Enum.TextXAlignment.Left
+    input.ClearTextOnFocus = false
+    input.Parent = addRow
+    Instance.new("UICorner", input).CornerRadius = UDim.new(0, 6)
+    local inputPad = Instance.new("UIPadding", input)
+    inputPad.PaddingLeft = UDim.new(0, 10)
+    local inputStroke = Instance.new("UIStroke", input)
+    inputStroke.Color = Color3.fromRGB(38, 39, 53)
+    inputStroke.Thickness = 1
+
+    local addBtn = Instance.new("TextButton")
+    -- [ ВАЖНО ] имя "Badge": updateAccentTheme красит элементы с этим именем
+    -- в акцент темы, поэтому кнопка идёт вместе с темой
+    addBtn.Name = "Badge"
+    addBtn.Position = UDim2.new(1, -100, 0, 0)
+    addBtn.Size = UDim2.fromOffset(100, 32)
+    addBtn.BackgroundColor3 = Config.Theme.Accent
+    addBtn.Text = "+ ADD"
+    addBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    addBtn.FontFace = CelestialFonts.Bold
+    addBtn.TextSize = 11
+    addBtn.AutoButtonColor = false
+    addBtn.Parent = addRow
+    Instance.new("UICorner", addBtn).CornerRadius = UDim.new(0, 6)
+    table.insert(Internal.UIObjects.Accents, addBtn)
+
+    local hint = Instance.new("TextLabel")
+    hint.Name = "FriendsHint"
+    hint.Size = UDim2.new(1, 0, 0, 14)
+    hint.BackgroundTransparency = 1
+    hint.Text = "Statuses come from your server."
+    hint.TextColor3 = CelestialPalette.CategoryText
+    hint.FontFace = CelestialFonts.Medium
+    hint.TextSize = 10
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextTruncate = Enum.TextTruncate.AtEnd
+    hint.LayoutOrder = 3
+    hint.Parent = scroll
+
+    -- [ v75 ] ЗАЯВКИ: входящие с кнопками ответа и исходящие, которые ждут согласия.
+    -- Блок занимает место только когда есть что показать, поэтому список друзей не съезжает.
+    local requests = Instance.new("Frame")
+    requests.Name = "FriendsRequests"
+    requests.Size = UDim2.new(1, 0, 0, 0)
+    requests.AutomaticSize = Enum.AutomaticSize.Y
+    requests.BackgroundTransparency = 1
+    requests.Visible = false
+    requests.LayoutOrder = 4
+    requests.Parent = scroll
+
+    local requestsLayout = Instance.new("UIListLayout", requests)
+    requestsLayout.Padding = UDim.new(0, 6)
+    requestsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local requestsHeader = Instance.new("Frame")
+    requestsHeader.Name = "RequestsHeader"
+    requestsHeader.Size = UDim2.new(1, 0, 0, 16)
+    requestsHeader.BackgroundTransparency = 1
+    requestsHeader.LayoutOrder = 0
+    requestsHeader.Parent = requests
+
+    local requestsTitle = Instance.new("TextLabel")
+    requestsTitle.Size = UDim2.new(1, -140, 1, 0)
+    requestsTitle.BackgroundTransparency = 1
+    requestsTitle.Text = "REQUESTS"
+    requestsTitle.TextColor3 = CelestialPalette.Text
+    requestsTitle.FontFace = CelestialFonts.Bold
+    requestsTitle.TextSize = 12
+    requestsTitle.TextXAlignment = Enum.TextXAlignment.Left
+    requestsTitle.Parent = requestsHeader
+
+    local requestsCount = Instance.new("TextLabel")
+    requestsCount.Name = "RequestsCount"
+    requestsCount.AnchorPoint = Vector2.new(1, 0)
+    requestsCount.Position = UDim2.new(1, 0, 0, 1)
+    requestsCount.Size = UDim2.new(0, 140, 0, 14)
+    requestsCount.BackgroundTransparency = 1
+    requestsCount.Text = ""
+    requestsCount.TextColor3 = CelestialPalette.CategoryText
+    requestsCount.FontFace = CelestialFonts.Medium
+    requestsCount.TextSize = 10
+    requestsCount.TextXAlignment = Enum.TextXAlignment.Right
+    requestsCount.Parent = requestsHeader
+
+    local requestsList = Instance.new("Frame")
+    requestsList.Name = "RequestsList"
+    requestsList.Size = UDim2.new(1, 0, 0, 0)
+    requestsList.AutomaticSize = Enum.AutomaticSize.Y
+    requestsList.BackgroundTransparency = 1
+    requestsList.LayoutOrder = 1
+    requestsList.Parent = requests
+
+    local requestsListLayout = Instance.new("UIListLayout", requestsList)
+    requestsListLayout.Padding = UDim.new(0, 6)
+    requestsListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local list = Instance.new("Frame")
+    list.Name = "FriendsList"
+    list.Size = UDim2.new(1, 0, 0, 0)
+    list.AutomaticSize = Enum.AutomaticSize.Y
+    list.BackgroundTransparency = 1
+    list.LayoutOrder = 5
+    list.Parent = scroll
+
+    local listLayout = Instance.new("UIListLayout", list)
+    listLayout.Padding = UDim.new(0, 8)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local function submit()
+        local text = input.Text
+        input.Text = ""
+        if Internal.FriendsAdd then
+            Internal.FriendsAdd(text)
+        end
+    end
+
+    addBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        submit()
+    end)
+    input.FocusLost:Connect(function(enterPressed)
+        if enterPressed then submit() end
+    end)
+    refresh.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if Internal.FriendsRefresh then Internal.FriendsRefresh() end
+    end)
+
+    Internal.Celestial.Friends = {
+        Page = group,
+        Scroll = scroll,
+        List = list,
+        Count = count,
+        Hint = hint,
+        Input = input,
+        Refresh = refresh,
+        Requests = requests,
+        RequestsList = requestsList,
+        RequestsCount = requestsCount,
+    }
+    Internal.Celestial.TabGroups["Friends"] = group
+    Internal.Celestial.PageFrames["Friends"] = scroll
+end
+
+-- [ ГЛОБАЛЬНОЕ СОСТОЯНИЕ GUI ]
+Internal.Celestial = {
+    GradientObjects = {},
+    ThemeCardStrokes = {},
+    CardsInstances = {},
+    ActiveTab = "Legit",
+    SettingsFrame = nil,
+    ActiveSettingsModule = nil,
+    TabGroups = {},
+    PageFrames = {},
+    TabButtons = {},
+    TabOffsets = {},  -- [ v57 ] Y кнопки вкладки в рейле (по нему ездит полоска)
+    ModuleSchemas = {},  -- [ v57 ] schema модуля
+    ActivePill = nil,  -- [ v57 ] полоска активной вкладки сайдбара
+    ScrollRailTo = nil,  -- [ v57 ] подскролл рейла к активной вкладке
+    SearchText = "",
+    ShimmerPool = {},
+    Accum = 0,
+    AnimType = "Spin",  -- "Spin", "Wave", "Rainbow"
+    AnimSpeed = 1.0
+}
+
+-- [ РЕЕСТР ГРАДИЕНТОВ ]
+local function CelestialRegisterGradient(gradientInstance)
+    table.insert(Internal.Celestial.GradientObjects, gradientInstance)
+    local c1 = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+    local c2 = Color3.fromHex(CurrentCelestialTheme.Colors[2])
+    local seq = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, c1),
+        ColorSequenceKeypoint.new(1, c2)
+    })
+    if gradientInstance:IsA("UIGradient") then
+        gradientInstance.Color = seq
+    elseif gradientInstance:IsA("UIStroke") then
+        local g = gradientInstance:FindFirstChild("UIGradient")
+        if g then g.Color = seq else gradientInstance.Color = c1 end
+    end
+end
+
+-- [ ОБНОВЛЕНИЕ ВСЕХ ГРАДИЕНТОВ ПРИ СМЕНЕ ТЕМЫ ]
+local function CelestialUpdateAllGradients()
+    local c1 = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+    local c2 = Color3.fromHex(CurrentCelestialTheme.Colors[2])
+
+    local keypoints = {}
+    local transparencyKeypoints = {NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 0)}
+
+    if Internal.Celestial.AnimType == "Rainbow" then
+        keypoints = {
+            ColorSequenceKeypoint.new(0, c1),
+            ColorSequenceKeypoint.new(0.25, c2),
+            ColorSequenceKeypoint.new(0.5, c1),
+            ColorSequenceKeypoint.new(0.75, c2),
+            ColorSequenceKeypoint.new(1, c1)
+        }
+    else
+        keypoints = {
+            ColorSequenceKeypoint.new(0, c1),
+            ColorSequenceKeypoint.new(1, c2)
+        }
+    end
+
+    local colorSeq = ColorSequence.new(keypoints)
+    local transSeq = NumberSequence.new(transparencyKeypoints)
+
+    for i = #Internal.Celestial.GradientObjects, 1, -1 do
+        local grad = Internal.Celestial.GradientObjects[i]
+        if grad and grad.Parent then
+            if grad:IsA("UIGradient") then
+                grad.Color = colorSeq
+                grad.Transparency = transSeq
+            elseif grad:IsA("UIStroke") then
+                grad.Color = c1
+            end
+        else
+            table.remove(Internal.Celestial.GradientObjects, i)
+        end
+    end
+
+    for idx, stroke in pairs(Internal.Celestial.ThemeCardStrokes) do
+        if idx == CurrentCelestialTheme.Index then
+            stroke.Enabled = true
+            local strokeGrad = stroke:FindFirstChild("UIGradient")
+            if not strokeGrad then
+                strokeGrad = Instance.new("UIGradient", stroke)
+                table.insert(Internal.Celestial.GradientObjects, strokeGrad)
+            end
+            strokeGrad.Color = colorSeq
+            strokeGrad.Transparency = transSeq
+        else
+            stroke.Enabled = false
+        end
+    end
+
+    -- Синхронизация с основной системой акцентов Overmind
+    pcall(function() updateAccentTheme(c1) end)
+end
+
+-- [ АНИМАЦИЯ ГРАДИЕНТОВ (RenderStepped ]
+State.Connections.CelestialAnim = Core.RunService.RenderStepped:Connect(function(dt)
+    if State.Unloading or not IsCurrentInstance() then return end
+    if not ScreenGui or not ScreenGui.Parent or not Internal.MainFrame or not Internal.MainFrame.Visible then return end
+    -- [ ОПТИМИЗАЦИЯ ] Пропускаем кадры
+    Internal.Celestial.Accum = (Internal.Celestial.Accum or 0) + dt
+    if Internal.Celestial.Accum < 1 / 30 then return end
+    local t = tick() * Internal.Celestial.AnimSpeed
+    Internal.Celestial.Accum = 0
+
+    for _, grad in ipairs(Internal.Celestial.GradientObjects) do
+        if grad and grad.Parent and grad:IsA("UIGradient") then
+            if Internal.Celestial.AnimType == "Spin" then
+                -- Неон-обводки карточек
+                if grad.Parent and grad.Parent:IsA("UIStroke") then
+                    grad.Rotation = 0
+                    grad.Offset = Vector2.new(0, 0)
+                else
+                    grad.Rotation = (t * 45) % 360
+                    grad.Offset = Vector2.new(0, 0)
+                end
+            elseif Internal.Celestial.AnimType == "Wave" then
+                grad.Rotation = math.sin(t * 1.5) * 25
+                grad.Offset = Vector2.new((t * 0.15) % 1, 0)
+            elseif Internal.Celestial.AnimType == "Rainbow" then
+                local ease = (math.sin(t * 1.2) + 1) / 2
+                grad.Rotation = 0
+                grad.Offset = Vector2.new(ease * 0.5 - 0.25, 0)
+            elseif Internal.Celestial.AnimType == "Aurora" then
+                grad.Rotation = 20 + math.sin(t * 0.8) * 25
+                grad.Offset = Vector2.new(math.sin(t * 0.5) * 0.25, 0)
+            elseif Internal.Celestial.AnimType == "Static" then
+                grad.Rotation = 0
+                grad.Offset = Vector2.new(0, 0)
+            end
+        end
+    end
+
+    -- [ НОВОЕ ] Шимер-переливание по элементам
+    if Internal.Celestial.ShimmerPool and #Internal.Celestial.ShimmerPool > 0 then
+        local st = tick()
+        -- [ ОПТИМИЗАЦИЯ ] вычищаем уничтоженные элементы
+        for i = #Internal.Celestial.ShimmerPool, 1, -1 do
+            local el = Internal.Celestial.ShimmerPool[i]
+            if not el or not el.Parent then table.remove(Internal.Celestial.ShimmerPool, i) end
+        end
+        for _, el in ipairs(Internal.Celestial.ShimmerPool) do
+            local sp = el:GetAttribute("ShimmerSpeed") or 1
+            local v = 0.55 + 0.35 * math.sin(st * sp * 2)
+            local prop = el:GetAttribute("ShimmerProp") or "Transparency"
+            pcall(function() el[prop] = v end)
+        end
+    end
+end)
+
+-- [ ПЕРЕТАСКИВАНИЕ ОКНА (Celestial-стиль) ]
+local function CelestialMakeDraggable(frame, handle)
+    local dragging, dragInput, dragStart, startPos
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
+    end)
+    -- [ ФИКС УТЕЧКИ ] повторный вызов (главное окно + консоль) затирал ссылку на прошлый коннект
+    if State.Connections.CelestialDrag then pcall(function() State.Connections.CelestialDrag:Disconnect() end) end
+    State.Connections.CelestialDrag = Core.RunService.RenderStepped:Connect(function()
+        if not IsCurrentInstance() then return end
+        if dragging and dragInput then
+            local delta = dragInput.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            if Internal.Celestial.SettingsFrame and Internal.Celestial.ActiveSettingsModule then
+                Internal.Celestial.SettingsFrame.Position = UDim2.new(frame.Position.X.Scale, frame.Position.X.Offset + (frame.AbsoluteSize.X / 2) + 15, frame.Position.Y.Scale, frame.Position.Y.Offset)
+            end
+        end
+    end)
+end
+
+Internal.setupDrag = CelestialMakeDraggable  -- совместимость с плавающей консолью
+
+Content = nil  -- легаси-шим (остальные
+
+(function()
+    -- [ ГЛАВНОЕ ОКНО (CanvasGroup + Pop-анимация) ]
+    Internal.MainFrame = Instance.new("CanvasGroup")
+    Internal.MainFrame.Name = "Internal.MainFrame"
+    Internal.MainFrame.Size = UDim2.fromOffset(800, 500)
+    Internal.MainFrame.Position = UDim2.fromScale(0.5, 0.5)
+    Internal.MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    Internal.MainFrame.BackgroundColor3 = CelestialPalette.WindowBg
+    Internal.MainFrame.ZIndex = 1
+    Internal.MainFrame.GroupTransparency = 1
+    Internal.MainFrame.Visible = false
+    Internal.MainFrame.Parent = ScreenGui
+
+    local MainCorner = Instance.new("UICorner")
+    MainCorner.CornerRadius = UDim.new(0, 12)
+    MainCorner.Parent = Internal.MainFrame
+
+    -- [ ХЕДЕР ДЛЯ ПЕРЕТАСКИВАНИЯ ]
+    DragHeader = Instance.new("Frame")
+    DragHeader.Name = "DragHeader"
+    DragHeader.Size = UDim2.new(1, 0, 0, 50)
+    DragHeader.BackgroundTransparency = 1
+    DragHeader.Parent = Internal.MainFrame
+    CelestialMakeDraggable(Internal.MainFrame, DragHeader)
+
+    -- [ БОКОВАЯ ПАНЕЛЬ ]
+    -- [ v57 ] САЙДБАР-РЕЙЛ (дизайн из мокапа)
+    local RAIL_W = 88  -- ширина рейла
+    local RAIL_TOP = 74  -- шапка рейла (лого + разделитель)
+    local TAB_H = 42  -- высота кнопки вкладки
+    local TAB_GAP = 4  -- отступ между вкладками
+    local TAB_PAD = 4  -- внутренний отступ канваса
+    local TAB_W = RAIL_W - 16  -- ширина кнопки вкладки
+    local FOOTER_H = 92  -- нижний блок рейла
+    local CONTENT_X = RAIL_W + 15  -- левый край зоны контента
+    local CONTENT_R = 15  -- правый отступ контента
+
+    Internal.Sidebar = Instance.new("Frame")
+    Internal.Sidebar.Name = "Internal.Sidebar"
+    Internal.Sidebar.Size = UDim2.new(0, RAIL_W, 1, 0)
+    Internal.Sidebar.BackgroundColor3 = CelestialPalette.SidebarBg
+    Internal.Sidebar.ZIndex = 2
+    Internal.Sidebar.BorderSizePixel = 0
+    Internal.Sidebar.Parent = Internal.MainFrame
+
+    Internal.SidebarCorner = Instance.new("UICorner")
+    Internal.SidebarCorner.CornerRadius = UDim.new(0, 12)
+    Internal.SidebarCorner.Parent = Internal.Sidebar
+
+    -- [ ФИКС ] Обводка сайдбара удалена
+
+    local function CelestialAddPressAnimation(btn)
+        btn.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                Internal.CelestialPlaySound("click")
+                Core.TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                    Size = UDim2.new(btn.Size.X.Scale, btn.Size.X.Offset - 4, btn.Size.Y.Scale, btn.Size.Y.Offset - 4)
+                }):Play()
+            end
+        end)
+        btn.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                Core.TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                    Size = UDim2.new(btn.Size.X.Scale, btn.Size.X.Offset + 4, btn.Size.Y.Scale, btn.Size.Y.Offset + 4)
+                }):Play()
+            end
+        end)
+    end
+    Internal.CelestialAddPressAnimation = CelestialAddPressAnimation
+
+    -- [ ТОНКИЙ РАЗДЕЛИТЕЛЬ РЕЙЛ/КОНТЕНТ ]
+    local sideSep = Instance.new("Frame")
+    sideSep.Size = UDim2.new(0, 1, 1, 0)
+    sideSep.Position = UDim2.fromOffset(RAIL_W, 0)
+    sideSep.BackgroundColor3 = Color3.fromHex("#121214")
+    sideSep.BorderSizePixel = 0
+    sideSep.ZIndex = 3
+    sideSep.Parent = Internal.MainFrame
+
+    -- [ ЛОГОТИП (верх рейла) ]
+    local logoImgFrame = Instance.new("Frame")
+    logoImgFrame.Name = "LogoImgFrame"
+    logoImgFrame.Size = UDim2.fromOffset(44, 44)
+    logoImgFrame.Position = UDim2.fromOffset((RAIL_W - 44) / 2, 12)
+    logoImgFrame.BackgroundColor3 = Color3.fromHex("#101014")
+    logoImgFrame.ZIndex = 5
+    logoImgFrame.Parent = Internal.Sidebar
+
+    Instance.new("UICorner", logoImgFrame).CornerRadius = UDim.new(0, 13)
+    local liStroke = Instance.new("UIStroke", logoImgFrame)
+    liStroke.Thickness = 1.6
+    liStroke.Color = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+    table.insert(Internal.UIObjects.Accents, liStroke)
+
+    local SidebarLogo = Instance.new("ImageLabel")
+    SidebarLogo.Name = "Internal.SidebarLogo"
+    SidebarLogo.Size = UDim2.new(1, -8, 1, -8)
+    SidebarLogo.Position = UDim2.fromScale(0.5, 0.5)
+    SidebarLogo.AnchorPoint = Vector2.new(0.5, 0.5)
+    SidebarLogo.BackgroundTransparency = 1
+    -- [ НОВОЕ ] Фоллбек-лого рисуется сразу
+    SidebarLogo.Image = "rbxassetid://10723352321"
+    SidebarLogo.ImageColor3 = Color3.new(1, 1, 1)
+    SidebarLogo.ZIndex = 6
+    Instance.new("UICorner", SidebarLogo).CornerRadius = UDim.new(0, 8)
+    SidebarLogo.Parent = logoImgFrame
+
+    -- [ ИНДИКАТОР-ОГОНЁК (как в текущем меню) ]
+    local Indicator = Instance.new("Frame")
+    Indicator.Name = "Indicator"
+    Indicator.Size = UDim2.fromOffset(7, 7)
+    Indicator.Position = UDim2.new(1, -13, 1, -13)
+    Indicator.BackgroundColor3 = Config.Theme.Accent
+    Indicator.ZIndex = 7
+    Indicator.Parent = logoImgFrame
+    table.insert(Internal.UIObjects.Accents, Indicator)
+    Instance.new("UICorner", Indicator).CornerRadius = UDim.new(1, 0)
+
+    local IndicatorGlow = Instance.new("ImageLabel")
+    IndicatorGlow.Size = UDim2.new(4, 0, 4, 0)
+    IndicatorGlow.Position = UDim2.fromScale(0.5, 0.5)
+    IndicatorGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+    IndicatorGlow.BackgroundTransparency = 1
+    IndicatorGlow.Image = "rbxassetid://6014264734"
+    IndicatorGlow.ImageColor3 = Theme.Accent
+    IndicatorGlow.ImageTransparency = 0.5
+    IndicatorGlow.ZIndex = 6
+    IndicatorGlow.Parent = Indicator
+
+    -- [ РАЗДЕЛИТЕЛЬ ПОД ЛОГО ]
+    local railDivider = Instance.new("Frame")
+    railDivider.Name = "RailDivider"
+    railDivider.Size = UDim2.fromOffset(36, 1)
+    railDivider.Position = UDim2.new(0.5, -18, 0, 64)
+    railDivider.BackgroundColor3 = Color3.fromHex("#161618")
+    railDivider.BorderSizePixel = 0
+    railDivider.ZIndex = 4
+    railDivider.Parent = Internal.Sidebar
+
+    -- [ СКРОЛЛ ВКЛАДОК РЕЙЛА ]
+    Internal.TabContainer = Instance.new("ScrollingFrame")
+    Internal.TabContainer.Size = UDim2.new(1, 0, 1, -(RAIL_TOP + FOOTER_H))
+    Internal.TabContainer.Position = UDim2.fromOffset(0, RAIL_TOP)
+    Internal.TabContainer.BackgroundTransparency = 1
+    Internal.TabContainer.BorderSizePixel = 0
+    -- [ v57 ] Рейл узкий
+    Internal.TabContainer.ScrollBarThickness = 0
+    Internal.TabContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Internal.TabContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Internal.TabContainer.ScrollingDirection = Enum.ScrollingDirection.Y
+    Internal.TabContainer.ElasticBehavior = Enum.ElasticBehavior.Never
+    Internal.TabContainer.ZIndex = 5
+    Internal.TabContainer.Parent = Internal.Sidebar
+
+    -- [ КАНВАС РЕЙЛА ]
+    local tabCanvas = Instance.new("Frame")
+    tabCanvas.Name = "TabCanvas"
+    tabCanvas.Size = UDim2.new(1, 0, 0, 0)
+    tabCanvas.AutomaticSize = Enum.AutomaticSize.Y
+    tabCanvas.BackgroundTransparency = 1
+    tabCanvas.ZIndex = 1
+    tabCanvas.Parent = Internal.TabContainer
+
+    local sideLayout = Instance.new("UIListLayout", tabCanvas)
+    sideLayout.Padding = UDim.new(0, TAB_GAP)
+    sideLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    -- [ ФИКС ПОРЯДКА ] без SortOrder кнопки с равным LayoutOrder сортировались ПО ИМЕНИ ...
+    sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local sidePad = Instance.new("UIPadding", tabCanvas)
+    sidePad.PaddingTop = UDim.new(0, TAB_PAD)
+    sidePad.PaddingBottom = UDim.new(0, TAB_PAD)
+
+    -- [ «ПОЛОСКА» АКТИВНОЙ ВКЛАДКИ ]
+    local activePill = Instance.new("Frame")
+    activePill.Name = "Indicator"  -- имя важно
+    activePill.Size = UDim2.fromOffset(TAB_W, TAB_H)
+    activePill.Position = UDim2.fromOffset(8, TAB_PAD)
+    activePill.BackgroundColor3 = Config.Theme.Accent
+    activePill.BackgroundTransparency = 1  -- [ v61 ] заливку рисует PillFill
+    activePill.ZIndex = 4
+    activePill.Parent = Internal.TabContainer
+    Instance.new("UICorner", activePill).CornerRadius = UDim.new(0, 10)
+    table.insert(Internal.UIObjects.Accents, activePill)
+    -- [ v61 ] ЗАЛИВКА АКТИВНОЙ ВКЛАДКИ: ГРАДИЕНТ
+    local pillFill = Instance.new("Frame")
+    pillFill.Name = "PillFill"
+    pillFill.Size = UDim2.fromScale(1, 1)
+    pillFill.BackgroundColor3 = Color3.new(1, 1, 1)
+    pillFill.BorderSizePixel = 0
+    pillFill.ZIndex = 4
+    pillFill.Parent = activePill
+    Instance.new("UICorner", pillFill).CornerRadius = UDim.new(0, 10)
+
+    local pillGrad = Instance.new("UIGradient")
+    pillGrad.Name = "PillGradient"
+    pillGrad.Rotation = 90
+    pillGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Config.Theme.Accent),
+        ColorSequenceKeypoint.new(0.5, Config.Theme.Accent2),
+        ColorSequenceKeypoint.new(1, Config.Theme.Accent)
+    })
+    pillGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.76),
+        NumberSequenceKeypoint.new(0.5, 0.88),
+        NumberSequenceKeypoint.new(1, 0.96)
+    })
+    pillGrad.Parent = pillFill
+    table.insert(Internal.UIObjects.Accents, pillGrad)
+
+    local pillStroke = Instance.new("UIStroke", activePill)
+    pillStroke.Color = Config.Theme.Accent
+    pillStroke.Thickness = 1.2
+    pillStroke.Transparency = 0.25
+    pillStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    table.insert(Internal.UIObjects.Accents, pillStroke)
+
+    local pillStrip = Instance.new("Frame")
+    pillStrip.Name = "Indicator"
+    pillStrip.Size = UDim2.fromOffset(2, 16)
+    pillStrip.Position = UDim2.new(0, 6, 0.5, -8)
+    pillStrip.BackgroundColor3 = Config.Theme.Accent
+    pillStrip.BorderSizePixel = 0
+    pillStrip.ZIndex = 5
+    pillStrip.Parent = activePill
+    Instance.new("UICorner", pillStrip).CornerRadius = UDim.new(1, 0)
+    table.insert(Internal.UIObjects.Accents, pillStrip)
+
+    local pillGlow = Instance.new("ImageLabel")
+    pillGlow.Name = "PillGlow"
+    pillGlow.Size = UDim2.new(3, 0, 3, 0)
+    pillGlow.Position = UDim2.fromScale(0.5, 0.5)
+    pillGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+    pillGlow.BackgroundTransparency = 1
+    pillGlow.Image = "rbxassetid://6014264734"
+    pillGlow.ImageColor3 = Config.Theme.Accent2
+    pillGlow.ImageTransparency = 0.82
+    pillGlow.ZIndex = 3
+    pillGlow.Parent = activePill
+    table.insert(Internal.UIObjects.Accents, pillGlow)
+
+    Internal.Celestial.ActivePill = activePill
+
+    -- [ ПОДСКРОЛЛ РЕЙЛА ]
+    Internal.Celestial.ScrollRailTo = function(y)
+        local scroller = Internal.TabContainer
+        if not scroller or not y then return end
+        local view = scroller.AbsoluteSize.Y
+        local canvas = scroller.AbsoluteCanvasSize.Y
+        local maxScroll = math.max(0, canvas - view)
+        local target = math.clamp(y - (view - TAB_H) * 0.5, 0, maxScroll)
+        if math.abs(target - scroller.CanvasPosition.Y) < 1 then return end
+        Core.TweenService:Create(scroller, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+            CanvasPosition = Vector2.new(0, target)
+        }):Play()
+    end
+
+    -- [ ПОДСКАЗКА С ПОЛНЫМ ИМЕНЕМ ВКЛАДКИ (рейл узкий ]
+    local railTooltip = Instance.new("Frame")
+    railTooltip.Name = "RailTooltip"
+    railTooltip.Size = UDim2.new(0, 0, 0, 22)
+    railTooltip.Position = UDim2.fromOffset(CONTENT_X, 300)
+    railTooltip.BackgroundColor3 = Color3.fromHex("#101014")
+    railTooltip.BackgroundTransparency = 0.05
+    railTooltip.Visible = false
+    railTooltip.AutomaticSize = Enum.AutomaticSize.X
+    railTooltip.ZIndex = 60
+    railTooltip.Parent = Internal.MainFrame
+    Instance.new("UICorner", railTooltip).CornerRadius = UDim.new(0, 6)
+    local rtStroke = Instance.new("UIStroke", railTooltip)
+    rtStroke.Color = CelestialPalette.CardBorder
+    rtStroke.Thickness = 1
+    local rtPad = Instance.new("UIPadding", railTooltip)
+    rtPad.PaddingLeft = UDim.new(0, 8)
+    rtPad.PaddingRight = UDim.new(0, 8)
+    local railTooltipLabel = Instance.new("TextLabel")
+    railTooltipLabel.Name = "RailTooltipLabel"
+    railTooltipLabel.BackgroundTransparency = 1
+    railTooltipLabel.Size = UDim2.new(0, 0, 1, 0)
+    railTooltipLabel.AutomaticSize = Enum.AutomaticSize.X
+    railTooltipLabel.Text = ""
+    railTooltipLabel.TextColor3 = CelestialPalette.Text
+    railTooltipLabel.FontFace = CelestialFonts.Medium
+    railTooltipLabel.TextSize = 11
+    railTooltipLabel.TextXAlignment = Enum.TextXAlignment.Left
+    railTooltipLabel.ZIndex = 61
+    railTooltipLabel.Parent = railTooltip
+
+    local function railTooltipShow(btn, text)
+        local main = Internal.MainFrame
+        if not main or not btn or not btn.Parent then return end
+        railTooltipLabel.Text = text
+        local y = btn.AbsolutePosition.Y - main.AbsolutePosition.Y + (TAB_H - 22) * 0.5
+        railTooltip.Position = UDim2.fromOffset(CONTENT_X, y)
+        railTooltip.Visible = true
+    end
+
+    local function railTooltipHide()
+        railTooltip.Visible = false
+    end
+
+    -- [ НИЖНИЙ БЛОК РЕЙЛА ]
+    local footer = Instance.new("Frame")
+    footer.Name = "SidebarFooter"
+    footer.Size = UDim2.new(1, 0, 0, FOOTER_H)
+    footer.Position = UDim2.new(0, 0, 1, -FOOTER_H)
+    footer.BackgroundTransparency = 1
+    footer.ZIndex = 4
+    footer.Parent = Internal.Sidebar
+
+    local footDivider = Instance.new("Frame")
+    footDivider.Name = "FooterDivider"
+    footDivider.Size = UDim2.fromOffset(36, 1)
+    footDivider.Position = UDim2.new(0.5, -18, 0, 0)
+    footDivider.BackgroundColor3 = Color3.fromHex("#161618")
+    footDivider.BorderSizePixel = 0
+    footDivider.ZIndex = 5
+    footDivider.Parent = footer
+
+    local footIcons = Instance.new("Frame")
+    footIcons.Name = "FooterIcons"
+    footIcons.Size = UDim2.new(1, 0, 0, 24)
+    footIcons.Position = UDim2.fromOffset(0, 12)
+    footIcons.BackgroundTransparency = 1
+    footIcons.ZIndex = 5
+    footIcons.Parent = footer
+
+    local fiLayout = Instance.new("UIListLayout", footIcons)
+    fiLayout.FillDirection = Enum.FillDirection.Horizontal
+    fiLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    fiLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    fiLayout.Padding = UDim.new(0, 6)
+
+    -- [ ИКОНКИ ФУТЕРА ]
+    local FooterIcons = {
+        Configs = "rbxassetid://6031280790",  -- дискета/шестерёнка -> конфиги
+        Themes = "rbxassetid://10723351333",  -- палитра -> темы
+        Console = "rbxassetid://10723348633"  -- консоль
+    }
+
+    local function makeFooterButton(name, icon, order)
+        local btn = Instance.new("ImageButton")
+        btn.Name = name
+        btn.Size = UDim2.fromOffset(24, 24)
+        btn.BackgroundTransparency = 1
+        btn.Image = icon
+        btn.ImageColor3 = CelestialPalette.SubText
+        btn.AutoButtonColor = false
+        btn.LayoutOrder = order
+        btn.ZIndex = 6
+        btn.Parent = footIcons
+        btn.MouseEnter:Connect(function()
+            Internal.CelestialPlaySound("hover")
+            if not btn:GetAttribute("Lit") then
+                Core.TweenService:Create(btn, TweenInfo.new(0.2), {ImageColor3 = CelestialPalette.Text}):Play()
+            end
+        end)
+        btn.MouseLeave:Connect(function()
+            Core.TweenService:Create(btn, TweenInfo.new(0.2), {
+                ImageColor3 = btn:GetAttribute("Lit") and Config.Theme.Accent or CelestialPalette.SubText
+            }):Play()
+        end)
+        return btn
+    end
+
+    -- [ СОХРАНЕНИЕ -> вкладка GUI ]
+    local saveBtn = makeFooterButton("ConfigButton", FooterIcons.Configs, 1)
+    saveBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if _G.SelectTab then _G.SelectTab("Gui") end
+        task.delay(0.05, function()
+            local schemas = Internal.Celestial.ModuleSchemas
+            local schema = schemas and schemas["Config Manager"]
+            if schema and CelestialOpenRightSettingsPanel then
+                CelestialOpenRightSettingsPanel("Config Manager", schema)
+            end
+        end)
+    end)
+
+    -- [ ТЕМЫ ]
+    local themesBtn = makeFooterButton("ThemesButton", FooterIcons.Themes, 2)
+    themesBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if _G.SelectTab then _G.SelectTab("Themes") end
+    end)
+
+    -- [ КОНСОЛЬ ]
+    local consoleBtn = makeFooterButton("ConsoleButton", FooterIcons.Console, 3)
+    local consoleDot = Instance.new("Frame")
+    consoleDot.Name = "ConsoleDot"
+    consoleDot.Size = UDim2.fromOffset(6, 6)
+    consoleDot.Position = UDim2.new(1, -6, 0, -2)
+    consoleDot.BackgroundColor3 = Color3.fromRGB(0, 220, 140)
+    consoleDot.Visible = false
+    consoleDot.ZIndex = 7
+    consoleDot.Parent = consoleBtn
+    Instance.new("UICorner", consoleDot).CornerRadius = UDim.new(1, 0)
+    local consoleDotStroke = Instance.new("UIStroke", consoleDot)
+    consoleDotStroke.Color = CelestialPalette.SidebarBg
+    consoleDotStroke.Thickness = 1
+
+    local function applyConsoleState(on)
+        consoleDot.Visible = on
+        consoleBtn:SetAttribute("Lit", on)
+        Core.TweenService:Create(consoleBtn, TweenInfo.new(0.2), {
+            ImageColor3 = on and Config.Theme.Accent or CelestialPalette.SubText
+        }):Play()
+    end
+
+    consoleBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        local api = State.Modules and State.Modules["Debug Console"]
+        if api and api.Set then
+            pcall(function() api.Set(not Config.Island.DebugConsole, true) end)
+        else
+            Config.Island.DebugConsole = not Config.Island.DebugConsole
+            if Internal.DebugFrame then Internal.DebugFrame.Visible = Config.Island.DebugConsole end
+        end
+        applyConsoleState(Config.Island.DebugConsole)
+    end)
+    applyConsoleState(Config.Island.DebugConsole)
+
+    -- [ ПРОФИЛЬ (низ рейла) ]
+    local profileBtn = Instance.new("TextButton")
+    profileBtn.Name = "ProfileButton"
+    profileBtn.Size = UDim2.fromOffset(36, 36)
+    -- [ v66 ] AnchorPoint (0,0), поэтому Y-смещение = ВЫСОТА кнопки + отступ.
+    -- Было -12: кнопка уезжала на 24 px за нижнюю грань окна и CanvasGroup срезал аватар.
+    profileBtn.Position = UDim2.new(0.5, -18, 1, -48)
+    profileBtn.BackgroundColor3 = Color3.fromHex("#101014")
+    profileBtn.Text = ""
+    profileBtn.AutoButtonColor = false
+    profileBtn.ZIndex = 6
+    profileBtn.Parent = footer
+    Instance.new("UICorner", profileBtn).CornerRadius = UDim.new(1, 0)
+
+    local profileStroke = Instance.new("UIStroke", profileBtn)
+    profileStroke.Color = Config.Theme.Accent
+    profileStroke.Thickness = 1.4
+    table.insert(Internal.UIObjects.Accents, profileStroke)
+
+    local profileInitials = Instance.new("TextLabel")
+    profileInitials.Name = "ProfileInitials"
+    profileInitials.Size = UDim2.fromScale(1, 1)
+    profileInitials.BackgroundTransparency = 1
+    profileInitials.Text = "OV"
+    profileInitials.TextColor3 = CelestialPalette.Text
+    profileInitials.FontFace = CelestialFonts.Bold
+    profileInitials.TextSize = 13
+    profileInitials.ZIndex = 7
+    profileInitials.Parent = profileBtn
+
+    local profileImage = Instance.new("ImageLabel")
+    profileImage.Name = "ProfileImage"
+    profileImage.Size = UDim2.fromScale(1, 1)
+    profileImage.BackgroundTransparency = 1
+    profileImage.ImageTransparency = 1  -- покажем, когда придёт настоящий аватар
+    profileImage.ZIndex = 8
+    profileImage.Parent = profileBtn
+    Instance.new("UICorner", profileImage).CornerRadius = UDim.new(1, 0)
+
+    local profileDot = Instance.new("Frame")
+    profileDot.Name = "ProfileDot"
+    profileDot.Size = UDim2.fromOffset(8, 8)
+    profileDot.Position = UDim2.new(1, -10, 1, -10)
+    profileDot.BackgroundColor3 = Color3.fromRGB(0, 220, 140)
+    profileDot.ZIndex = 9
+    profileDot.Parent = profileBtn
+    Instance.new("UICorner", profileDot).CornerRadius = UDim.new(1, 0)
+    local profileDotStroke = Instance.new("UIStroke", profileDot)
+    profileDotStroke.Color = CelestialPalette.SidebarBg
+    profileDotStroke.Thickness = 1.5
+
+    local localPlayer = (Core.Local and Core.Local.Player) or Core.LocalPlayer
+        or (Core.Services and Core.Services.Players and Core.Services.Players.LocalPlayer)
+    local playerName = "Player"
+    local playerUserId = "-"
+    if localPlayer then
+        if type(localPlayer.Name) == "string" and localPlayer.Name ~= "" then playerName = localPlayer.Name end
+        if type(localPlayer.UserId) == "number" then playerUserId = localPlayer.UserId end
+    end
+    profileInitials.Text = string.upper(string.sub(playerName, 1, 2))
+
+    -- [ v64 ] РАНГ ИГРОКА В КАРТОЧКЕ ПРОФИЛЯ
+    -- Совпало имя или User ID из списка -> "Dev" в красной рамке, иначе "User" рамкой цвета темы.
+    -- Свои аккаунты добавляй в DEV_USERS (имя в нижнем регистре и/или User ID строкой).
+    local DEV_USERS = {
+        ["cfiter2244"] = true,
+        ["roblox_user_3213992950"] = true,
+        ["3213992950"] = true,
+    }
+    local isDev = DEV_USERS[string.lower(playerName)] == true
+        or DEV_USERS[tostring(playerUserId)] == true
+    local rankName = isDev and "Dev" or "User"
+    local rankColor = isDev and Color3.fromHex("#FF453A") or Config.Theme.Accent
+
+    local profilePopup  -- объявлен заранее
+
+    if localPlayer then
+        task.spawn(function()
+            local okThumb, thumb = pcall(function()
+                return Core.Services.Players:GetUserThumbnailAsync(playerUserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+            end)
+            -- ждём, пока попап построится ниже в этом же блоке (сайдбар не yield'ит)
+            local guard = 0
+            while not profilePopup and guard < 100 do
+                guard = guard + 1
+                task.wait(0.02)
+            end
+            if okThumb and thumb and type(thumb) == "string" and thumb ~= "" then
+                profileImage.Image = thumb
+                profileImage.ImageTransparency = 0
+                profileInitials.Visible = false
+                if profilePopup then
+                    profilePopup.ProfileImage.Image = thumb
+                    profilePopup.ProfileImage.ImageTransparency = 0
+                    profilePopup.Initials.Visible = false
+                end
+            end
+        end)
+    end
+
+    local function closeProfilePopup()
+        if profilePopup and profilePopup.Frame.Visible then
+            profilePopup.Frame.Visible = false
+        end
+    end
+
+    profileBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if not profilePopup then return end
+        local frame = profilePopup.Frame
+        frame.Visible = not frame.Visible
+        if not frame.Visible then return end
+        profilePopup.Name.Text = playerName
+        profilePopup.Handle.Text = "@" .. playerName
+        profilePopup.Id.Text = "User ID: " .. tostring(playerUserId)
+    end)
+
+    do
+        local popup = Instance.new("Frame")
+        popup.Name = "ProfilePopup"
+        popup.Size = UDim2.fromOffset(196, 92)
+        popup.Position = UDim2.new(0, RAIL_W + 8, 1, -16)
+        popup.AnchorPoint = Vector2.new(0, 1)
+        popup.BackgroundColor3 = CelestialPalette.CardBg
+        popup.Visible = false
+        popup.ZIndex = 50
+        -- [ v57 ] ZIndexBehavior = Sibling
+        popup.Parent = Internal.MainFrame
+        Instance.new("UICorner", popup).CornerRadius = UDim.new(0, 10)
+        local pStroke = Instance.new("UIStroke", popup)
+        pStroke.Color = CelestialPalette.CardBorder
+        pStroke.Thickness = 1
+
+        local popupAvatar = Instance.new("ImageLabel")
+        popupAvatar.Name = "PopupAvatar"
+        popupAvatar.Size = UDim2.fromOffset(40, 40)
+        popupAvatar.Position = UDim2.fromOffset(12, 12)
+        popupAvatar.BackgroundColor3 = Color3.fromHex("#101014")
+        popupAvatar.ImageTransparency = 1
+        popupAvatar.ZIndex = 52
+        popupAvatar.Parent = popup
+        Instance.new("UICorner", popupAvatar).CornerRadius = UDim.new(1, 0)
+
+        local popupInitials = Instance.new("TextLabel")
+        popupInitials.Name = "PopupInitials"
+        popupInitials.Size = UDim2.fromScale(1, 1)
+        popupInitials.BackgroundTransparency = 1
+        popupInitials.Text = string.upper(string.sub(playerName, 1, 2))
+        popupInitials.TextColor3 = CelestialPalette.Text
+        popupInitials.FontFace = CelestialFonts.Bold
+        popupInitials.TextSize = 14
+        popupInitials.ZIndex = 53
+        popupInitials.Parent = popupAvatar
+
+        local popupName = Instance.new("TextLabel")
+        popupName.Name = "PopupName"
+        -- [ v64 ] ширина уменьшена под бейдж ранга справа (36px + зазор)
+        popupName.Size = UDim2.new(1, -114, 0, 16)
+        popupName.Position = UDim2.fromOffset(60, 13)
+        popupName.BackgroundTransparency = 1
+        popupName.Text = playerName
+        popupName.TextColor3 = CelestialPalette.Text
+        popupName.FontFace = CelestialFonts.Bold
+        popupName.TextSize = 14
+        popupName.TextXAlignment = Enum.TextXAlignment.Left
+        popupName.TextTruncate = Enum.TextTruncate.AtEnd
+        popupName.ZIndex = 52
+        popupName.Parent = popup
+
+        -- [ v64 ] БЕЙДЖ РАНГА: Dev в красной рамке, User - цветом темы
+        local rankBadge = Instance.new("Frame")
+        rankBadge.Name = "RankBadge"
+        rankBadge.Size = UDim2.fromOffset(36, 16)
+        rankBadge.Position = UDim2.new(1, -48, 0, 13)
+        rankBadge.BackgroundColor3 = isDev and Color3.fromHex("#1C1113") or Color3.fromHex("#101014")
+        rankBadge.ZIndex = 53
+        rankBadge.Parent = popup
+        Instance.new("UICorner", rankBadge).CornerRadius = UDim.new(0, 5)
+        local rankStroke = Instance.new("UIStroke", rankBadge)
+        rankStroke.Color = rankColor
+        rankStroke.Thickness = 1
+        -- [ v64 ] у Dev рамка всегда красная, у User - тянется за темой
+        if not isDev then table.insert(Internal.UIObjects.Accents, rankStroke) end
+
+        local rankText = Instance.new("TextLabel")
+        rankText.Name = "RankText"
+        rankText.Size = UDim2.fromScale(1, 1)
+        rankText.BackgroundTransparency = 1
+        rankText.Text = rankName
+        rankText.TextColor3 = isDev and Color3.fromHex("#FF453A") or Config.Theme.Accent
+        rankText.FontFace = CelestialFonts.Bold
+        rankText.TextSize = 9
+        rankText.ZIndex = 54
+        rankText.Parent = rankBadge
+        if not isDev then table.insert(Internal.UIObjects.Accents, rankText) end
+
+        local popupHandle = Instance.new("TextLabel")
+        popupHandle.Name = "PopupHandle"
+        popupHandle.Size = UDim2.new(1, -70, 0, 14)
+        popupHandle.Position = UDim2.fromOffset(60, 30)
+        popupHandle.BackgroundTransparency = 1
+        popupHandle.Text = "@" .. playerName
+        popupHandle.TextColor3 = CelestialPalette.SubText
+        popupHandle.FontFace = CelestialFonts.Medium
+        popupHandle.TextSize = 11
+        popupHandle.TextXAlignment = Enum.TextXAlignment.Left
+        popupHandle.TextTruncate = Enum.TextTruncate.AtEnd
+        popupHandle.ZIndex = 52
+        popupHandle.Parent = popup
+
+        local popupDivider = Instance.new("Frame")
+        popupDivider.Size = UDim2.new(1, -24, 0, 1)
+        popupDivider.Position = UDim2.fromOffset(12, 60)
+        popupDivider.BackgroundColor3 = Color3.fromHex("#161618")
+        popupDivider.BorderSizePixel = 0
+        popupDivider.ZIndex = 52
+        popupDivider.Parent = popup
+
+        local popupId = Instance.new("TextLabel")
+        popupId.Name = "PopupId"
+        popupId.Size = UDim2.new(1, -24, 0, 14)
+        popupId.Position = UDim2.fromOffset(12, 68)
+        popupId.BackgroundTransparency = 1
+        popupId.Text = "User ID: " .. tostring(playerUserId)
+        popupId.TextColor3 = CelestialPalette.SubText
+        popupId.FontFace = CelestialFonts.Medium
+        popupId.TextSize = 10
+        popupId.TextXAlignment = Enum.TextXAlignment.Left
+        popupId.ZIndex = 52
+        popupId.Parent = popup
+
+        local executorName = "unknown"
+        if type(identifyexecutor) == "function" then
+            local okEx, ex = pcall(identifyexecutor)
+            if okEx and type(ex) == "string" and ex ~= "" then executorName = ex end
+        end
+
+        local popupExec = Instance.new("TextLabel")
+        popupExec.Name = "PopupExecutor"
+        popupExec.Size = UDim2.new(1, -24, 0, 14)
+        popupExec.Position = UDim2.fromOffset(12, 78)
+        popupExec.BackgroundTransparency = 1
+        popupExec.Text = "Executor: " .. executorName
+        popupExec.TextColor3 = CelestialPalette.SubText
+        popupExec.FontFace = CelestialFonts.Medium
+        popupExec.TextSize = 10
+        popupExec.TextXAlignment = Enum.TextXAlignment.Left
+        popupExec.ZIndex = 52
+        popupExec.Parent = popup
+
+        profilePopup = {
+            Frame = popup,
+            Name = popupName,
+            Handle = popupHandle,
+            Id = popupId,
+            Initials = popupInitials,
+            ProfileImage = popupAvatar
+        }
+
+        -- [ ЗАКРЫТИЕ ПО КЛИКУ МИМО ПОПАПА ]
+        if State.Connections.ProfileOutside then pcall(function() State.Connections.ProfileOutside:Disconnect() end) end
+        State.Connections.ProfileOutside = Core.UserInputService.InputBegan:Connect(function(input, gpe)
+            if gpe or State.Unloading then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            if not profilePopup or not profilePopup.Frame.Visible then return end
+            local frame = profilePopup.Frame
+            local pos, ap, az = input.Position, frame.AbsolutePosition, frame.AbsoluteSize
+            if pos.X >= ap.X and pos.X <= ap.X + az.X and pos.Y >= ap.Y and pos.Y <= ap.Y + az.Y then return end
+            closeProfilePopup()
+        end)
+    end
+
+    -- [ ВЕРХНЯЯ ПАНЕЛЬ ]
+    local topBar = Instance.new("Frame")
+    topBar.Name = "TopBar"
+    topBar.Size = UDim2.new(1, -(CONTENT_X + CONTENT_R), 0, 40)
+    topBar.Position = UDim2.fromOffset(CONTENT_X, 15)
+    topBar.BackgroundTransparency = 1
+    topBar.ZIndex = 5
+    topBar.Parent = Internal.MainFrame
+
+    -- [ ВОРДМАРК ] лого ушло в рейл
+    local logoText = Instance.new("TextLabel")
+    logoText.Name = "LogoText"
+    logoText.Size = UDim2.fromOffset(112, 40)
+    logoText.Position = UDim2.fromOffset(0, 0)
+    logoText.Text = "Overmind"
+    logoText.TextColor3 = CelestialPalette.Text
+    logoText.FontFace = CelestialFonts.Bold
+    logoText.TextSize = 18
+    logoText.TextXAlignment = Enum.TextXAlignment.Left
+    logoText.BackgroundTransparency = 1
+    logoText.ZIndex = 6
+    logoText.Parent = topBar
+
+    local searchFrame = Instance.new("Frame")
+    searchFrame.Name = "SearchFrame"
+    searchFrame.Size = UDim2.new(1, -112 - 85, 1, 0)
+    searchFrame.Position = UDim2.fromOffset(112, 0)
+    searchFrame.BackgroundColor3 = CelestialPalette.CardBg
+    searchFrame.ZIndex = 6
+    local sfCorner = Instance.new("UICorner", searchFrame)
+    sfCorner.CornerRadius = UDim.new(0, 8)
+    local sfStroke = Instance.new("UIStroke", searchFrame)
+    sfStroke.Color = CelestialPalette.CardBorder
+    sfStroke.Thickness = 1
+    searchFrame.Parent = topBar
+
+    local searchIcon = Instance.new("ImageLabel")
+    searchIcon.Size = UDim2.fromOffset(16, 16)
+    searchIcon.Position = UDim2.fromOffset(12, 12)
+    searchIcon.BackgroundTransparency = 1
+    searchIcon.Image = "rbxassetid://954116286"
+    searchIcon.ImageColor3 = CelestialPalette.SubText
+    searchIcon.ZIndex = 7
+    searchIcon.Parent = searchFrame
+
+    Internal.SearchBox = Instance.new("TextBox")
+    Internal.SearchBox.Size = UDim2.new(1, -40, 1, 0)
+    Internal.SearchBox.Position = UDim2.fromOffset(35, 0)
+    Internal.SearchBox.BackgroundTransparency = 1
+    Internal.SearchBox.Text = ""
+    Internal.SearchBox.PlaceholderText = "Search"
+    Internal.SearchBox.PlaceholderColor3 = CelestialPalette.SubText
+    Internal.SearchBox.TextColor3 = CelestialPalette.Text
+    Internal.SearchBox.TextSize = 13
+    Internal.SearchBox.FontFace = CelestialFonts.Medium
+    Internal.SearchBox.TextXAlignment = Enum.TextXAlignment.Left
+    Internal.SearchBox.ZIndex = 7
+    Internal.SearchBox.Parent = searchFrame
+
+    -- [ ДЕКОРАТИВНАЯ КНОПКА ПАПКИ УДАЛЕНА (никуда не вела) ]
+
+    -- [ КНОПКА НАСТРОЕК ⚙️ ]
+    local configBtn = Instance.new("ImageButton")
+    configBtn.Name = "ConfigBtn"
+    configBtn.Size = UDim2.fromOffset(26, 26)
+    configBtn.Position = UDim2.new(1, -72, 0, 7)
+    configBtn.BackgroundTransparency = 1
+    configBtn.ZIndex = 6
+    configBtn.Image = "rbxassetid://6031280790"
+    configBtn.ImageColor3 = CelestialPalette.SubText
+    configBtn.Parent = topBar
+
+    local cfGrad = Instance.new("UIGradient", configBtn)
+    CelestialRegisterGradient(cfGrad)
+    cfGrad.Offset = Vector2.new(-1, 0)
+
+    configBtn.MouseEnter:Connect(function()
+        Core.TweenService:Create(configBtn, TweenInfo.new(0.3), {BackgroundTransparency = 0.8}):Play()
+        Core.TweenService:Create(cfGrad, TweenInfo.new(0.3), {Offset = Vector2.new(0, 0)}):Play()
+    end)
+    configBtn.MouseLeave:Connect(function()
+        Core.TweenService:Create(configBtn, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        Core.TweenService:Create(cfGrad, TweenInfo.new(0.3), {Offset = Vector2.new(-1, 0)}):Play()
+    end)
+    CelestialAddPressAnimation(configBtn)
+
+    -- [ КРАСНЫЙ КРЕСТИК ЗАКРЫТИЯ (деинъекция) ]
+    local closeGuiBtn = Instance.new("TextButton")
+    closeGuiBtn.Name = "CloseGuiBtn"
+    closeGuiBtn.Size = UDim2.fromOffset(26, 26)
+    closeGuiBtn.Position = UDim2.new(1, -36, 0, 7)
+    closeGuiBtn.BackgroundColor3 = Color3.fromHex("#FC354C")
+    closeGuiBtn.ZIndex = 6
+    local cgbc = Instance.new("UICorner", closeGuiBtn)
+    cgbc.CornerRadius = UDim.new(0, 6)
+    closeGuiBtn.Text = "X"
+    closeGuiBtn.TextColor3 = CelestialPalette.Text
+    closeGuiBtn.TextSize = 13
+    closeGuiBtn.FontFace = Font.fromEnum(Enum.Font.GothamBold)
+    closeGuiBtn.Parent = topBar
+    CelestialAddPressAnimation(closeGuiBtn)
+
+    -- [ ГОРИЗОНТАЛЬНЫЙ РАЗДЕЛИТЕЛЬ (только зона контента ]
+    local horSeparator = Instance.new("Frame")
+    horSeparator.Name = "HorSeparator"
+    horSeparator.Size = UDim2.new(1, -(CONTENT_X + CONTENT_R), 0, 1)
+    horSeparator.Position = UDim2.fromOffset(CONTENT_X, 55)
+    horSeparator.BackgroundColor3 = Color3.fromHex("#161618")
+    horSeparator.BorderSizePixel = 0
+    horSeparator.ZIndex = 4
+    horSeparator.Parent = Internal.MainFrame
+
+    -- [ КОНТЕЙНЕР СТРАНИЦ КОНТЕНТА ]
+    Content = Instance.new("Frame")
+    Content.Name = "Content"
+    Content.Size = UDim2.new(1, -(CONTENT_X + CONTENT_R), 1, -95)
+    Content.Position = UDim2.fromOffset(CONTENT_X, 75)
+    Content.BackgroundTransparency = 1
+    Content.ClipsDescendants = true
+    Content.ZIndex = 5
+    Content.Parent = Internal.MainFrame
+
+    -- [ УДАЛЕНО ]
+
+    -- [ СЕТКА МОДУЛЕЙ (CanvasGroup страницы по вкладкам) ]
+    -- [ ФИКС ] забирает всю высоту контента (раньше -35px под надпись категории)
+    Internal.ModuleGrid = Instance.new("Frame")
+    Internal.ModuleGrid.Size = UDim2.new(1, 0, 1, 0)
+    Internal.ModuleGrid.Position = UDim2.fromOffset(0, 0)
+    Internal.ModuleGrid.BackgroundTransparency = 1
+    Internal.ModuleGrid.ZIndex = 5
+    Internal.ModuleGrid.Parent = Content
+
+    -- [ ПРАВАЯ ПАНЕЛЬ НАСТРОЕК УДАЛЕНА ]
+
+    -- [ SKIN CHANGER FULL PANE ]
+    Internal.SkinChangerUI = Instance.new("Frame")
+    Internal.SkinChangerUI.Name = "SkinChangerUI"
+    Internal.SkinChangerUI.Size = UDim2.new(1, -(CONTENT_X + CONTENT_R), 1, -90)
+    Internal.SkinChangerUI.Position = UDim2.fromOffset(CONTENT_X, 70)
+    Internal.SkinChangerUI.BackgroundTransparency = 1
+    Internal.SkinChangerUI.Visible = false
+    Internal.SkinChangerUI.ZIndex = 5
+    Internal.SkinChangerUI.Parent = Internal.MainFrame
+
+    local SkinPadding = Instance.new("UIPadding")
+    SkinPadding.PaddingTop = UDim.new(0, 20)
+    SkinPadding.PaddingLeft = UDim.new(0, 20)
+    SkinPadding.PaddingRight = UDim.new(0, 20)
+    SkinPadding.Parent = Internal.SkinChangerUI
+
+    local SkinList = Instance.new("UIListLayout")
+    SkinList.Padding = UDim.new(0, 15)
+    SkinList.SortOrder = Enum.SortOrder.LayoutOrder
+    SkinList.Parent = Internal.SkinChangerUI
+
+    -- [ СТРУКТУРА ВКЛАДОК ] порядок как в старом скрипте (Themes
+    local TabOrder = {"Rage", "Legit", "Movement", "Auto farming", "Exploit", "Visuals", "Skins", "Misc", "Fun", "Gui", "Friends", "Themes"}
+    local TabIcons = {
+        ["Legit"] = "rbxassetid://10723352321",
+        ["Rage"] = "rbxassetid://10723352321",
+        ["Movement"] = "rbxassetid://10723350285",
+        ["Auto farming"] = "rbxassetid://10723346959",
+        ["Exploit"] = "rbxassetid://10723350285",
+        ["Visuals"] = "rbxassetid://10723351333",
+        ["Skins"] = "rbxassetid://10723351333",
+        ["Misc"] = "rbxassetid://10723348633",
+        ["Fun"] = "rbxassetid://10723348633",
+        ["Gui"] = "rbxassetid://10723352321",
+        -- [ v65 ] иконку вкладки друзей можно заменить любым своим rbxassetid
+        ["Friends"] = "rbxassetid://10723348633",
+        ["Themes"] = "rbxassetid://10723351333"
+    }
+
+    -- [ v75 ] СВОИ ИКОНКИ РЕЙЛА. Встроенные rbxassetid остаются запасными (и грузятся мгновенно),
+    -- а рядом лежащая картинка из Overmind/Icons (папка Icons в репе) заменяет её без правки скрипта.
+    -- Имена файлов — как в папке Icons репозитория.
+    -- [ v77 ] Для части вкладок там лежат пары _on/_off — перебираем кандидатов по порядку
+    -- и берём первый найденный файл. Нет ни одного — остаётся нарисованный значок.
+    local RailIconFiles = {
+        ["Rage"] = {"Rage_off", "Rage_on"},
+        ["Legit"] = {"Legit"},
+        ["Movement"] = {"Movement"},
+        ["Auto farming"] = {"Autofarm"},
+        ["Exploit"] = {"Exploit"},
+        ["Visuals"] = {"Visuals"},
+        ["Skins"] = {"Skinchanger_off", "Skinchanger_on"},
+        ["Misc"] = {"Misc_on", "Misc"},
+        ["Fun"] = {"Fun"},
+        ["Gui"] = {"Gui"},
+        ["Friends"] = {"Friends"},
+        ["Themes"] = {"Themes"},
+    }
+
+    -- [ v77 ] ИКОНКА ЕСТЬ ВСЕГДА. Папки Icons в репе пока нет (её файлы не залиты), а встроенные
+    -- rbxassetid Roblox отдаёт не всегда — из-за этого часть вкладок стояла вообще без значка.
+    -- Теперь значок рисуется из фреймов: он не зависит ни от сети, ни от модерации ассетов,
+    -- а картинка (своя из Overmind/Icons или рабочий rbxassetid) подменяет его, когда реально загрузилась.
+    -- Фигура: {x, y, w, h, kind, rotation} в поле 16×16; kind: "f" — заливка, "r" — кольцо.
+    local RailGlyphShapes = {
+        target = {{2, 2, 12, 12, "r"}, {6.5, 6.5, 3, 3, "f"}},
+        move = {{6.5, 0.5, 3, 5.5, "f"}, {6.5, 10, 3, 5.5, "f"}, {0.5, 6.5, 5.5, 3, "f"}, {10, 6.5, 5.5, 3, "f"}},
+        farm = {{7.2, 6, 1.6, 9, "f"}, {2.5, 3.5, 5.5, 3, "f", -40}, {8, 3.5, 5.5, 3, "f", 40}},
+        eye = {{1, 4.5, 14, 7, "r"}, {6.5, 6.5, 3, 3, "f"}},
+        grid = {{1.5, 1.5, 5.5, 5.5, "f"}, {9, 1.5, 5.5, 5.5, "f"}, {1.5, 9, 5.5, 5.5, "f"}, {9, 9, 5.5, 5.5, "f"}},
+        chip = {{3.5, 3.5, 9, 9, "r"}, {7.2, 0.5, 1.6, 3, "f"}, {7.2, 12.5, 1.6, 3, "f"}, {0.5, 7.2, 3, 1.6, "f"}, {12.5, 7.2, 3, 1.6, "f"}},
+        friends = {{2.5, 2.5, 6, 6, "f"}, {8.5, 4, 5, 5, "f"}, {1, 10.5, 14, 3.5, "f"}},
+        knife = {{1, 7.5, 12, 2, "f", -35}, {10.5, 2.5, 4.5, 3, "f", -35}},
+        palette = {{2, 2, 12, 12, "r"}, {5, 5.5, 2.6, 2.6, "f"}, {8.6, 5.5, 2.6, 2.6, "f"}, {6.8, 8.8, 2.6, 2.6, "f"}},
+    }
+    local RailGlyphs = {
+        ["Rage"] = "target", ["Legit"] = "target", ["Movement"] = "move",
+        ["Auto farming"] = "farm", ["Exploit"] = "move", ["Visuals"] = "eye",
+        ["Skins"] = "knife", ["Misc"] = "grid", ["Fun"] = "grid",
+        ["Gui"] = "chip", ["Friends"] = "friends", ["Themes"] = "palette",
+    }
+
+    local function BuildRailGlyph(tabBtn, key, color)
+        local shapes = RailGlyphShapes[key or ""]
+        if not shapes then return nil end
+        local holder = Instance.new("Frame")
+        holder.Name = "TabGlyph"
+        holder.Size = UDim2.fromOffset(16, 16)
+        holder.AnchorPoint = Vector2.new(0.5, 0)
+        holder.Position = UDim2.new(0.5, 0, 0, 6)
+        holder.BackgroundTransparency = 1
+        holder.ZIndex = 8
+        for _, s in ipairs(shapes) do
+            local part = Instance.new("Frame")
+            part.Size = UDim2.fromOffset(s[3], s[4])
+            part.Position = UDim2.fromOffset(s[1], s[2])
+            part.BorderSizePixel = 0
+            part.Rotation = s[6] or 0
+            part.ZIndex = 8
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(1, 0)
+            corner.Parent = part
+            if s[5] == "r" then
+                part.BackgroundTransparency = 1
+                local stroke = Instance.new("UIStroke")
+                stroke.Color = color
+                stroke.Thickness = 1.4
+                stroke.Parent = part
+            else
+                part.BackgroundColor3 = color
+                part:SetAttribute("Fill", true)
+            end
+            part.Parent = holder
+        end
+        holder.Parent = tabBtn
+        return holder
+    end
+
+    -- перекраска нарисованного значка под тему и выбор вкладки (зовётся и из обновления кнопок рейла)
+    Internal.Celestial.TintGlyph = function(holder, color)
+        if not holder then return end
+        for _, part in ipairs(holder:GetDescendants()) do
+            if part:IsA("UIStroke") then
+                Core.TweenService:Create(part, TweenInfo.new(0.3), {Color = color}):Play()
+            elseif part:IsA("Frame") and part:GetAttribute("Fill") then
+                Core.TweenService:Create(part, TweenInfo.new(0.3), {BackgroundColor3 = color}):Play()
+            end
+        end
+    end
+
+    -- [ v77 ] грузится ли встроенный rbxassetid: если Roblox его не отдаёт, остаётся нарисованный значок
+    local function IconLoads(img)
+        local ok, status = pcall(function()
+            local got
+            game:GetService("ContentProvider"):PreloadAsync({img}, function(_, s) got = s end)
+            return got
+        end)
+        return ok and status == Enum.AssetFetchStatus.Success
+    end
+
+    for tabIdx, tabName in ipairs(TabOrder) do
+        local tabBtn = Instance.new("TextButton")
+        tabBtn.Name = "TabBtn_" .. tabName
+        tabBtn.Size = UDim2.fromOffset(TAB_W, TAB_H)
+        tabBtn.BackgroundTransparency = 1
+        tabBtn.Text = ""
+        tabBtn.AutoButtonColor = false
+        tabBtn.ZIndex = 7
+        -- [ ПОРЯДОК ] индекс из TabOrder
+        tabBtn.LayoutOrder = tabIdx
+        Instance.new("UICorner", tabBtn).CornerRadius = UDim.new(0, 10)
+
+        -- [ ХОВЕР-ПОДСВЕТКА ] плоский белый слой
+        local hoverOverlay = Instance.new("Frame")
+        hoverOverlay.Name = "HoverOverlay"
+        hoverOverlay.Size = UDim2.fromScale(1, 1)
+        hoverOverlay.BackgroundColor3 = CelestialPalette.Text
+        hoverOverlay.BackgroundTransparency = 1
+        hoverOverlay.ZIndex = 6
+        hoverOverlay.Parent = tabBtn
+        Instance.new("UICorner", hoverOverlay).CornerRadius = UDim.new(0, 10)
+
+        local tabIcon = Instance.new("ImageLabel")
+        tabIcon.Name = "TabIcon"
+        -- [ v75 ] 16px и зазор в 3px до подписи: раньше 18px вплотную к тексту,
+        -- на узком рейле это читалось как наложение значка на имя вкладки
+        tabIcon.Size = UDim2.fromOffset(16, 16)
+        tabIcon.AnchorPoint = Vector2.new(0.5, 0)
+        tabIcon.Position = UDim2.new(0.5, 0, 0, 6)
+        tabIcon.BackgroundTransparency = 1
+        tabIcon.Image = TabIcons[tabName]
+        tabIcon.ImageColor3 = CelestialPalette.SubText
+        tabIcon.ZIndex = 8
+        -- [ v77 ] картинка скрыта, пока не подтвердилось, что она загрузилась: иначе вкладка
+        -- стоит с пустым местом под значок (сломанный rbxassetid = ничего не рисуется)
+        tabIcon.Visible = false
+        tabIcon.Parent = tabBtn
+
+        -- нарисованный значок виден сразу, картинка заменит его только после успешной загрузки
+        local glyph = BuildRailGlyph(tabBtn, RailGlyphs[tabName], CelestialPalette.SubText)
+        local iconFiles = RailIconFiles[tabName]
+        task.spawn(function()
+            task.wait(0.2)
+            if tabIcon.Parent and IconLoads(tabIcon) then
+                tabIcon.Visible = true
+                if glyph and glyph.Parent then glyph.Visible = false end
+            end
+            -- [ v75 ] подмена на свою картинку: GetLocalAsset появляется ниже по файлу,
+            -- поэтому ждём, а не лезем в него сразу
+            task.wait(1.8)
+            local mine = Internal.GetLocalAsset
+            if mine and tabIcon.Parent then
+                for _, candidate in ipairs(iconFiles or {}) do
+                    local localIcon = mine(candidate, AssetManager.IconsFolder)
+                    if localIcon then
+                        tabIcon.Image = localIcon
+                        -- [ ЦВЕТ ] своя картинка рисуется как есть, без перекраски в цвет темы
+                        tabIcon.ImageColor3 = Color3.new(1, 1, 1)
+                        tabIcon:SetAttribute("Plain", true)
+                        tabIcon.Visible = true
+                        if glyph and glyph.Parent then glyph.Visible = false end
+                        break
+                    end
+                end
+            end
+        end)
+
+        local label = Instance.new("TextLabel")
+        label.Name = "TabLabel"
+        label.Size = UDim2.new(1, -6, 0, 13)
+        label.Position = UDim2.new(0, 3, 0, 25)
+        label.Text = tabName
+        label.TextColor3 = CelestialPalette.SubText
+        label.FontFace = CelestialFonts.Bold
+        label.TextSize = 9
+        label.TextXAlignment = Enum.TextXAlignment.Center
+        label.TextTruncate = Enum.TextTruncate.AtEnd
+        label.BackgroundTransparency = 1
+        label.ZIndex = 8
+        label.Parent = tabBtn
+
+        -- [ v57 ] Y-позиция кнопки в канвасе
+        Internal.Celestial.TabOffsets[tabName] = TAB_PAD + (tabIdx - 1) * (TAB_H + TAB_GAP)
+
+        tabBtn.MouseEnter:Connect(function()
+            Internal.CelestialPlaySound("hover")
+            Core.TweenService:Create(hoverOverlay, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {BackgroundTransparency = 0.94}):Play()
+            railTooltipShow(tabBtn, tabName)
+        end)
+        tabBtn.MouseLeave:Connect(function()
+            Core.TweenService:Create(hoverOverlay, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {BackgroundTransparency = 1}):Play()
+            railTooltipHide()
+        end)
+
+        -- [ СТРАНИЦА ВКЛАДКИ ]
+        if tabName == "Friends" then
+            -- [ v65 ] страницу друзей собирает отдельная функция (см. Internal.FriendsBuildPage)
+            if Internal.FriendsBuildPage then
+                Internal.FriendsBuildPage(Content)
+            end
+        elseif tabName == "Themes" then
+            -- Вкладка тем
+            local themesScroll = Instance.new("ScrollingFrame")
+            themesScroll.Name = "ThemesScroll"
+            themesScroll.Size = UDim2.new(1, -60, 1, -45)
+            themesScroll.Position = UDim2.fromOffset(30, 45)
+            themesScroll.BackgroundTransparency = 1
+            themesScroll.BorderSizePixel = 0
+            themesScroll.ScrollBarThickness = 3
+            themesScroll.ScrollBarImageColor3 = Color3.fromHex("#1C1C1F")
+            themesScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+            themesScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            themesScroll.ZIndex = 6
+            themesScroll.Parent = Content
+
+            -- [ НОВОЕ ] Вертикальный список секций
+            local themesListLayout = Instance.new("UIListLayout")
+            themesListLayout.Padding = UDim.new(0, 12)
+            themesListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+            themesListLayout.Parent = themesScroll
+
+            local themeGridFrame = Instance.new("Frame")
+            themeGridFrame.Name = "ThemeGridFrame"
+            themeGridFrame.Size = UDim2.new(1, 0, 0, 0)
+            themeGridFrame.AutomaticSize = Enum.AutomaticSize.Y
+            themeGridFrame.BackgroundTransparency = 1
+            themeGridFrame.LayoutOrder = 1
+            themeGridFrame.Parent = themesScroll
+            Internal.Celestial.ThemeGridFrame = themeGridFrame  -- доступ из цикла карточек (вне этого scope)
+
+            local themeGrid = Instance.new("UIGridLayout")
+            themeGrid.CellSize = UDim2.new(0.33, -10, 0, 95)
+            themeGrid.CellPadding = UDim2.fromOffset(12, 12)
+            themeGrid.Parent = themeGridFrame
+
+            Internal.Celestial.ThemesScroll = themesScroll
+        else
+            local pageGroup = Instance.new("CanvasGroup")
+            pageGroup.Name = tabName .. "_Group"
+            pageGroup.Size = UDim2.new(1, 0, 1, -35)
+            pageGroup.Position = UDim2.fromOffset(0, 35)
+            pageGroup.BackgroundTransparency = 1
+            pageGroup.GroupTransparency = 1
+            pageGroup.Visible = false
+            pageGroup.ZIndex = 5
+            pageGroup.Parent = Content
+
+            local pageScroll = Instance.new("ScrollingFrame")
+            pageScroll.Size = UDim2.fromScale(1, 1)
+            pageScroll.BackgroundTransparency = 1
+            pageScroll.BorderSizePixel = 0
+            pageScroll.ScrollBarThickness = 3
+            pageScroll.ScrollBarImageColor3 = Color3.fromHex("#1C1C1F")
+            pageScroll.ClipsDescendants = true
+            pageScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+            pageScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            pageScroll.ZIndex = 5
+            pageScroll.Parent = pageGroup
+
+            local pagePadding = Instance.new("UIPadding", pageScroll)
+            pagePadding.PaddingLeft = UDim.new(0, 15)
+            pagePadding.PaddingRight = UDim.new(0, 15)
+            pagePadding.PaddingTop = UDim.new(0, 10)
+            pagePadding.PaddingBottom = UDim.new(0, 15)
+
+            local modGrid = Instance.new("UIGridLayout", pageScroll)
+            modGrid.CellSize = UDim2.new(0.5, -12, 0, 80)
+            modGrid.CellPadding = UDim2.fromOffset(10, 10)
+
+            Internal.Celestial.TabGroups[tabName] = pageGroup
+            Internal.Celestial.PageFrames[tabName] = pageScroll
+        end
+
+        Internal.Celestial.TabButtons[tabName] = tabBtn
+
+        tabBtn.MouseButton1Click:Connect(function()
+            Internal.CelestialPlaySound("click")
+            _G.SelectTab(tabName)
+        end)
+
+        tabBtn.Parent = tabCanvas
+    end
+
+    -- [ ЗАКРЫТИЕ МЕНЮ ПО КРЕСТИКУ (двухшаговое подтверждение + деинъекция через ] ...
+    closeGuiBtn.MouseButton1Click:Connect(function()
+        if closeGuiBtn:GetAttribute("Confirming") then
+            closeGuiBtn:SetAttribute("Confirming", false)
+            closeGuiBtn.Text = "X"
+            if _G.OvermindBeginUnload then
+                _G.OvermindBeginUnload()
+            else
+                toggleMenu(false)
+            end
+        else
+            closeGuiBtn:SetAttribute("Confirming", true)
+            closeGuiBtn.Text = "SURE?"
+            task.delay(3, function()
+                closeGuiBtn:SetAttribute("Confirming", false)
+                closeGuiBtn.Text = "X"
+            end)
+        end
+    end)
+
+    -- [ СКРЫТИЕ МЕНЮ НА ПКМ ПО ХЕДЕРУ ]
+    DragHeader.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            toggleMenu(false)
+        end
+    end)
+
+    -- [ SKIN CHANGER UI (скрыт по умолчанию) ]
+    Internal.Celestial.SkinsGroup = nil
+
+    -- [ ВКЛАДКА THEMES ]
+    local themesScroll = Internal.Celestial.ThemesScroll
+    for _, tData in ipairs(ThemesList) do
+        local tCard = Instance.new("TextButton")
+        tCard.Name = "ThemeCard_" .. tData.Index
+        tCard.BackgroundColor3 = Color3.new(1, 1, 1)
+        tCard.BackgroundTransparency = 0
+        tCard.Text = ""
+        tCard.AutoButtonColor = false
+        tCard.ZIndex = 10
+        Instance.new("UICorner", tCard).CornerRadius = UDim.new(0, 10)
+
+        local tcGrad = Instance.new("UIGradient", tCard)
+        tcGrad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromHex(tData.Colors[1])),
+            ColorSequenceKeypoint.new(1, Color3.fromHex(tData.Colors[2]))
+        })
+
+        -- [ НЕОНОВАЯ ОБВОДКА ]
+        local tcStroke = Instance.new("UIStroke", tCard)
+        tcStroke.Thickness = 2.5
+        tcStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        tcStroke.Enabled = true
+        tcStroke.Transparency = 0.2
+        tcStroke.ZIndex = 11
+        local tsGrad = Instance.new("UIGradient", tcStroke)
+        tsGrad.Color = tcGrad.Color
+
+        Internal.Celestial.ThemeCardStrokes[tData.Index] = tcStroke
+
+        -- [ БЕЛЫЙ БЛИК ]
+        local tHighlight = Instance.new("Frame")
+        tHighlight.Size = UDim2.new(1, -4, 0, 15)
+        tHighlight.Position = UDim2.fromOffset(2, 2)
+        tHighlight.BackgroundTransparency = 0.6
+        tHighlight.ZIndex = 11
+        local thg = Instance.new("UIGradient", tHighlight)
+        thg.Color = ColorSequence.new(Color3.new(1, 1, 1))
+        thg.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 1)})
+        thg.Rotation = 90
+        Instance.new("UICorner", tHighlight).CornerRadius = UDim.new(0, 6)
+        tHighlight.Parent = tCard
+
+        -- [ НАЗВАНИЕ ТЕМЫ ]
+        local tTitle = Instance.new("TextLabel")
+        tTitle.Size = UDim2.new(1, -15, 0, 25)
+        tTitle.Position = UDim2.fromOffset(12, 8)
+        tTitle.Text = tData.Name
+        tTitle.TextColor3 = CelestialPalette.Text
+        tTitle.FontFace = CelestialFonts.Medium
+        tTitle.TextSize = 14
+        tTitle.TextXAlignment = Enum.TextXAlignment.Left
+        tTitle.BackgroundTransparency = 1
+        tTitle.ZIndex = 12
+        tTitle.Parent = tCard
+
+        -- [ HEX-КОДЫ ]
+        local tHex = Instance.new("TextLabel")
+        tHex.Size = UDim2.new(1, -40, 0, 35)
+        tHex.Position = UDim2.fromOffset(12, 38)
+        tHex.Text = string.lower(tData.Colors[1] .. "\n" .. tData.Colors[2])
+        tHex.TextColor3 = CelestialPalette.Text
+        tHex.TextTransparency = 0.4
+        tHex.FontFace = CelestialFonts.Regular
+        tHex.TextSize = 11
+        tHex.TextXAlignment = Enum.TextXAlignment.Left
+        tHex.BackgroundTransparency = 1
+        tHex.ZIndex = 12
+        tHex.Parent = tCard
+
+        -- [ НОМЕР ТЕМЫ ]
+        local numBadge = Instance.new("Frame")
+        numBadge.Size = UDim2.fromOffset(22, 22)
+        numBadge.Position = UDim2.new(1, -30, 1, -30)
+        numBadge.BackgroundColor3 = CelestialPalette.Text
+        numBadge.ZIndex = 12
+        Instance.new("UICorner", numBadge).CornerRadius = UDim.new(0, 6)
+
+        local numLabel = Instance.new("TextLabel")
+        numLabel.Size = UDim2.fromScale(1, 1)
+        numLabel.Text = tostring(tData.Index)
+        numLabel.TextColor3 = Color3.new(0, 0, 0)
+        numLabel.FontFace = CelestialFonts.Bold
+        numLabel.TextSize = 11
+        numLabel.BackgroundTransparency = 1
+        numLabel.ZIndex = 13
+        numLabel.Parent = numBadge
+        numBadge.Parent = tCard
+
+        tCard.MouseButton1Click:Connect(function()
+            CurrentCelestialTheme = tData
+            -- [ ФИКС СОХРАНЕНИЯ ] имя темы пишется в Config
+            Config.Theme.CelestialThemeName = tData.Name
+            CelestialUpdateAllGradients()
+            Internal.ScheduleConfigAutosave()
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("THEME: " .. tData.Name:upper(), Color3.fromHex(tData.Colors[1]))
+            end
+        end)
+
+        tCard.Parent = Internal.Celestial.ThemeGridFrame or themesScroll
+    end
+
+    -- [ НОВОЕ: GRADIENT SETTINGS ]
+    do
+        local GRADIENT_MODES = {
+            {Id = "Spin",    Label = "SPIN",      Desc = "Classic gradient rotation"},
+            {Id = "Wave",    Label = "WAVE",      Desc = "Wave that gently sways the gradient"},
+            {Id = "Rainbow", Label = "RAINBOW",   Desc = "Smooth color-to-color transition"},
+            {Id = "Aurora",  Label = "AURORA",    Desc = "Aurora - slow breathing"},
+            {Id = "Static",  Label = "STATIC",    Desc = "No animation, static gradient"},
+        }
+
+        local gsTitle = Instance.new("TextLabel")
+        gsTitle.Size = UDim2.new(1, 0, 0, 24)
+        gsTitle.BackgroundTransparency = 1
+        gsTitle.Text = "GRADIENT SETTINGS"
+        gsTitle.TextColor3 = CelestialPalette.SubText
+        gsTitle.FontFace = CelestialFonts.Bold
+        gsTitle.TextSize = 11
+        gsTitle.TextXAlignment = Enum.TextXAlignment.Left
+        gsTitle.LayoutOrder = 2
+        gsTitle.Parent = themesScroll
+
+        local gsGrid = Instance.new("Frame")
+        gsGrid.Size = UDim2.new(1, 0, 0, 0)
+        gsGrid.AutomaticSize = Enum.AutomaticSize.Y
+        gsGrid.BackgroundTransparency = 1
+        gsGrid.LayoutOrder = 3
+        gsGrid.Parent = themesScroll
+        local gsLayout = Instance.new("UIGridLayout")
+        gsLayout.CellSize = UDim2.new(0, 105, 0, 34)
+        gsLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+        gsLayout.Parent = gsGrid
+
+        local function applyMode(modeId)
+            Internal.Celestial.AnimType = modeId
+            Config.Theme.AnimType = modeId
+            Internal.ScheduleConfigAutosave()
+            CelestialUpdateAllGradients()
+        end
+
+        for _, mode in ipairs(GRADIENT_MODES) do
+            local mBtn = Instance.new("TextButton")
+            mBtn.Text = mode.Label
+            mBtn.TextColor3 = (Internal.Celestial.AnimType == mode.Id) and Color3.new(1, 1, 1) or CelestialPalette.SubText
+            mBtn.FontFace = CelestialFonts.Bold
+            mBtn.TextSize = 10
+            mBtn.BackgroundColor3 = (Internal.Celestial.AnimType == mode.Id) and Color3.fromHex(CurrentCelestialTheme.Colors[1]) or CelestialPalette.CardBg
+            mBtn.BackgroundTransparency = (Internal.Celestial.AnimType == mode.Id) and 0.2 or 0
+            mBtn.Parent = gsGrid
+            Instance.new("UICorner", mBtn).CornerRadius = UDim.new(0, 8)
+            local ms = Instance.new("UIStroke", mBtn)
+            ms.Color = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+            ms.Transparency = (Internal.Celestial.AnimType == mode.Id) and 0.2 or 0.75
+
+            mBtn.MouseButton1Click:Connect(function()
+                applyMode(mode.Id)
+                for _, other in ipairs(gsGrid:GetChildren()) do
+                    if other:IsA("TextButton") then
+                        other.BackgroundColor3 = CelestialPalette.CardBg
+                        other.BackgroundTransparency = 0
+                        other.TextColor3 = CelestialPalette.SubText
+                        other:FindFirstChildOfClass("UIStroke").Transparency = 0.75
+                    end
+                end
+                mBtn.BackgroundColor3 = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+                mBtn.BackgroundTransparency = 0.2
+                mBtn.TextColor3 = Color3.new(1, 1, 1)
+                mBtn:FindFirstChildOfClass("UIStroke").Transparency = 0.2
+                if Internal.ShowIslandNotification then
+                    Internal.ShowIslandNotification("GRADIENT: " .. mode.Label, Color3.fromHex(CurrentCelestialTheme.Colors[1]))
+                end
+            end)
+            if Internal.CelestialAddPressAnimation then Internal.CelestialAddPressAnimation(mBtn) end
+        end
+
+        -- Слайдер скорости переливания
+        local speedRow = Instance.new("Frame")
+        speedRow.Size = UDim2.new(1, 0, 0, 30)
+        speedRow.BackgroundTransparency = 1
+        speedRow.LayoutOrder = 4
+        speedRow.Parent = themesScroll
+        local speedLbl = Instance.new("TextLabel")
+        speedLbl.Size = UDim2.new(0, 120, 1, 0)
+        speedLbl.BackgroundTransparency = 1
+        speedLbl.Text = "Anim Speed: " .. string.format("%.1f", Config.Theme.AnimSpeed or 1)
+        speedLbl.TextColor3 = CelestialPalette.SubText
+        speedLbl.FontFace = CelestialFonts.Medium
+        speedLbl.TextSize = 11
+        speedLbl.TextXAlignment = Enum.TextXAlignment.Left
+        speedLbl.Parent = speedRow
+
+        local speedTrack = Instance.new("TextButton")
+        speedTrack.Size = UDim2.new(0, 160, 0, 6)
+        speedTrack.Position = UDim2.new(0, 130, 0.5, -3)
+        speedTrack.BackgroundColor3 = CelestialPalette.CardBg
+        speedTrack.Text = ""
+        speedTrack.AutoButtonColor = false
+        speedTrack.Parent = speedRow
+        Instance.new("UICorner", speedTrack).CornerRadius = UDim.new(1, 0)
+        local speedFill = Instance.new("Frame")
+        speedFill.Size = UDim2.new(math.clamp((Config.Theme.AnimSpeed or 1) / 3, 0.05, 1), 0, 1, 0)
+        speedFill.BackgroundColor3 = Color3.fromHex(CurrentCelestialTheme.Colors[1])
+        speedFill.Parent = speedTrack
+        Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
+
+        local function setSpeed(inputPos)
+            local rel = math.clamp((inputPos - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X, 0, 1)
+            local v = math.floor(rel * 30) / 10  -- шаг 0.1 от 0 до 3
+            v = math.clamp(v, 0.1, 3)
+            Internal.Celestial.AnimSpeed = v
+            Config.Theme.AnimSpeed = v
+            Internal.ScheduleConfigAutosave()
+            speedFill.Size = UDim2.new(rel, 0, 1, 0)
+            speedLbl.Text = "Anim Speed: " .. string.format("%.1f", v)
+        end
+        speedTrack.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                setSpeed(input.Position.X)
+                local moveConn
+                moveConn = Core.UserInputService.InputChanged:Connect(function(m)
+                    if m.UserInputType == Enum.UserInputType.MouseMovement then setSpeed(m.Position.X) end
+                end)
+                local upConn
+                upConn = Core.UserInputService.InputEnded:Connect(function(m)
+                    if m.UserInputType == Enum.UserInputType.MouseButton1 then
+                        moveConn:Disconnect(); upConn:Disconnect()
+                    end
+                end)
+            end
+        end)
+
+        -- Разделитель после секции
+        local gsGap = Instance.new("Frame")
+        gsGap.Size = UDim2.new(1, 0, 0, 10)
+        gsGap.BackgroundTransparency = 1
+        gsGap.LayoutOrder = 5
+        gsGap.Parent = themesScroll
+    end
+
+    -- [ ПОДКЛЮЧЕНИЕ СИСТЕМНОГО ЛОГО (Overmind/LogoScript.png) ]
+    task.spawn(function()
+        local folder = "Overmind"
+        local filePath = folder .. "/LogoScript.png"
+        local url = AssetManager.RepoURL .. "LogoScript.png"
+        if isfolder and not isfolder(folder) then pcall(makefolder, folder) end
+        if isfile and not isfile(filePath) then
+            local okDL, data = pcall(function() return game:HttpGet(url) end)
+            if okDL and data and #data > 100 then
+                pcall(function() writefile(filePath, data) end)
+            end
+        end
+        local tries = 0
+        while tries < 30 do
+            local asset = nil
+            if isfile and isfile(filePath) and getcustomasset then
+                pcall(function() asset = getcustomasset(filePath) end)
+            end
+            if asset and asset ~= "" then
+                pcall(function()
+                    SidebarLogo.Image = asset
+                    SidebarLogo.ImageTransparency = 0
+                    SidebarLogo.ImageColor3 = Color3.new(1, 1, 1)
+                    SidebarLogo.ScaleType = Enum.ScaleType.Fit
+                end)
+                -- [ ФИКС ] Лого теперь ставится и на экран загрузки (раньше только в сайдбар)
+                pcall(function()
+                    if Internal.LoadingLogo then
+                        Internal.LoadingLogo.Image = asset
+                        Internal.LoadingLogo.ImageTransparency = 0
+                        Internal.LoadingLogo.ImageColor3 = Color3.new(1, 1, 1)
+                        Internal.LoadingLogo.ScaleType = Enum.ScaleType.Fit
+                    end
+                end)
+                pcall(function()
+                    if Internal.KLogo then
+                        Internal.KLogo.Image = asset
+                        Internal.KLogo.ImageColor3 = Color3.new(1, 1, 1)
+                    end
+                end)
+                break
+            end
+            tries = tries + 1
+            task.wait(0.5)
+        end
+    end)
+end)()
+
+-- [ ВЫБОР ВКЛАДКИ (Celestial-анимация + интеграция с системами Overmind) ]
+_G.SelectTab = function(tabName, isFromSearch)
+    if State.Unloading or not IsCurrentInstance() then return end
+    if State.IsSwitching then return end
+
+    -- [ v57 ] Если открыт поиск
+    if not isFromSearch and Internal.SearchBox.Text ~= "" then
+        Internal.SearchBox.Text = ""
+        Internal.Celestial.SearchText = ""
+    end
+
+    State.IsSwitching = true
+    State.CurrentTab = tabName
+    Internal.Celestial.ActiveTab = tabName
+
+    -- Toggle SkinChanger Full Pane
+    local isSkins = (tabName == "Skins")
+    if Content then Content.Visible = not isSkins end
+    -- Старая панель Settings удалена
+    if Internal.SkinChangerUI then
+        Internal.SkinChangerUI.Visible = isSkins
+        if isSkins and _G.initSkinChangerUI then
+            _G.initSkinChangerUI(Internal.SkinChangerUI)
+        end
+    end
+
+
+    -- [ v57 ] ОДНА «ПОЛОСКА» НА ВЕСЬ РЕЙЛ
+    local railPill = Internal.Celestial.ActivePill
+    local railY = Internal.Celestial.TabOffsets[tabName]
+    if railPill and railY then
+        railPill.Visible = true
+        Core.TweenService:Create(railPill, TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+            Position = UDim2.fromOffset(8, railY)
+        }):Play()
+        if Internal.Celestial.ScrollRailTo then Internal.Celestial.ScrollRailTo(railY) end
+    end
+
+    -- [ ОБНОВЛЕНИЕ КНОПОК РЕЙЛА (цвет иконки/подписи + сброс ховера) ]
+    for name, btn in pairs(Internal.Celestial.TabButtons) do
+        local tabLabel = btn:FindFirstChild("TabLabel")
+        local tabIcon = btn:FindFirstChild("TabIcon")
+        local hoverOverlay = btn:FindFirstChild("HoverOverlay")
+        local selected = (name == tabName)
+
+        if tabLabel then
+            Core.TweenService:Create(tabLabel, TweenInfo.new(0.3), {TextColor3 = selected and CelestialPalette.Text or CelestialPalette.SubText}):Play()
+        end
+        if tabIcon and not tabIcon:GetAttribute("Plain") then
+            -- [ v75 ] свои картинки из Overmind/Icons не перекрашиваем: они цветные сами
+            Core.TweenService:Create(tabIcon, TweenInfo.new(0.3), {ImageColor3 = selected and CelestialPalette.Text or CelestialPalette.SubText}):Play()
+        end
+        -- [ v77 ] нарисованный значок красим тем же цветом, что и подпись вкладки
+        local tabGlyph = btn:FindFirstChild("TabGlyph")
+        if tabGlyph and tabGlyph.Visible and Internal.Celestial.TintGlyph then
+            Internal.Celestial.TintGlyph(tabGlyph, selected and CelestialPalette.Text or CelestialPalette.SubText)
+        end
+        if hoverOverlay and selected then
+            Core.TweenService:Create(hoverOverlay, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        end
+    end
+
+    -- [ ВКЛАДКА THEMES ]
+    -- [ ФИКС НАЛОЖЕНИЯ ] Видимой оставляем строго одну страницу
+    if tabName == "Themes" then
+        if Internal.Celestial.ThemesScroll then Internal.Celestial.ThemesScroll.Visible = true end
+        for _, group in pairs(Internal.Celestial.TabGroups) do
+            group.Visible = false
+        end
+        State.IsSwitching = false
+        return
+    else
+        if Internal.Celestial.ThemesScroll then Internal.Celestial.ThemesScroll.Visible = false end
+        for _, group in pairs(Internal.Celestial.TabGroups) do
+            group.Visible = (group.Name == tabName .. "_Group")
+        end
+    end
+
+    -- [ АНИМАЦИЯ ВЫХОДА ТЕКУЩИХ МОДУЛЕЙ ]
+    task.spawn(function()
+        local success, err = pcall(function()
+            local currentModules = {}
+            for name, group in pairs(Internal.Celestial.TabGroups) do
+                if name ~= tabName then
+                    group.Visible = false
+                    group.GroupTransparency = 1
+                end
+            end
+
+            -- [ ВКЛЮЧЕНИЕ ГРУППЫ НОВОЙ ВКЛАДКИ ]
+            local newGroup = Internal.Celestial.TabGroups[tabName]
+            if not newGroup then
+                warn("[Overmind GUI] No page group for tab: " .. tostring(tabName))
+                return
+            end
+
+            -- Сброс видимости карточек при переключении
+            for mName, cardObj in pairs(Internal.Celestial.CardsInstances) do
+                cardObj.Instance.Visible = (cardObj.Tab == tabName)
+            end
+            Internal.Celestial.SearchText = ""
+
+            newGroup.Visible = true
+            newGroup.Position = UDim2.fromOffset(0, 8)
+            newGroup.GroupTransparency = 1
+            newGroup.ZIndex = 10
+
+            Core.TweenService:Create(newGroup, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                GroupTransparency = 0,
+                Position = UDim2.fromOffset(0, 0)
+            }):Play()
+        end)
+        if not success then warn("Tab switch error: " .. tostring(err)) end
+        State.IsSwitching = false
+    end)
+end
+
+-- [ ПОИСК ПО МОДУЛЯМ (Celestial-фильтрация карточек) ]
+do
+    Internal.SearchTween = TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+    State.Connections.Search = Internal.SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        if State.Unloading or not IsCurrentInstance() then return end
+        local text = string.lower(Internal.SearchBox.Text)
+        Internal.Celestial.SearchText = text
+
+        -- [ ГЛОБАЛЬНЫЙ ПОИСК ] пустой запрос
+        for mName, item in pairs(Internal.Celestial.CardsInstances) do
+            local nameMatch = string.find(string.lower(mName), text, 1, true) ~= nil
+            local descMatch = item.Description and string.find(string.lower(item.Description), text, 1, true) ~= nil
+            if text == "" then
+                item.Instance.Visible = (item.Tab == Internal.Celestial.ActiveTab)
+            else
+                item.Instance.Visible = nameMatch or descMatch
+            end
+        end
+    end)
+end
+
+-- [ СОЗДАНИЕ КАРТОЧЕК МОДУЛЕЙ С ЛКМ И ПКМ ВЗАИМОДЕЙСТВИЕМ ]
+-- [ v56 ] Which game a module belongs to
+local GAME_LABELS = {
+    ["Auto Build"] = "War Tycoon",
+    ["War Tycoon Farm"] = "War Tycoon",
+    ["Vehicles Farm Helper"] = "War Tycoon",
+    ["Auto Farm CC2"] = "Car Crushers 2",
+    ["Pop for Free Farm"] = "Pop for Free",
+    ["Gold Farm"] = "San Diego",
+    ["Overmind Users"] = "Universal",
+}
+
+local GAME_COLORS = {
+    ["War Tycoon"] = Color3.fromRGB(255, 165, 40),
+    ["Blox Strike"] = Color3.fromRGB(255, 80, 80),
+    ["Car Crushers 2"] = Color3.fromRGB(0, 170, 255),
+    ["Pop for Free"] = Color3.fromRGB(0, 220, 140),
+    ["San Diego"] = Color3.fromRGB(255, 210, 70),
+    ["Universal"] = Color3.fromHex("#7B61FF"),
+}
+
+-- Cards that are specifically made for Blox Strike (category alone is not enough
+local BLOXSTRIKE_CARDS = {
+    ["ESP (BS)"] = true,
+    ["Chams (BS)"] = true,
+    ["Weapon Chams"] = true,
+    ["Team Inspector"] = true,
+    ["BunnyHop"] = true,
+}
+
+local BLOXSTRIKE_CATEGORIES = { ["Legit"] = true, ["Rage"] = true, ["Exploit"] = true }
+
+function createModule(name, description, category, default, callback, settingsPopulator, noToggle, gameLabelOverride)
+    local page = Internal.Celestial.PageFrames[category]
+    if not page then
+        -- Фоллбек: unrecognized категория → Legit
+        page = Internal.Celestial.PageFrames["Legit"]
+        if not page then return end
+    end
+
+    -- [ КОНТЕЙНЕР КАРТОЧКИ ]
+    local card = Instance.new("Frame")
+    card.Name = name
+    card.BackgroundColor3 = CelestialPalette.CardBg
+    card.ClipsDescendants = true
+    card.ZIndex = 10
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+    card.Parent = page
+
+    -- [ ОБВОДКИ ]
+    local baseStroke = Instance.new("UIStroke", card)
+    baseStroke.Color = CelestialPalette.CardBorder
+    baseStroke.Thickness = 1
+    baseStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    baseStroke.ZIndex = 11
+
+    local neonStroke = Instance.new("UIStroke", card)
+    neonStroke.Thickness = 2.0
+    neonStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    neonStroke.Transparency = 1
+    neonStroke.ZIndex = 12
+    CelestialRegisterGradient(Instance.new("UIGradient", neonStroke))
+
+    -- [ БЛИК ]
+    local topHighlight = Instance.new("Frame")
+    topHighlight.Size = UDim2.new(1, -4, 0, 15)
+    topHighlight.Position = UDim2.fromOffset(2, 2)
+    topHighlight.BackgroundTransparency = 1
+    topHighlight.ZIndex = 13
+    local thGrad = Instance.new("UIGradient", topHighlight)
+    thGrad.Color = ColorSequence.new(Color3.new(1, 1, 1))
+    thGrad.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 1)})
+    thGrad.Rotation = 90
+    Instance.new("UICorner", topHighlight).CornerRadius = UDim.new(0, 6)
+    topHighlight.Parent = card
+
+    -- [ ГРАДИЕНТНЫЙ ОВЕРЛЕЙ ВКЛЮЧЕНИЯ ]
+    local gradOverlay = Instance.new("Frame")
+    gradOverlay.Size = UDim2.fromScale(1, 1)
+    gradOverlay.BackgroundColor3 = Color3.new(1, 1, 1)
+    gradOverlay.BackgroundTransparency = 1
+    gradOverlay.ZIndex = 11
+    Instance.new("UICorner", gradOverlay).CornerRadius = UDim.new(0, 8)
+    gradOverlay.Parent = card
+
+    local cardGrad = Instance.new("UIGradient", gradOverlay)
+    CelestialRegisterGradient(cardGrad)
+    cardGrad.Offset = Vector2.new(-1, 0)
+
+    -- [ ЗАГОЛОВОК + GameLabel + BindLabel ]
+    local headerFrame = Instance.new("Frame")
+    headerFrame.Size = UDim2.new(1, -20, 0, 24)
+    headerFrame.Position = UDim2.fromOffset(12, 10)
+    headerFrame.BackgroundTransparency = 1
+    headerFrame.ZIndex = 15
+    headerFrame.Parent = card
+
+    local hLayout = Instance.new("UIListLayout", headerFrame)
+    hLayout.FillDirection = Enum.FillDirection.Horizontal
+    hLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    hLayout.Padding = UDim.new(0, 6)
+    hLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Text = name
+    title.TextColor3 = CelestialPalette.Text
+    title.FontFace = CelestialFonts.Bold
+    title.TextSize = 17
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.BackgroundTransparency = 1
+    title.Size = UDim2.new(0, 120, 1, 0)
+    title.LayoutOrder = 1
+    title.ZIndex = 16
+    title.Parent = headerFrame
+
+    title:GetPropertyChangedSignal("TextBounds"):Connect(function()
+        title.Size = UDim2.new(0, title.TextBounds.X + 2, 1, 0)
+    end)
+
+    local gearIcon = Instance.new("ImageLabel")
+    gearIcon.Size = UDim2.fromOffset(14, 14)
+    gearIcon.BackgroundTransparency = 1
+    gearIcon.Image = "rbxassetid://6031280790"
+    gearIcon.ImageColor3 = CelestialPalette.SubText
+    gearIcon.LayoutOrder = 2
+    gearIcon.ZIndex = 16
+    gearIcon.Parent = headerFrame
+
+    -- [ v56 ] Game badge
+    local gameText = gameLabelOverride or GAME_LABELS[name]
+    if not gameText then
+        if BLOXSTRIKE_CATEGORIES[category] or BLOXSTRIKE_CARDS[name] then gameText = "Blox Strike" else gameText = "Universal" end
+    end
+    local gameColor = GAME_COLORS[gameText] or GAME_COLORS["Universal"]
+
+    local gamePill = Instance.new("Frame")
+    gamePill.Name = "GamePill"
+    gamePill.BackgroundColor3 = gameColor
+    gamePill.BackgroundTransparency = 0.86
+    gamePill.Size = UDim2.new(0, 0, 0, 15)
+    gamePill.Position = UDim2.new(1, -12, 1, -6)
+    gamePill.AnchorPoint = Vector2.new(1, 1)
+    gamePill.AutomaticSize = Enum.AutomaticSize.X
+    gamePill.ZIndex = 16
+    gamePill.Parent = card
+    Instance.new("UICorner", gamePill).CornerRadius = UDim.new(1, 0)
+
+    local gameStroke = Instance.new("UIStroke")
+    gameStroke.Color = gameColor
+    gameStroke.Thickness = 1
+    gameStroke.Transparency = 0.2
+    gameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    gameStroke.Parent = gamePill
+
+    local gamePad = Instance.new("UIPadding")
+    gamePad.PaddingLeft = UDim.new(0, 7)
+    gamePad.PaddingRight = UDim.new(0, 7)
+    gamePad.Parent = gamePill
+
+    local GameLabel = Instance.new("TextLabel")
+    GameLabel.Name = "GameLabel"
+    GameLabel.BackgroundTransparency = 1
+    GameLabel.Size = UDim2.new(0, 0, 1, 0)
+    GameLabel.AutomaticSize = Enum.AutomaticSize.X
+    GameLabel.Text = string.upper(gameText)
+    GameLabel.TextColor3 = gameColor
+    GameLabel.TextSize = 9
+    GameLabel.FontFace = CelestialFonts.Bold
+    GameLabel.TextXAlignment = Enum.TextXAlignment.Center
+    GameLabel.TextYAlignment = Enum.TextYAlignment.Center
+    GameLabel.ZIndex = 17
+    GameLabel.Parent = gamePill
+
+    local BindLabel = Instance.new("TextLabel")
+    BindLabel.Name = "BindLabel"
+    BindLabel.Size = UDim2.new(0, 50, 0, 20)
+    BindLabel.Position = UDim2.new(1, -135, 0, 12)
+    BindLabel.BackgroundTransparency = 1
+    BindLabel.Text = "[NONE]"
+    BindLabel.TextColor3 = CelestialPalette.SubText
+    BindLabel.TextSize = 9
+    BindLabel.FontFace = CelestialFonts.Medium
+    BindLabel.TextXAlignment = Enum.TextXAlignment.Right
+    BindLabel.ZIndex = 16
+    BindLabel.Parent = card
+
+    local descLabel = Instance.new("TextLabel")
+    descLabel.Name = "Desc"
+    -- [ v56 ] 22 px keeps two lines and leaves room for the game pill underneath (card is 80 px ...
+    descLabel.Size = UDim2.new(1, -24, 0, 22)
+    descLabel.Position = UDim2.fromOffset(12, 34)
+    descLabel.Text = description
+    descLabel.TextColor3 = CelestialPalette.SubText
+    descLabel.FontFace = CelestialFonts.Regular
+    descLabel.TextSize = 11
+    descLabel.TextWrapped = true
+    descLabel.TextXAlignment = Enum.TextXAlignment.Left
+    descLabel.TextYAlignment = Enum.TextYAlignment.Top
+    descLabel.BackgroundTransparency = 1
+    descLabel.ZIndex = 15
+    descLabel.Parent = card
+
+    -- [ КЛИК-ДЕТЕКТОР ]
+    local clickDetector = Instance.new("TextButton")
+    clickDetector.Size = UDim2.fromScale(1, 1)
+    clickDetector.BackgroundTransparency = 1
+    clickDetector.Text = ""
+    clickDetector.ZIndex = 50
+    clickDetector.Parent = card
+
+    -- [ ФИКС ] Учитываем дефолт
+    local isEnabled = (default == true)
+    local _needsInitialVisual = true
+
+    clickDetector.MouseEnter:Connect(function()
+        Core.TweenService:Create(card, TweenInfo.new(0.3), {BackgroundColor3 = Color3.fromHex("#111114")}):Play()
+        Core.TweenService:Create(baseStroke, TweenInfo.new(0.3), {Thickness = 1.5, Color = Color3.fromHex("#1A1A1D")}):Play()
+        if not isEnabled then
+            -- Ховер: мягкое белое сияние (градиент оставлен только для включённого состояния)
+            Core.TweenService:Create(gradOverlay, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {BackgroundTransparency = 0.94}):Play()
+        end
+    end)
+
+    clickDetector.MouseLeave:Connect(function()
+        Core.TweenService:Create(card, TweenInfo.new(0.3), {BackgroundColor3 = CelestialPalette.CardBg}):Play()
+        Core.TweenService:Create(baseStroke, TweenInfo.new(0.3), {Thickness = 1, Color = CelestialPalette.CardBorder}):Play()
+        if not isEnabled then
+            Core.TweenService:Create(gradOverlay, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {BackgroundTransparency = 1}):Play()
+        end
+    end)
+
+    -- [ ЛКМ: ВКЛ/ВЫКЛ ]
+    local function applyEnabledVisuals()
+        local targetText = isEnabled and CelestialPalette.Text or CelestialPalette.SubText
+        Core.TweenService:Create(gradOverlay, TweenInfo.new(0.4, Enum.EasingStyle.Quart), {
+            BackgroundTransparency = isEnabled and 0.25 or 1
+        }):Play()
+        Core.TweenService:Create(neonStroke, TweenInfo.new(0.4), {Transparency = isEnabled and 0.1 or 1}):Play()
+        Core.TweenService:Create(topHighlight, TweenInfo.new(0.4), {BackgroundTransparency = isEnabled and 0.5 or 1}):Play()
+        Core.TweenService:Create(title, TweenInfo.new(0.3), {TextColor3 = CelestialPalette.Text}):Play()
+        Core.TweenService:Create(descLabel, TweenInfo.new(0.3), {TextColor3 = targetText}):Play()
+        Core.TweenService:Create(gearIcon, TweenInfo.new(0.3), {ImageColor3 = isEnabled and CelestialPalette.Text or CelestialPalette.SubText}):Play()
+        baseStroke.Enabled = not isEnabled
+        card:SetAttribute("IsActive", isEnabled)
+    end
+
+    clickDetector.MouseButton1Click:Connect(function()
+        if noToggle then
+            -- [ НО-ТОГГЛ МОДУЛИ ]
+            if callback then pcall(function() callback(true) end) end
+            return
+        end
+        isEnabled = not isEnabled
+        applyEnabledVisuals()
+        if Internal.PlayModuleSound then Internal.PlayModuleSound(isEnabled) end
+        if callback then pcall(function() callback(isEnabled) end) end
+        if Internal.ShowIslandNotification then
+            pcall(function()
+                Internal.ShowIslandNotification(name .. " " .. (isEnabled and "on" or "off"), isEnabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0))
+            end)
+        end
+    end)
+
+    -- [ ПКМ: ПАНЕЛЬ ПАРАМЕТРОВ СПРАВА ]
+    clickDetector.MouseButton2Click:Connect(function()
+        CelestialOpenRightSettingsPanel(name, settingsPopulator)
+    end)
+
+    -- [ ЛКМ: для модулей с настройками открываем плавающую панель (как раньше открывалась ] ...
+    if settingsPopulator then
+        clickDetector.MouseButton1Click:Connect(function()
+            CelestialOpenRightSettingsPanel(name, settingsPopulator)
+        end)
+    end
+
+    -- [ НО-ТОГГЛ МОДУЛИ ]
+    if noToggle then
+        descLabel.TextTransparency = 0.4
+        baseStroke.Enabled = false
+    end
+
+    State.Modules[name] = {
+        Card = card,
+        Category = category,
+        Toggle = (not noToggle) and function()
+            isEnabled = not isEnabled
+            applyEnabledVisuals()
+            -- [ ЗВУК ] тот же звук и при переключении по кейбинду/автоматике
+            if Internal.PlayModuleSound then Internal.PlayModuleSound(isEnabled) end
+            -- [ v62 ] то же уведомление, что при клике по карточке (нужно для биндов)
+            if Internal.ModuleIslandNotify then Internal.ModuleIslandNotify(name, isEnabled) end
+            if callback then pcall(function() callback(isEnabled) end) end
+        end or nil,
+        Set = function(newState, runCallback, force, notify)
+            local changed = (newState ~= isEnabled)
+            if not changed and not force then return end
+            isEnabled = newState
+            applyEnabledVisuals()
+            -- [ v62 ] notify=true приходит только от бинда (Hold): конфиг грузит состояние молча
+            if notify and changed and Internal.ModuleIslandNotify then Internal.ModuleIslandNotify(name, isEnabled) end
+            if runCallback and callback then pcall(function() callback(newState) end) end
+        end,
+        BindLabel = BindLabel
+    }
+    Internal.Celestial.CardsInstances[name] = {Instance = card, Tab = category, Description = description}
+    -- [ v57 ] schema доступна снаружи
+    if settingsPopulator then Internal.Celestial.ModuleSchemas[name] = settingsPopulator end
+    Internal.CelestialBindHover(card)  -- тихий ховер-звук на карточках модулей
+
+    -- [ ФИКС ] Применяем визуал под начальное состояние (для default=true
+    if _needsInitialVisual and not noToggle then
+        _needsInitialVisual = false
+        applyEnabledVisuals()
+    end
+end
+
+-- [ ОТДЕЛЬНОЕ GUI ОКНО НАСТРОЕК СПРАВА (ПКМ по карточке) ]
+function CelestialOpenRightSettingsPanel(moduleName, schema)
+    if Internal.Celestial.ActiveSettingsModule == moduleName and Internal.Celestial.SettingsFrame then return end
+
+    if Internal.Celestial.SettingsFrame then
+        Internal.Celestial.SettingsFrame:Destroy()
+        Internal.Celestial.SettingsFrame = nil
+    end
+
+    Internal.Celestial.ActiveSettingsModule = moduleName
+
+    local mainFrame = Internal.MainFrame
+    local panel = Instance.new("CanvasGroup")
+    panel.Size = UDim2.fromOffset(340, 560)
+    panel.AnchorPoint = Vector2.new(0, 0.5)
+
+    local finalPos = UDim2.new(mainFrame.Position.X.Scale, mainFrame.Position.X.Offset + (mainFrame.AbsoluteSize.X / 2) + 15, mainFrame.Position.Y.Scale, mainFrame.Position.Y.Offset)
+    panel.Position = UDim2.new(finalPos.X.Scale, finalPos.X.Offset, finalPos.Y.Scale, finalPos.Y.Offset + 10)
+    panel.BackgroundColor3 = CelestialPalette.WindowBg
+    panel.GroupTransparency = 1
+    panel.ZIndex = 50
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+
+    local pStroke = Instance.new("UIStroke", panel)
+    pStroke.Color = CelestialPalette.CardBorder
+    pStroke.Thickness = 1
+    panel.Parent = ScreenGui
+    Internal.Celestial.SettingsFrame = panel
+
+    Core.TweenService:Create(panel, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+        GroupTransparency = 0,
+        Position = finalPos
+    }):Play()
+
+    -- [ ШАПКА ПАНЕЛИ ]
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 44)
+    titleBar.BackgroundColor3 = CelestialPalette.Text
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 12)
+    titleBar.Parent = panel
+
+    local cover = Instance.new("Frame")
+    cover.Size = UDim2.new(1, 0, 0, 12)
+    cover.Position = UDim2.fromOffset(0, 32)
+    cover.BackgroundColor3 = CelestialPalette.WindowBg
+    cover.BorderSizePixel = 0
+    cover.ZIndex = titleBar.ZIndex + 1
+    cover.Parent = panel
+
+    local tbGrad = Instance.new("UIGradient", titleBar)
+    CelestialRegisterGradient(tbGrad)
+
+    local gearIcon = Instance.new("ImageLabel")
+    gearIcon.Size = UDim2.fromOffset(16, 16)
+    gearIcon.Position = UDim2.fromOffset(14, 12)
+    gearIcon.BackgroundTransparency = 1
+    gearIcon.Image = "rbxassetid://6031280790"
+    gearIcon.ImageColor3 = CelestialPalette.Text
+    gearIcon.Parent = titleBar
+
+    local pTitle = Instance.new("TextLabel")
+    pTitle.Size = UDim2.new(1, -50, 1, 0)
+    pTitle.Position = UDim2.fromOffset(38, 0)
+    pTitle.Text = moduleName
+    pTitle.TextColor3 = CelestialPalette.Text
+    pTitle.FontFace = CelestialFonts.Bold
+    pTitle.TextSize = 15
+    pTitle.TextXAlignment = Enum.TextXAlignment.Left
+    pTitle.BackgroundTransparency = 1
+    pTitle.Parent = titleBar
+
+    -- [ КНОПКА ЗАКРЫТИЯ ПАНЕЛИ (выровнена по центру шапки) ]
+    local pClose = Instance.new("TextButton")
+    pClose.Size = UDim2.fromOffset(24, 24)
+    pClose.AnchorPoint = Vector2.new(1, 0.5)
+    pClose.Position = UDim2.new(1, -10, 0.5, 0)
+    pClose.BackgroundColor3 = Color3.fromHex("#2C2C2E")
+    pClose.Text = "X"
+    pClose.TextColor3 = CelestialPalette.Text
+    pClose.TextSize = 12
+    pClose.FontFace = Font.fromEnum(Enum.Font.GothamBold)
+    pClose.ZIndex = 52
+    Instance.new("UICorner", pClose).CornerRadius = UDim.new(0, 6)
+    pClose.Parent = titleBar
+    pClose.MouseButton1Click:Connect(function()
+        Internal.Celestial.SettingsFrame:Destroy()
+        Internal.Celestial.SettingsFrame = nil
+        Internal.Celestial.ActiveSettingsModule = nil
+        Internal.Celestial.SettingsScroll = nil
+        State.SelectedModule = nil
+    end)
+
+    local settingsScroll = Instance.new("ScrollingFrame")
+    settingsScroll.Size = UDim2.new(1, -24, 1, -64)
+    settingsScroll.Position = UDim2.fromOffset(12, 52)
+    settingsScroll.BackgroundTransparency = 1
+    settingsScroll.BorderSizePixel = 0
+    settingsScroll.ScrollBarThickness = 3
+    settingsScroll.ScrollBarImageColor3 = Color3.fromHex("#1C1C1F")
+    settingsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    settingsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    settingsScroll.ZIndex = 51
+    settingsScroll.Parent = panel
+    Internal.Celestial.SettingsScroll = settingsScroll
+    State.SelectedModule = moduleName
+
+    -- [ КЕЙБИНД-КАРТОЧКА (перенесена из старой панели настроек) ]
+    Internal.createBindSubCard(settingsScroll, moduleName)
+
+    local sLayout = Instance.new("UIListLayout", settingsScroll)
+    sLayout.Padding = UDim.new(0, 14)
+    sLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+    -- schema передаётся как populate-функция Overmind
+    if not schema or type(schema) ~= "function" then
+        local emptyLabel = Instance.new("TextLabel")
+        emptyLabel.Size = UDim2.new(1, 0, 0, 40)
+        emptyLabel.Text = "No settings for this module"
+        emptyLabel.TextColor3 = CelestialPalette.SubText
+        emptyLabel.FontFace = CelestialFonts.Regular
+        emptyLabel.TextSize = 12
+        emptyLabel.BackgroundTransparency = 1
+        emptyLabel.ZIndex = 52
+        emptyLabel.Parent = settingsScroll
+        return
+    end
+
+    local ok, err = pcall(function()
+        schema(settingsScroll)
+    end)
+    if not ok then
+        warn("[Overmind GUI] Settings panel error for " .. moduleName .. ": " .. tostring(err))
+    end
+
+    -- [ КНОПКА СБРОСА НАСТРОЕК МОДУЛЯ ]
+    local resetBtnFrame = Instance.new("Frame")
+    resetBtnFrame.Name = "ResetBtnFrame"
+    resetBtnFrame.Size = UDim2.new(1, 0, 0, 32)
+    resetBtnFrame.BackgroundTransparency = 1
+    resetBtnFrame.LayoutOrder = 999
+    resetBtnFrame.Parent = settingsScroll
+
+    local resetBtn = Instance.new("TextButton")
+    resetBtn.Size = UDim2.new(1, 0, 1, 0)
+    resetBtn.BackgroundColor3 = Color3.fromRGB(55, 25, 32)
+    resetBtn.Text = "Reset Module Settings"
+    resetBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
+    resetBtn.Font = Enum.Font.GothamBold
+    resetBtn.TextSize = 11
+    resetBtn.Parent = resetBtnFrame
+    Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 8)
+    local rbStroke = Instance.new("UIStroke", resetBtn)
+    rbStroke.Color = Color3.fromRGB(120, 45, 55)
+    rbStroke.Thickness = 1
+
+    resetBtn.MouseButton1Click:Connect(function()
+        if resetBtn:GetAttribute("Confirming") then
+            resetBtn:SetAttribute("Confirming", nil)
+            resetBtn.Text = "Reset Module Settings"
+            if Internal.ResetModuleConfig then Internal.ResetModuleConfig(moduleName) end
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("RESET: " .. moduleName:upper(), Color3.fromRGB(255, 100, 100))
+            end
+            CelestialOpenRightSettingsPanel(moduleName, schema)
+        else
+            resetBtn:SetAttribute("Confirming", true)
+            resetBtn.Text = "SURE? CLICK AGAIN TO RESET"
+            task.delay(2.5, function()
+                if resetBtn and resetBtn.Parent then
+                    resetBtn:SetAttribute("Confirming", nil)
+                    resetBtn.Text = "Reset Module Settings"
+                end
+            end)
+        end
+    end)
+    if Internal.CelestialAddPressAnimation then Internal.CelestialAddPressAnimation(resetBtn) end
+end
+
+-- [ ФУНКЦИЯ СБРОСА КОНФИГУРАЦИИ МОДУЛЯ ]
+Internal.ResetModuleConfig = function(modName)
+    if not DefaultConfig then return end
+    pcall(function()
+        if State.ModuleBinds then State.ModuleBinds[modName] = nil end
+        if Config.ModuleBinds then Config.ModuleBinds[modName] = nil end
+        local data = State.Modules[modName]
+        if data and data.BindLabel then data.BindLabel.Text = "[NONE]" end
+
+        local modMap = {
+            ["Aimbot"] = {"Combat", "Memesense"},
+            ["Silent Aim"] = {"Combat", "SilentAim"},
+            ["Ragebot"] = {"Combat", "Ragebot"},
+            ["Anti-Aim"] = {"Combat", "AntiAim"},
+            ["ESP (BS)"] = {"Visuals", "ESP"},
+            ["Chams (BS)"] = {"Visuals", "Chams"},
+            ["Weapon Chams"] = {"Visuals", "WeaponChams"},
+            ["ESP"] = {"Visuals", "UniversalESP"},
+            ["Chams"] = {"Visuals", "UniversalChams"},
+            ["World"] = {"Visuals", "World"},
+            ["Atmosphere"] = {"Visuals", "Atmosphere"},
+            ["Projectiles"] = {"Visuals", "Projectiles"},
+            ["Hit Sound"] = {"Inventory", "HitSound"},
+            ["Kill Say"] = {"Inventory", "KillSay"},
+            ["Kill Sound"] = {"Inventory", "KillSound"},
+            ["HitMarker"] = {"Visuals", "Hitmarker"},
+            ["Custom Camera"] = {"Visuals", "CustomCamera"},
+            ["Viewmodel Offset"] = {"Visuals", "World", "Viewmodel"},
+            ["Custom Scope"] = {"Visuals", "CustomScope"},
+            ["Radar"] = {"Visuals", "Radar"},
+            ["BunnyHop"] = {"Cheat", "AutoBhop"},
+            ["Speed"] = {"Cheat", "SpeedHack"},
+            ["Highjump"] = {"Cheat", "Highjump"},
+            ["Fly Hack"] = {"Cheat", "Flying"},
+            ["Gold Farm"] = {"GoldFarm"},
+            ["Auto Farm CC2"] = {"CarCrushers"},
+            ["Pop for Free Farm"] = {"PopForFree"},
+            ["War Tycoon Farm"] = {"WarTycoonFarm"},
+            ["Vehicles Farm Helper"] = {"VehiclesFarm"},
+            ["Auto Build"] = {"WarTycoonBuild"},
+            ["Interface Settings"] = {"Theme"},
+            ["Dynamic Island"] = {"Island"},
+        }
+
+        local path = modMap[modName]
+        if path then
+            local currCfg = Config
+            local defCfg = DefaultConfig
+            for i = 1, #path - 1 do
+                currCfg = currCfg[path[i]]
+                defCfg = defCfg and defCfg[path[i]]
+            end
+            local key = path[#path]
+            if currCfg and defCfg and defCfg[key] ~= nil then
+                local jsonStr = Core.Services.HttpService:JSONEncode(defCfg[key])
+                local copyDef = Core.Services.HttpService:JSONDecode(jsonStr)
+                deserialize(copyDef)
+                currCfg[key] = copyDef
+                if data and data.Set then
+                    local isEnabled = copyDef.Enabled or copyDef.AimbotEnabled or false
+                    data.Set(isEnabled, true, true)
+                end
+            end
+        end
+        if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+    end)
+end
+
+
+-- SYSTEM LOGS FRAME (Плавающее независимое окно по вашей просьбе)
+Internal.DebugFrame = Instance.new("Frame")
+Internal.DebugFrame.Name = "DebugFrame"
+Internal.DebugFrame.Size = UDim2.new(0, 240, 0, 180)
+Internal.DebugFrame.Position = UDim2.new(0.05, 0, 0.7, 0)
+Internal.DebugFrame.BackgroundColor3 = Color3.fromRGB(10, 11, 18)
+Internal.DebugFrame.BackgroundTransparency = 0.2
+Internal.DebugFrame.BorderSizePixel = 0
+Internal.DebugFrame.Visible = false  -- Управляется из настроек Gui по дефолту оффнута
+Internal.DebugFrame.ClipsDescendants = false
+Internal.DebugFrame.Parent = ScreenGui  -- Перенесено из MainFrame в ScreenGui для плавающего режима
+
+local DebugCorner = Instance.new("UICorner", Internal.DebugFrame)
+DebugCorner.CornerRadius = UDim.new(0, 10)
+
+local DebugStroke = Instance.new("UIStroke", Internal.DebugFrame)
+DebugStroke.Color = Theme.Accent
+DebugStroke.Thickness = 1.2
+table.insert(Internal.UIObjects.Accents, DebugStroke)
+
+-- Шапка для перетаскивания плавающей консоли
+local DebugHeader = Instance.new("Frame", Internal.DebugFrame)
+DebugHeader.Name = "DebugHeader"
+DebugHeader.Size = UDim2.new(1, 0, 0, 22)
+DebugHeader.BackgroundTransparency = 1
+
+local DebugTitle = Instance.new("TextLabel", DebugHeader)
+DebugTitle.Size = UDim2.new(1, -10, 1, 0)
+DebugTitle.Position = UDim2.new(0, 10, 0, 0)
+DebugTitle.BackgroundTransparency = 1
+DebugTitle.Text = "OVERMIND CONSOLE"
+DebugTitle.TextColor3 = Color3.fromRGB(150, 150, 170)
+DebugTitle.TextSize = 10
+DebugTitle.Font = Enum.Font.GothamBold
+DebugTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+Internal.setupDrag(DebugHeader, Internal.DebugFrame)
+
+-- RESIZE HANDLE (Right Bottom Corner)
+local ResizeBtn = Instance.new("ImageButton")
+ResizeBtn.Name = "ResizeHandle"
+ResizeBtn.Size = UDim2.new(0, 16, 0, 16)
+ResizeBtn.Position = UDim2.new(1, -16, 1, -16)
+ResizeBtn.BackgroundTransparency = 1
+ResizeBtn.Image = "rbxassetid://6035043818"  -- Resize icon
+ResizeBtn.ImageColor3 = Color3.fromRGB(200, 200, 200)
+ResizeBtn.ZIndex = 10
+ResizeBtn.Parent = Internal.DebugFrame
+
+local resizing = false
+ResizeBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        resizing = true
+        local startSize = Internal.DebugFrame.Size
+        local startMouse = Core.UserInputService:GetMouseLocation()
+
+        local moveConn
+        moveConn = Core.UserInputService.InputChanged:Connect(function(move)
+            if move.UserInputType == Enum.UserInputType.MouseMovement or move.UserInputType == Enum.UserInputType.Touch then
+                local delta = Core.UserInputService:GetMouseLocation() - startMouse
+                Internal.DebugFrame.Size = UDim2.new(0, math.max(150, startSize.X.Offset + delta.X), 0, math.max(100, startSize.Y.Offset + delta.Y))
+            end
+        end)
+
+        local endConn
+        endConn = Core.UserInputService.InputEnded:Connect(function(ended)
+            if ended.UserInputType == Enum.UserInputType.MouseButton1 or ended.UserInputType == Enum.UserInputType.Touch then
+                resizing = false
+                moveConn:Disconnect()
+                endConn:Disconnect()
+            end
+        end)
+    end
+end)
+
+local DebugLogContainer = Instance.new("ScrollingFrame")
+DebugLogContainer.Name = "DebugLogContainer"
+DebugLogContainer.Size = UDim2.new(1, -10, 1, -32)
+DebugLogContainer.Position = UDim2.new(0, 5, 0, 25)
+DebugLogContainer.BackgroundTransparency = 1
+DebugLogContainer.BorderSizePixel = 0
+DebugLogContainer.ScrollBarThickness = 2
+DebugLogContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+DebugLogContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+DebugLogContainer.Parent = Internal.DebugFrame
+table.insert(Internal.UIObjects.Accents, DebugLogContainer)
+
+local DLayout = Instance.new("UIListLayout")
+DLayout.Padding = UDim.new(0, 2)
+DLayout.SortOrder = Enum.SortOrder.LayoutOrder
+DLayout.Parent = DebugLogContainer
+
+local function Log(text, color)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 0, 14)
+    l.BackgroundTransparency = 1
+    l.Text = "> " .. tostring(text)
+    l.TextColor3 = color or Color3.fromRGB(200, 200, 200)
+    l.TextSize = 9
+    l.Font = Enum.Font.Code
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = DebugLogContainer
+    DebugLogContainer.CanvasPosition = Vector2.new(0, 9999)
+end
+_G.Log = Log  -- Make it global as requested
+
+-- [ БУЛЬДОЗЕР ДЛЯ БИНДОВ ] гарантирует EnumItem на выходе из любой формы
+Internal.CoerceKeyBind = function(value, fallback)
+    local ok, result = pcall(function()
+        if typeof(value) == "EnumItem" then return value end
+        if type(value) == "table" then
+            if value.Key ~= nil and typeof(value.Key) == "EnumItem" then return value.Key end
+            if value.name then return Enum.KeyCode[value.name] end
+            if value.Name then return Enum.KeyCode[value.Name] end
+        end
+        if type(value) == "string" and value ~= "" and value ~= "NONE" then
+            return Enum.KeyCode[value]
+        end
+        return nil
+    end)
+    if ok and result then return result end
+    return fallback or Enum.KeyCode.RightShift
+end
+
+local function sanitizeConfigName(name)
+    local n = tostring(name or "default")
+    -- Repeat removal to handle nested paths
+    for _ = 1, 3 do
+        n = n:gsub("Overmind/Configs/", ""):gsub("Overmind\\Configs\\", "")
+             :gsub("overmind/configs/", ""):gsub("overmind\\configs\\", "")
+    end
+    n = n:gsub("%.json$", "")
+    n = n:gsub("[/\\]", "_")
+    n = n:gsub("^%s*(.-)%s*$", "%1")
+    return (n == "" and "default" or n)
+end
+
+local function SaveConfig(name)
+    if not writefile then return end
+    local cleanName = sanitizeConfigName(name)
+    pcall(function()
+        if not isfolder("Overmind") then makefolder("Overmind") end
+        if not isfolder("Overmind/Configs") then makefolder("Overmind/Configs") end
+
+        Config.ModuleBinds = State.ModuleBinds or Config.ModuleBinds or {}
+        local path = "Overmind/Configs/" .. cleanName .. ".json"
+        local data = Core.Services.HttpService:JSONEncode(serialize(Config))
+        writefile(path, data)
+        print("[CONFIG] Saved to: " .. path)
+        if Internal.ShowIslandNotification then Internal.ShowIslandNotification("CONFIG SAVED: " .. cleanName:upper(), Config.Theme.Accent) end
+    end)
+end
+
+-- [ НОВОЕ: АВТОСОХРАНЕНИЕ ] настройки меню (темы
+Internal.ScheduleConfigAutosave = function()
+    if not writefile then return end
+    if Internal._autosaveToken then
+        pcall(task.cancel, Internal._autosaveToken)
+    end
+    Internal._autosaveToken = task.delay(3, function()
+        Internal._autosaveToken = nil
+        if State.Unloading or not IsCurrentInstance() then return end
+        pcall(function()
+            if not isfolder("Overmind") then makefolder("Overmind") end
+            if not isfolder("Overmind/Configs") then makefolder("Overmind/Configs") end
+            Config.ModuleBinds = State.ModuleBinds or Config.ModuleBinds or {}
+            writefile("Overmind/Configs/default.json", Core.Services.HttpService:JSONEncode(serialize(Config)))
+            print("[CONFIG] Autosaved (menu settings)")
+        end)
+    end)
+end
+
+local function LoadConfig(name)
+    if not readfile then
+        _G.Log("Error: readfile not supported", Color3.fromRGB(255, 0, 0))
+        return
+    end
+
+    local cleanName = sanitizeConfigName(name)
+
+    local success, err = pcall(function()
+        local path = "Overmind/Configs/" .. cleanName .. ".json"
+        if isfile(path) then
+            local data = readfile(path)
+            local decodeSuccess, decoded = pcall(function() return Core.Services.HttpService:JSONDecode(data) end)
+
+            if decodeSuccess and decoded then
+                deserialize(decoded)
+
+                local function merge(base, new)
+                    for k, v in pairs(new) do
+                        if type(v) == "table" and base[k] ~= nil and type(base[k]) == "table" then
+                            merge(base[k], v)
+                        else
+                            base[k] = v
+                        end
+                    end
+                end
+                merge(Config, decoded)
+
+                -- [ МИГРАЦИЯ v12 ] JumpHeight удалён из модуля
+                if Config.Cheat.AutoBhop then Config.Cheat.AutoBhop.JumpHeight = nil end
+
+                -- [ ФИКС БИНДОВ МОДУЛЕЙ ПРИ ЗАГРУЗКЕ КОНФИГА ]
+                if Config.ModuleBinds then
+                    State.ModuleBinds = Config.ModuleBinds
+                    for modName, bind in pairs(State.ModuleBinds) do
+                        local bk = (type(bind) == "table") and bind.Key or bind
+                        local keyCode = Internal.CoerceKeyBind(bk, nil)
+                        local mode = (type(bind) == "table" and bind.Mode) or "Toggle"
+                        if keyCode then
+                            State.ModuleBinds[modName] = { Key = keyCode, Mode = mode }
+                            local data = State.Modules[modName]
+                            if data and data.BindLabel then
+                                data.BindLabel.Text = "[" .. keyCode.Name .. "]"
+                            end
+                        end
+                    end
+                end
+
+                -- КРИТИЧЕСКИЙ ФИКС БИНДА МЕНЮ ПРИ ЗАГРУЗКЕ КОНФИГА
+                if decoded.Theme and decoded.Theme.Bind then
+                    Config.Theme.Bind = Internal.CoerceKeyBind(decoded.Theme.Bind, Enum.KeyCode.RightShift)
+                end
+                -- самолечение
+                pcall(function()
+                    if typeof(Config.Theme.Bind) ~= "EnumItem" then
+                        Config.Theme.Bind = Internal.CoerceKeyBind(Config.Theme.Bind, Enum.KeyCode.RightShift)
+                        if Internal.ShowIslandNotification then
+                            Internal.ShowIslandNotification("Menu bind restored: " .. Config.Theme.Bind.Name, Config.Theme.Accent)
+                        end
+                    end
+                end)
+
+                local function SyncModules()
+
+                if Internal.Celestial and Config.Theme.AnimType then Internal.Celestial.AnimType = Config.Theme.AnimType end
+                if Internal.Celestial and Config.Theme.AnimSpeed then Internal.Celestial.AnimSpeed = Config.Theme.AnimSpeed end
+                if Internal.Celestial and Config.Theme.CelestialThemeName then
+                    for _, tData in ipairs(ThemesList) do
+                        if tData.Name == Config.Theme.CelestialThemeName then
+                            CurrentCelestialTheme = tData
+                            pcall(CelestialUpdateAllGradients)
+                            break
+                        end
+                    end
+                end
+                    local mapping = {
+                        ["ESP (BS)"] = Config.Visuals.ESP.Enabled,
+                        ["Chams (BS)"] = Config.Visuals.Chams.Enabled,
+                        ["ESP"] = Config.Visuals.UniversalESP.Enabled,
+                        ["Chams"] = Config.Visuals.UniversalChams.Enabled,
+                        ["Weapon Chams"] = Config.Visuals.WeaponChams.Enabled,
+                        ["Aimbot"] = Config.Combat.Memesense.Enabled,
+                        ["Silent Aim"] = Config.Combat.SilentAim.Enabled,
+                        ["Ragebot"] = Config.Combat.Ragebot.Enabled,
+                        -- [ v54 ] there is no standalone Triggerbot module
+                        ["Triggerbot"] = Config.Combat.Memesense.Triggerbot,
+                        ["No Recoil"] = Config.Combat.WeaponMods.NoRecoil,
+                        ["No Spread"] = Config.Combat.WeaponMods.NoSpread,
+                        ["Instant Reload"] = Config.Combat.WeaponMods.InstantReload,
+                        ["Infinite Ammo"] = Config.Combat.WeaponMods.InfAmmo,
+                        ["Rapid Fire"] = Config.Combat.WeaponMods.RapidFire,
+                        ["No Flash"] = Config.Combat.WeaponMods.NoFlash,
+                        ["No Smoke"] = Config.Combat.WeaponMods.NoSmoke,
+                        ["World"] = Config.Visuals.World.Enabled,
+                        ["Atmosphere"] = Config.Visuals.Atmosphere.Enabled,
+                        ["Projectiles"] = Config.Visuals.Projectiles.Enabled,
+                        ["Hit Sound"] = Config.Inventory.HitSound.Enabled,
+                        ["HitMarker"] = Config.Visuals.Hitmarker.Enabled,
+                        ["Custom Camera"] = Config.Visuals.CustomCamera.Enabled,
+                        ["Viewmodel Offset"] = Config.Visuals.World.Viewmodel.Enabled,
+                        ["Custom Scope"] = Config.Visuals.CustomScope.Enabled,
+                        ["War Tycoon Farm"] = Config.WarTycoonFarm.Enabled,
+                        ["Fly Hack"] = Config.Cheat.Flying,
+                        ["Auto Farm"] = Config.Cheat.AutoFarm,
+                        ["Pop for Free Farm"] = Config.PopForFree.Enabled,
+                        ["Highjump"] = Config.Cheat.Highjump.Enabled,
+                        ["Speed"] = Config.Cheat.SpeedHack.Enabled,
+                        ["BunnyHop"] = Config.Cheat.AutoBhop.Enabled,
+                        ["No Fall Damage"] = Config.Cheat.NoFallDamage,
+                        ["Dynamic Island"] = Config.Island.Enabled,
+                        ["Gold Farm"] = Config.GoldFarm.Enabled,
+                        ["Auto Farm CC2"] = Config.CarCrushers.AutoFarm,
+                        ["Vehicles Farm Helper"] = Config.VehiclesFarm.Enabled,
+                        ["Auto Build"] = Config.WarTycoonBuild.Enabled,
+                        ["Path System"] = Config.PathSystem.Playing,
+                        ["Debug Console"] = Config.Island.DebugConsole
+                    }
+
+                    for modName, configValue in pairs(mapping) do
+                        local mData = State.Modules[modName]
+                        if mData and mData.Set then
+                            pcall(function() mData.Set(configValue, true, true) end)
+                        end
+                    end
+
+                    if Config.Theme and Config.Theme.Accent then
+                        pcall(function() updateAccentTheme(Config.Theme.Accent) end)
+                    end
+                end
+
+                SyncModules()
+
+                if Internal.ShowIslandNotification then Internal.ShowIslandNotification("CONFIG LOADED: " .. cleanName:upper(), Config.Theme.Accent) end
+                _G.Log("Successfully loaded config: " .. cleanName, Color3.fromRGB(0, 255, 150))
+
+                if _G.SelectTab then _G.SelectTab(State.CurrentTab, true) end
+            else
+                _G.Log("Failed to parse config file!", Color3.fromRGB(255, 50, 50))
+            end
+        else
+            _G.Log("Config file not found: " .. cleanName, Color3.fromRGB(255, 50, 50))
+        end
+    end)
+
+    if not success then
+        _G.Log("Critical Load Error: " .. tostring(err), Color3.fromRGB(255, 0, 0))
+    end
+end
+
+local function ListConfigs()
+    if not listfiles then return {} end
+    local success, files = pcall(listfiles, "Overmind/Configs")
+    if not success or not files then return {} end
+    local configs = {}
+    for _, file in ipairs(files) do
+        local name = file:match("([^/]+)%.json$") or file:match("([^\\]+)%.json$")
+        if name then table.insert(configs, name) end
+    end
+    return configs
+end
+
+local function migrateOldConfigs()
+    if not isfolder or not isfile or not listfiles or not writefile or not readfile then return end
+    pcall(function()
+        local function scanAndMove(dir)
+            if not isfolder(dir) then return end
+            for _, file in ipairs(listfiles(dir)) do
+                if file:find("%.json$") then
+                    local name = file:match("([^/]+)$") or file:match("([^\\]+)$")
+                    if name then
+                        local newPath = "Overmind/Configs/" .. name
+                        if not isfile(newPath) then
+                            writefile(newPath, readfile(file))
+                            pcall(delfile, file)
+                            print("[MIGRATE] Moved: " .. name)
+                        end
+                    end
+                elseif isfolder(file) then
+                    scanAndMove(file)
+                end
+            end
+        end
+        scanAndMove("Overmind/Configs/Overmind")
+    end)
+end
+migrateOldConfigs()
+
+-- [ CUBE CHECKER & SHOW TARGET VISUALS ]
+do
+local CubePart = Instance.new("Part")
+CubePart.Name = "Overmind_CubeChecker"
+CubePart.Size = Vector3.new(1.5, 1.5, 0.01)
+CubePart.Anchored = true
+CubePart.CanCollide = false
+CubePart.Material = Enum.Material.Neon
+CubePart.Transparency = 0.5
+local CubeSelection = Instance.new("SelectionBox", CubePart)
+CubeSelection.LineThickness = 0.05
+CubeSelection.Transparency = 0.2
+
+local TargetLine = createDrawing("Line", {Thickness = 1.5, Visible = false})
+
+local TargetCrosshair = {}
+for i = 1, 4 do
+    local l = createDrawing("Line", {Thickness = 2, Visible = false})
+    TargetCrosshair[i] = l
+end
+
+local PenText = createDrawing("Text", {Visible = false, Center = true, Size = 18, Font = 2, Outline = true})
+end
+
+-- GLOBAL TEAM LOGIC HELPERS (Blox Strike Fix)
+do
+    -- THE ULTIMATE SPAWN-POSITION TEAMCHECK BYPASS
+    local function runSpawnTeamScanner()
+        pcall(function()
+            local myChar = Core.Local.Player.Character
+            local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if not myHrp then return end
+
+            local myPos = myHrp.Position
+
+            for _, p in Core.Services.Players:GetPlayers() do
+                if p ~= Core.Local.Player and p.Character then
+                    local enemyHrp = p.Character:FindFirstChild("HumanoidRootPart")
+                    if enemyHrp then
+                        local spawnDistance = (enemyHrp.Position - myPos).Magnitude
+
+                        -- Дистанция спавна союзников
+                        if spawnDistance <= 25 then
+                            TeamCache[p.UserId] = "Ally"
+                        else
+                            TeamCache[p.UserId] = "Enemy"
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+-- Clear and re-verify everyone's faction strictly when the LocalPlayer respawns (New ...
+State.Connections.TeamReset = game:GetService("Players").LocalPlayer.CharacterAdded:Connect(function(char)
+    table.clear(TeamCache)
+    if ChamsPartsCache then table.clear(ChamsPartsCache) end
+    if ChamsLastSeenState then table.clear(ChamsLastSeenState) end
+    if ChamsVisTick then table.clear(ChamsVisTick) end
+    if HighlightsCache then
+        for ch in pairs(HighlightsCache) do
+            removeChams(ch)
+        end
+    end
+    task.wait(1.5)  -- Give 1.5 seconds for the map and other players to load/spawn into position
+    runSpawnTeamScanner()
+end)
+
+    -- Clear data on player leaving to prevent internal memory leaks
+    State.Connections.PlayerRemoving = Core.Services.Players.PlayerRemoving:Connect(function(player)
+        TeamCache[player.UserId] = nil
+    end)
+end
+
+-- [ UNIFIED TARGET & TEAM SCANNER ENGINE ]
+
+
+-- [ WEAPON & RAGEBOT LOGIC FROM MEMESENS ]
+
+local getCurrentEquipped = nil
+local Weapon = nil
+
+-- Scans registry for internal game controllers
+task.spawn(function()
+    while not getCurrentEquipped do
+        local reg = getreg and getreg() or {}
+        for _, obj in reg do
+            if type(obj) == 'table' and rawget(obj, "getCurrentEquipped") then
+                pcall(function() getCurrentEquipped = obj.getCurrentEquipped end)
+                if getCurrentEquipped then break end
+            end
+        end
+        task.wait(2)
+    end
+end)
+
+local function getEquipped()
+    if not getCurrentEquipped then return nil end
+    local success, result = pcall(function()
+        return debug.getupvalue(getCurrentEquipped, 1).CurrentEquipped
+    end)
+    return success and result or nil
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        pcall(function() Weapon = getEquipped() end)
+    end
+end)
+
+-- [ v34 ] RAGEBOT AUTO FIRE
+State.Rage = State.Rage or {}
+State.Rage.damageCache = State.Rage.damageCache or {}
+State.Rage.sampleOffsets = State.Rage.sampleOffsets or {}
+State.Rage.fields = {
+    base = { "Damage", "BaseDamage", "BulletDamage", "MaxDamage", "DamageMax", "Dmg" },
+    head = { "HeadshotMultiplier", "HeadMultiplier", "HeadshotMult", "HeadshotDamageMultiplier" },
+    body = { "BodyMultiplier", "BodyDamageMultiplier" },
+    limb = { "LimbMultiplier", "LegMultiplier", "LimbDamageMultiplier" },
+    sub  = { "Info", "Config", "Stats", "Definition", "Data", "Profile", "Settings" },
+}
+
+State.Rage.firstNumber = function(t, names)
+    for i = 1, #names do
+        local ok, v = pcall(function() return t[names[i]] end)
+        if ok and type(v) == "number" and v > 0 and v == v then return v end
+    end
+    return nil
+end
+
+-- классификация хитбокса
+State.Rage.hitboxClass = function(name)
+    local n = string.lower(tostring(name or ""))
+    if n:find("head") then return "head" end
+    if n:find("arm") or n:find("leg") or n:find("hand") or n:find("foot") or n:find("limb") then return "limb" end
+    return "body"
+end
+
+-- урон оружия из самого объекта игры (глубина 2)
+State.Rage.weaponDamage = function(weapon)
+    if type(weapon) ~= "table" then return nil end
+    local F = State.Rage.fields
+    local cached = State.Rage.damageCache[weapon]
+    if cached and (os.clock() - cached.at) < 10 then return cached end
+    local info = { at = os.clock() }
+    local function scan(t, depth)
+        if type(t) ~= "table" or depth > 2 then return end
+        info.damage = info.damage or State.Rage.firstNumber(t, F.base)
+        info.head   = info.head   or State.Rage.firstNumber(t, F.head)
+        info.body   = info.body   or State.Rage.firstNumber(t, F.body)
+        info.limb   = info.limb   or State.Rage.firstNumber(t, F.limb)
+        for i = 1, #F.sub do
+            local ok, sub = pcall(function() return t[F.sub[i]] end)
+            if ok and type(sub) == "table" then scan(sub, depth + 1) end
+        end
+    end
+    pcall(scan, weapon, 0)
+    if Config.DebugMode and not info.logged then
+        info.logged = true
+        print(string.format("[RAGE] weapon damage probe: base=%s head=%s body=%s limb=%s",
+            tostring(info.damage), tostring(info.head), tostring(info.body), tostring(info.limb)))
+    end
+    State.Rage.damageCache[weapon] = info
+    return info
+end
+
+-- предположительный урон по конкретной части
+State.Rage.estimateDamage = function(weapon, part)
+    local cfg = Config.Combat.Ragebot
+    local info = State.Rage.weaponDamage(weapon)
+    local cls = State.Rage.hitboxClass(part and part.Name)
+    local base = (info and info.damage) or cfg.Damage or 30
+    local mult
+    if cls == "head" then mult = (info and info.head) or cfg.HeadMult or 4
+    elseif cls == "limb" then mult = (info and info.limb) or cfg.LimbMult or 0.75
+    else mult = (info and info.body) or cfg.BodyMult or 1 end
+    return base * mult, cls
+end
+
+-- точки хитбокса
+do
+    local i = 0
+    local steps = { -0.35, 0, 0.35 }
+    for a = 1, #steps do
+        for b = 1, #steps do
+            i = i + 1
+            State.Rage.sampleOffsets[i] = { steps[a], steps[b] }
+        end
+    end
+end
+
+State.Rage.rayParams = State.Rage.rayParams or RaycastParams.new()
+State.Rage.rayParams.FilterType = Enum.RaycastFilterType.Exclude
+State.Rage.rayParams.IgnoreWater = true
+
+State.Rage.hitchance = function(part, samples)
+    local cam = workspace.CurrentCamera
+    if not cam or not part or not part.Parent then return 0 end
+    local now = os.clock()
+    local cache = State.RageHC
+    if cache and cache.part == part and (now - cache.at) < 0.05 then return cache.hc end
+
+    local char = part:FindFirstAncestorOfClass("Model")
+    local ignore = { Core.Local.Player.Character, cam }
+    for _, p in Core.Services.Players:GetPlayers() do
+        if p ~= Core.Local.Player and p.Character and isCharacterAlly(p.Character) then
+            table.insert(ignore, p.Character)
+        end
+    end
+    State.Rage.rayParams.FilterDescendantsInstances = ignore
+
+    local from = cam.CFrame.Position
+    local cf, size = part.CFrame, part.Size
+    local total, hits = 0, 0
+    local step = math.max(1, math.floor(9 / math.clamp(tonumber(samples) or 9, 1, 9)))
+    for i = 1, 9, step do
+        local o = State.Rage.sampleOffsets[i]
+        local point = cf.Position + cf.RightVector * (o[1] * size.X) + cf.UpVector * (o[2] * size.Y)
+        total = total + 1
+        local res = workspace:Raycast(from, point - from, State.Rage.rayParams)
+        if not res then
+            hits = hits + 1
+        else
+            local hm = res.Instance:FindFirstAncestorOfClass("Model")
+            if hm and hm == char then hits = hits + 1 end
+        end
+    end
+    local hc = (total > 0) and (hits / total) * 100 or 0
+    State.RageHC = { part = part, hc = hc, at = now }
+    return hc
+end
+
+-- главная проверка
+State.Rage.fireReady = function()
+    local cfg = Config.Combat.Ragebot
+    local part = State.RageTarget
+    if not part or not part.Parent then return false, "no-target" end
+    if not Weapon or not Weapon.IsEquipped or (Weapon.Rounds or 1) <= 0 then return false, "no-ammo" end
+
+    if cfg.AutoVisible ~= false and not isVisible(part) then return false, "not-visible" end
+
+    local dmg, cls = State.Rage.estimateDamage(Weapon, part)
+    if (cfg.MinDamage or 0) > 0 and dmg < cfg.MinDamage then return false, "low-damage" end
+
+    local hc = State.Rage.hitchance(part, cfg.HitSamples)
+    if (cfg.Hitchance or 0) > 0 and hc < cfg.Hitchance then return false, "low-hitchance" end
+
+    State.RageFireStats = { damage = dmg, hitchance = hc, hitbox = part.Name, class = cls }
+    return true, "ok", dmg, hc
+end
+
+-- Ragebot Shooting Loop
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local cfg = Config.Combat.Ragebot
+        task.wait(cfg.Delay or 0.01)
+        if cfg.Enabled and cfg.AutoShoot then
+            local ok, reason, dmg, hc = State.Rage.fireReady()
+            if ok then
+                pcall(function() Weapon:shoot() end)
+            end
+            if Config.DebugMode and (os.clock() - (State.RageFireDiagAt or 0)) > 1 then
+                State.RageFireDiagAt = os.clock()
+                print(string.format("[RAGE] fire=%s reason=%s dmg=%s hc=%s hitbox=%s",
+                    ok and "YES" or "NO", tostring(reason),
+                    dmg and string.format("%.0f", dmg) or "-",
+                    hc and string.format("%.0f%%", hc) or "-",
+                    tostring((State.RageTarget and State.RageTarget.Name) or "-")))
+            end
+        end
+    end
+end)
+
+-- Memesense Triggerbot Loop
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local cfg = Config.Combat.Memesense
+        task.wait(cfg.TriggerbotDelay or 0.01)
+        if cfg.Enabled and cfg.Triggerbot and State.MemesenseTarget and Weapon and Weapon.IsEquipped and (Weapon.Rounds or 1) > 0 then
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                if not cam then return end
+                local camLook = cam.CFrame.LookVector
+                local toTarget = (State.MemesenseTarget.Position - cam.CFrame.Position).Unit
+                if camLook:Dot(toTarget) > 0.88 then
+                    Weapon:shoot()
+                end
+            end)
+        end
+
+        if cfg.Enabled and cfg.CubeTriggerbot and State.MemesenseTarget and Weapon and Weapon.IsEquipped and (Weapon.Rounds or 1) > 0 then
+            pcall(function()
+                local cam = workspace.CurrentCamera
+                if not cam then return end
+                local camLook = cam.CFrame.LookVector
+                local toTarget = (State.MemesenseTarget.Position - cam.CFrame.Position).Unit
+                if camLook:Dot(toTarget) > 0.88 then
+                    Weapon:shoot()
+                end
+            end)
+        end
+    end
+end)
+
+-- [ НОВОЕ ] Hold-to-Fire Loop
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local wf = Config.Combat.WeaponMods
+        -- [ ОПТИМИЗАЦИЯ ] фича выключена
+        if not (wf.RapidFire and wf.HoldToFire) then task.wait(0.2) continue end
+        local menuBlocking = (Internal.MainFrame and Internal.MainFrame.Visible)
+            or (Internal.Celestial and Internal.Celestial.SettingsFrame and Internal.Celestial.SettingsFrame.Parent ~= nil)
+            or State.BindingModule ~= nil
+        if not menuBlocking
+            and (Core.Services.UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) or Core.Services.UserInputService:IsMouseButtonPressed(Enum.UserInputType.Touch))
+            and Weapon and Weapon.IsEquipped and (Weapon.Rounds or 1) > 0 then
+            pcall(function() Weapon:shoot() end)
+            task.wait(wf.HoldFireDelay or 0.05)
+        else
+            task.wait()
+        end
+    end
+end)
+
+-- Global Optimization Loop for Targets
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        task.wait()
+        pcall(function()
+            local lchar = Core.Local.Player.Character
+            if not lchar then return end
+            local hrp = lchar:FindFirstChild("HumanoidRootPart")
+            local hum = lchar:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum then return end
+
+            -- [ BhopEngine ] Auto Bhop / Strafe / Jump Boost перенесены в выделенный ...
+
+            -- No Fall Damage
+            if Config.Cheat.NoFallDamage then
+                hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+                hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+            end
+        end)
+    end
+end)
+
+-- [ BHOP ENGINE v2 ]
+-- [ ADVANCED ANTI-AIM ENGINE ]
+-- [ ANTI-AIM ENGINE v30 ]  Почему старый AA не работал в Blox Strike
+local AntiAimState = {
+    JitterState = false,
+    LastJitterTick = 0,
+    ManualAngle = 0,
+    ManualState = "None",
+    DesyncInvert = false,
+    CurrentCondition = "Standing",
+    DesiredYawRad = nil,
+    DesiredPitchRad = 0,
+    SpoofActive = false,
+    SpoofCount = 0,
+    YawSpoofOk = false,
+    CameraSpoofActive = false,
+    CameraSpoofed = false,
+    CameraOrigCF = nil,
+    CameraSpoofCF = nil,
+    -- [ v33 ] Компенсация движения (спуф YAW не должен крутить наш Move) + счётчики для [AA]
+    MoveCompOk = false,
+    MoveCompCount = 0,
+    LastDiag = 0
+}
+
+-- универсальная подмена поля модуля
+local function patchModuleField(mod, field, replacement)
+    local okWrite = pcall(function() mod[field] = replacement end)
+    if okWrite and mod[field] == replacement then return true end
+    if type(setreadonly) == "function" then
+        pcall(function()
+            setreadonly(mod, false)
+            mod[field] = replacement
+            setreadonly(mod, true)
+        end)
+        if mod[field] == replacement then return true end
+    end
+    return false
+end
+
+-- [ AA 1 ] ПЕРЕХВАТ ИСХОДЯЩИХ КОМАНД
+local function TryInstallYawSpoof()
+    if AntiAimState.YawSpoofOk then return true end
+    local RS = game:GetService("ReplicatedStorage")
+    local ok, Quantization = pcall(function()
+        local mv = RS:FindFirstChild("MovementV2")
+        local q = mv and mv:FindFirstChild("Quantization")
+        if not q then return nil end
+        return require(q)
+    end)
+    if not ok or type(Quantization) ~= "table" then return false end
+    local origYaw  = Quantization.quantizeYaw
+    local origUnit = Quantization.quantizeSignedUnit
+    if type(origYaw) ~= "function" then return false end
+
+    -- [ v31 ] Подмена YAW + PITCH одной точкой
+    local yawRepl = function(yaw)
+        local st = AntiAimState
+        if st.SpoofActive and st.DesiredYawRad then
+            st.SpoofCount = st.SpoofCount + 1
+            if st.PitchSpoofActive and st.DesiredPitchSin then
+                st.NextUnitIsPitch = true
+                st.NextUnitAt = os.clock()
+            end
+            return origYaw(st.DesiredYawRad)
+        end
+        return origYaw(yaw)
+    end
+
+    if not patchModuleField(Quantization, "quantizeYaw", yawRepl) then return false end
+
+    if type(origUnit) == "function" then
+        local unitRepl = function(v)
+            local st = AntiAimState
+            if st.NextUnitIsPitch and (os.clock() - (st.NextUnitAt or 0)) < 0.05 then
+                st.NextUnitIsPitch = false
+                if st.PitchSpoofActive and st.DesiredPitchSin then
+                    st.PitchSpoofCount = (st.PitchSpoofCount or 0) + 1
+                    return origUnit(st.DesiredPitchSin)
+                end
+            end
+            return origUnit(v)
+        end
+        if patchModuleField(Quantization, "quantizeSignedUnit", unitRepl) then
+            AntiAimState.OrigQuantizeSignedUnit = origUnit
+            AntiAimState.PitchSpoofOk = true
+        end
+    end
+
+    AntiAimState.YawSpoofOk = true
+    AntiAimState.Quantization = Quantization
+    AntiAimState.OrigQuantizeYaw = origYaw
+    AntiAimState.NextUnitIsPitch = false
+    return true
+end
+
+-- [ v33 ] КОМПЕНСАЦИЯ ДВИЖЕНИЯ
+local function TryInstallMoveComp()
+    if AntiAimState.MoveCompOk then return true end
+    local RS = game:GetService("ReplicatedStorage")
+    local ok, Stream = pcall(function()
+        local mv = RS:FindFirstChild("MovementV2")
+        local client = mv and mv:FindFirstChild("Client")
+        local cs = client and client:FindFirstChild("CommandStream")
+        if not cs then return nil end
+        return require(cs)
+    end)
+    if not ok or type(Stream) ~= "table" or type(Stream.sample) ~= "function" then return false end
+
+    local origSample = Stream.sample
+    local function sampleRepl(selfRef, cmd)
+        local st = AntiAimState
+        if st.SpoofActive and st.DesiredYawRad
+            and Config.Combat.AntiAim.MoveComp ~= false
+            and type(cmd) == "table" and typeof(cmd.Move) == "Vector2" and type(cmd.LookYaw) == "number" then
+            local delta = st.DesiredYawRad - cmd.LookYaw
+            local mx, my = cmd.Move.X, cmd.Move.Y
+            local cs_, sn_ = math.cos(delta), math.sin(delta)
+            -- поворот локальных компонент (X = вправо
+            mx, my = mx * cs_ - my * sn_, mx * sn_ + my * cs_
+            local vlook = cmd.VerticalLook
+            if st.PitchSpoofActive and st.DesiredPitchSin then vlook = st.DesiredPitchSin end
+            st.MoveCompCount = (st.MoveCompCount or 0) + 1
+            return origSample(selfRef, {
+                Move = Vector2.new(mx, my),
+                LookYaw = st.DesiredYawRad,
+                VerticalLook = vlook,
+                Buttons = cmd.Buttons,
+                WeaponSelectRequestId = cmd.WeaponSelectRequestId,
+                WeaponSelectIdentifier = cmd.WeaponSelectIdentifier,
+                PredictedBaseMoveSpeed = cmd.PredictedBaseMoveSpeed,
+                PredictedWeaponMoveSpeed = cmd.PredictedWeaponMoveSpeed,
+                PredictedWeaponScopedMoveSpeed = cmd.PredictedWeaponScopedMoveSpeed,
+            })
+        end
+        return origSample(selfRef, cmd)
+    end
+
+    if not patchModuleField(Stream, "sample", sampleRepl) then return false end
+    AntiAimState.OrigSample = origSample
+    AntiAimState.CommandStream = Stream
+    AntiAimState.MoveCompOk = true
+    if Config.DebugMode then print("[AA] move-comp: CommandStream.sample hook installed") end
+    return true
+end
+
+local function RestoreYawSpoof()
+    -- [ v33 ] снимаем и перехват сэмплера команд (компенсация движения)
+    local stream = AntiAimState.CommandStream
+    if stream and AntiAimState.OrigSample then
+        patchModuleField(stream, "sample", AntiAimState.OrigSample)
+    end
+    AntiAimState.MoveCompOk = false
+    local q = AntiAimState.Quantization
+    if q and AntiAimState.OrigQuantizeYaw then
+        patchModuleField(q, "quantizeYaw", AntiAimState.OrigQuantizeYaw)
+    end
+    if q and AntiAimState.OrigQuantizeSignedUnit then
+        patchModuleField(q, "quantizeSignedUnit", AntiAimState.OrigQuantizeSignedUnit)
+    end
+    AntiAimState.YawSpoofOk = false
+    AntiAimState.PitchSpoofOk = false
+    AntiAimState.SpoofActive = false
+    AntiAimState.PitchSpoofActive = false
+end
+
+State.AntiAimRestore = RestoreYawSpoof  -- вызовется при выгрузке (см
+
+local function GetAntiAimCondition(hum, hrp)
+    if not hrp then return "Standing" end
+    -- [ v30 ] в Blox Strike персонаж может быть БЕЗ Humanoid (клиентский MovementV2)
+    local isAir
+    if hum then
+        isAir = (hum.FloorMaterial == Enum.Material.Air) or (hum:GetState() == Enum.HumanoidStateType.Freefall)
+    else
+        local rp = AntiAimState.GroundRay or RaycastParams.new()
+        AntiAimState.GroundRay = rp
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        AntiAimState.GroundFilter = AntiAimState.GroundFilter or {}
+        AntiAimState.GroundFilter[1] = hrp.Parent
+        AntiAimState.GroundFilter[2] = Core.Local.Player.Character
+        rp.FilterDescendantsInstances = AntiAimState.GroundFilter
+        isAir = (workspace:Raycast(hrp.Position, Vector3.new(0, -6, 0), rp) == nil)
+    end
+    if isAir then return "Air" end
+
+    local isCrouching = (hum and hum.Crouch) or false
+    local char = hrp.Parent
+    if char and char:GetAttribute("Crouching") then isCrouching = true end
+    if isCrouching then return "Crouching" end
+
+    local vel = hrp.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+    local moveSpeed = vel.Magnitude
+    if moveSpeed > 8 then
+        return "Moving"
+    elseif moveSpeed > 0.5 then
+        return "SlowWalk"
+    end
+    return "Standing"
+end
+
+local function GetAtTargetsYaw(hrp)
+    local myPos = hrp.Position
+    local bestEnemy, bestDist = nil, math.huge
+    for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+        if p ~= Core.Local.Player and p.Character then
+            if not isCharacterAlly(p.Character) then
+                local eHrp = p.Character:FindFirstChild("HumanoidRootPart")
+                if eHrp then
+                    local dist = (eHrp.Position - myPos).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        bestEnemy = eHrp
+                    end
+                end
+            end
+        end
+    end
+    if bestEnemy then
+        local dir = (bestEnemy.Position - myPos).Unit
+        return math.atan2(-dir.X, -dir.Z)
+    end
+    return nil
+end
+
+local function GetFreestandingInvert(hrp)
+    local cam = workspace.CurrentCamera
+    if not cam or not hrp then return false end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {hrp.Parent, cam}
+
+    local cframe = hrp.CFrame
+    local rightRay = workspace:Raycast(cframe.Position, cframe.RightVector * 8, rayParams)
+    local leftRay = workspace:Raycast(cframe.Position, -cframe.RightVector * 8, rayParams)
+
+    if leftRay and not rightRay then
+        return true
+    elseif rightRay and not leftRay then
+        return false
+    end
+    return false
+end
+
+local function ApplyAntiAim()
+    local cfg = Config.Combat.AntiAim
+    if not cfg or not cfg.Enabled or State.Unloading then
+        AntiAimState.SpoofActive = false
+        AntiAimState.CameraSpoofActive = false
+        return
+    end
+
+    local lchar = Core.Local.Player.Character
+    if not lchar then
+        AntiAimState.SpoofActive = false
+        AntiAimState.CameraSpoofActive = false
+        return
+    end
+    local hrp = lchar:FindFirstChild("HumanoidRootPart")
+    -- [ v30 ФИКС ] раньше AA молчал
+    local hum = lchar:FindFirstChildOfClass("Humanoid")
+    if not hrp then return end
+    if lchar:GetAttribute("Dead") == true then
+        AntiAimState.SpoofActive = false
+        AntiAimState.CameraSpoofActive = false
+        return
+    end
+    if hum and hum.Health <= 0 then
+        AntiAimState.SpoofActive = false
+        AntiAimState.CameraSpoofActive = false
+        return
+    end
+
+    -- [ v30 ] Пауза AA
+    local uisAA = Core.Services.UserInputService
+    local aaPaused = false
+    if cfg.DisableKey and uisAA:IsKeyDown(cfg.DisableKey) then aaPaused = true end
+    if not aaPaused and cfg.PauseWhileShooting ~= false and uisAA:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then aaPaused = true end
+    if aaPaused then
+        AntiAimState.SpoofActive = false
+        AntiAimState.CameraSpoofActive = false
+        return
+    end
+
+    -- перехват команд ставим один раз; повторная попытка раз в 3с (модуль мог ещё не ...
+    if not AntiAimState.YawSpoofOk then
+        local nowTry = os.clock()
+        if nowTry - (AntiAimState.LastSpoofTry or 0) > 3 then
+            AntiAimState.LastSpoofTry = nowTry
+            TryInstallYawSpoof()
+        end
+    end
+
+    -- [ v33 ] Компенсацию движения ставим такой же ленивой попыткой (модуль Client.CommandStream
+    if not AntiAimState.MoveCompOk then
+        local nowTryMC = os.clock()
+        if nowTryMC - (AntiAimState.LastMoveCompTry or 0) > 3 then
+            AntiAimState.LastMoveCompTry = nowTryMC
+            TryInstallMoveComp()
+        end
+        -- СТРАХОВКА
+        if not AntiAimState.MoveCompOk then
+            local movingNowMC = false
+            pcall(function()
+                movingNowMC = uisAA:IsKeyDown(Enum.KeyCode.W) or uisAA:IsKeyDown(Enum.KeyCode.A)
+                    or uisAA:IsKeyDown(Enum.KeyCode.S) or uisAA:IsKeyDown(Enum.KeyCode.D)
+            end)
+            AntiAimState.MoveCompBlocked = movingNowMC
+            if movingNowMC then
+                AntiAimState.SpoofActive = false
+                AntiAimState.CameraSpoofActive = false
+                return
+            end
+        end
+    end
+
+    local condName = GetAntiAimCondition(hum, hrp)
+    AntiAimState.CurrentCondition = condName
+    local condCfg = (cfg.Conditions and cfg.Conditions[condName]) or {}
+
+    local pitchMode = condCfg.Pitch or cfg.Pitch or "Down"
+    local yawMode = condCfg.YawMode or cfg.YawMode or "Backward"
+    local jitterMode = condCfg.JitterMode or cfg.JitterMode or "Offset"
+    local jitterRange = condCfg.JitterRange or cfg.JitterRange or 45
+
+    -- 1. PITCH (Vertical Axis)
+    local pitchAngle = 0
+    if pitchMode == "Down" then
+        pitchAngle = math.rad(-89)
+    elseif pitchMode == "Up" then
+        pitchAngle = math.rad(89)
+    elseif pitchMode == "Zero" then
+        pitchAngle = 0
+    elseif pitchMode == "Jitter" then
+        AntiAimState.JitterState = not AntiAimState.JitterState
+        pitchAngle = AntiAimState.JitterState and math.rad(89) or math.rad(-89)
+    elseif pitchMode == "Random" then
+        pitchAngle = math.rad(math.random(-89, 89))
+    end
+
+    -- 2. YAW BASE
+    local yawBaseMode = cfg.YawBase or "Local View"
+    local cam = workspace.CurrentCamera
+    local baseYaw = 0
+    if yawBaseMode == "At Targets" then
+        local targetYaw = GetAtTargetsYaw(hrp)
+        if targetYaw then
+            baseYaw = targetYaw
+        elseif cam then
+            local look = cam.CFrame.LookVector
+            baseYaw = math.atan2(-look.X, -look.Z)
+        end
+    elseif cam then
+        local look = cam.CFrame.LookVector
+        baseYaw = math.atan2(-look.X, -look.Z)
+    end
+
+    -- 3. MANUAL YAW
+    local manualAngle = AntiAimState.ManualAngle
+
+    -- 4. YAW MODE
+    local offsetRad = math.rad(cfg.YawOffset or 0)
+    local finalYaw = baseYaw + manualAngle + offsetRad
+    local jitterRangeRad = math.rad(jitterRange)
+
+    if yawMode == "Backward" then
+        finalYaw = finalYaw + math.rad(180)
+    elseif yawMode == "Left" then
+        finalYaw = finalYaw + math.rad(90)
+    elseif yawMode == "Right" then
+        finalYaw = finalYaw - math.rad(90)
+    elseif yawMode == "Spinbot" then
+        local speed = cfg.SpinSpeed or 360
+        finalYaw = finalYaw + math.rad((tick() * speed) % 360)
+    elseif yawMode == "Jitter" then
+        if jitterMode == "Offset" then
+            AntiAimState.JitterState = not AntiAimState.JitterState
+            finalYaw = finalYaw + (AntiAimState.JitterState and jitterRangeRad or -jitterRangeRad)
+        elseif jitterMode == "Center" then
+            finalYaw = finalYaw + math.sin(tick() * 20) * jitterRangeRad
+        elseif jitterMode == "Random" then
+            finalYaw = finalYaw + math.rad(math.random(-math.deg(jitterRangeRad), math.deg(jitterRangeRad)))
+        end
+    end
+
+    if yawMode ~= "Jitter" and cfg.JitterEnabled then
+        if jitterMode == "Offset" then
+            AntiAimState.JitterState = not AntiAimState.JitterState
+            finalYaw = finalYaw + (AntiAimState.JitterState and jitterRangeRad or -jitterRangeRad)
+        elseif jitterMode == "Center" then
+            finalYaw = finalYaw + math.sin(tick() * 20) * jitterRangeRad
+        elseif jitterMode == "Random" then
+            finalYaw = finalYaw + math.rad(math.random(-math.deg(jitterRangeRad), math.deg(jitterRangeRad)))
+        end
+    end
+
+    -- 5. DESYNC / FREESTANDING
+    local desyncCfg = cfg.Desync or {}
+    if desyncCfg.Enabled then
+        local desyncInvert = AntiAimState.DesyncInvert
+        if desyncCfg.Freestanding then
+            desyncInvert = GetFreestandingInvert(hrp)
+        end
+        local desyncAmountRad = math.rad(desyncCfg.Amount or 58)
+        local desyncAngle = desyncInvert and -desyncAmountRad or desyncAmountRad
+        finalYaw = finalYaw + desyncAngle
+    end
+
+    -- [ v31 ] TRIGGER ON DAMAGE (peek-trigger)
+    if cfg.TriggerOnDamage and os.clock() < (AntiAimState.TriggerUntil or 0) then
+        finalYaw = finalYaw + math.rad(math.sin(tick() * 34) * (cfg.TriggerSpin or 120))
+    end
+
+    -- [ v30 ] сохраняем желаемые углы
+    AntiAimState.DesiredYawRad = finalYaw
+    AntiAimState.DesiredPitchRad = pitchAngle
+    -- [ v31 ] по дампу VerticalLook
+    AntiAimState.DesiredPitchSin = math.sin(pitchAngle)
+
+    local method = cfg.Method or "Auto"
+    local useLook   = (method == "Auto" or method == "Look Spoof")
+    -- [ v33 ] «Auto» больше НЕ крутит камеру
+    local useCamera = (method == "Camera Spoof")
+    local useLocal  = (method == "Local Only")
+
+    AntiAimState.SpoofActive = useLook and (AntiAimState.YawSpoofOk == true)
+    -- [ v33 ] Страховка обратной совместимости
+    if method == "Auto" and AntiAimState.YawSpoofOk ~= true then useCamera = true end
+    AntiAimState.PitchSpoofActive = AntiAimState.SpoofActive and (AntiAimState.PitchSpoofOk == true) and (cfg.PitchSpoof ~= false)
+    AntiAimState.CameraSpoofActive = useCamera
+    AntiAimState.CurrentMethod = method
+
+    if useCamera then
+        -- [ AA 2 ] КАМЕРНОЕ ОКНО
+        -- [ v33 ] На ходу камеру НЕ трогаем
+        local movingNowCam = false
+        pcall(function()
+            movingNowCam = uisAA:IsKeyDown(Enum.KeyCode.W) or uisAA:IsKeyDown(Enum.KeyCode.A)
+                or uisAA:IsKeyDown(Enum.KeyCode.S) or uisAA:IsKeyDown(Enum.KeyCode.D)
+        end)
+        local cam = workspace.CurrentCamera
+        if cam and not movingNowCam then
+            AntiAimState.CameraOrigCF = cam.CFrame
+            AntiAimState.CameraSpoofCF = CFrame.fromEulerAnglesYXZ(pitchAngle, finalYaw, 0) + cam.CFrame.Position
+            cam.CFrame = AntiAimState.CameraSpoofCF
+            AntiAimState.CameraSpoofed = true
+        end
+    end
+
+    if useLocal then
+        -- Старый локальный способ
+        hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(0, finalYaw, 0)
+
+        local rootJoint = hrp:FindFirstChild("RootJoint") or lchar:FindFirstChild("RootJoint", true) or lchar:FindFirstChild("Root", true)
+        if rootJoint and rootJoint:IsA("Motor6D") then
+            local defaultC0 = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, -0)
+            if rootJoint.Part1 and rootJoint.Part1.Name == "LowerTorso" then
+                defaultC0 = CFrame.new(0, 0, 0)
+            end
+            rootJoint.C0 = defaultC0 * CFrame.Angles(pitchAngle, finalYaw - baseYaw, 0)
+        end
+
+        local neck = lchar:FindFirstChild("Neck", true)
+        if neck and neck:IsA("Motor6D") then
+            local defaultNeckC0 = CFrame.new(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 1, -0)
+            if neck.Part1 and neck.Part1.Name == "Head" then
+                defaultNeckC0 = CFrame.new(0, 1, 0)
+            end
+            neck.C0 = defaultNeckC0 * CFrame.Angles(pitchAngle, 0, 0)
+        end
+
+        if desyncCfg.Enabled and desyncCfg.LBO then
+            local waist = lchar:FindFirstChild("Waist", true)
+            if waist and waist:IsA("Motor6D") then
+                waist.C0 = CFrame.new(0, 0.2, 0) * CFrame.Angles(0, math.sin(tick() * 15) * 0.4, 0)
+            end
+        end
+    end
+end
+
+-- Движок AA крутится в PreSimulation ("до" сэмплинга ввода)
+State.Connections.AntiAimEnginePre = Core.RunService.PreSimulation:Connect(ApplyAntiAim)
+
+-- Возврат камеры после окна сэмплинга
+State.Connections.AntiAimCameraRestore = Core.RunService.Heartbeat:Connect(function()
+    local st = AntiAimState
+    if not st.CameraSpoofed then return end
+    st.CameraSpoofed = false
+    local cam = workspace.CurrentCamera
+    if not cam or not st.CameraOrigCF or not st.CameraSpoofCF then return end
+    local cur = cam.CFrame
+    if (cur.Position - st.CameraSpoofCF.Position).Magnitude < 1
+        and math.abs(cur.LookVector:Dot(st.CameraSpoofCF.LookVector)) > 0.999 then
+        pcall(function() cam.CFrame = st.CameraOrigCF end)
+    end
+end)
+
+-- [ AA ] диагностика
+State.Connections.AntiAimDiag = Core.RunService.Heartbeat:Connect(function()
+    if State.Unloading or not Config.DebugMode then return end
+    local st = AntiAimState
+    local now = os.clock()
+    if now - (st.LastDiag or 0) < 1 then return end
+    st.LastDiag = now
+    local deg = math.deg(st.DesiredYawRad or 0)
+    print(string.format("[AA] method=%s lookSpoof=%s moveComp=%s(%d) spoofed=%d yaw=%.1f pitch=%.1f cond=%s enabled=%s",
+        tostring(st.CurrentMethod or Config.Combat.AntiAim.Method or "Auto"),
+        st.YawSpoofOk and "OK" or "NO",
+        st.MoveCompOk and "OK" or (st.MoveCompBlocked and "NO-movePaused" or "NO"),
+        st.MoveCompCount or 0,
+        st.SpoofCount or 0,
+        deg, math.deg(st.DesiredPitchRad or 0), tostring(st.CurrentCondition),
+        tostring(Config.Combat.AntiAim.Enabled ~= false)))
+end)
+-- [ v31 ] РЕАЛЬНЫЕ КОНСТАНТЫ ДВИЖЕНИЯ ИЗ ИГРЫ
+MovementConst = {
+    Source = "dump",
+    SpeedCap = 24.5,
+    PenaltyThreshold = 19,
+    PenaltyBase = 0.1,
+    PenaltyScale = 0.03,
+    JumpSpeed = 22.65,
+    Gravity = 60,
+    ReadAt = 0,
+}
+
+local function readMovementConst()
+    local now = os.clock()
+    if now - (MovementConst.ReadAt or 0) < 15 then return MovementConst end
+    MovementConst.ReadAt = now
+    local ok, cfg = pcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+        local mv = RS:FindFirstChild("MovementV2")
+        local c = mv and mv:FindFirstChild("Config")
+        if not c then return nil end
+        return require(c)
+    end)
+    if not ok or type(cfg) ~= "table" then return MovementConst end
+
+    -- поле может лежать как в корне
+    local function findNumber(name)
+        local direct = cfg[name]
+        if type(direct) == "number" and direct > 0 then return direct end
+        for _, sub in pairs(cfg) do
+            if type(sub) == "table" then
+                local v = sub[name]
+                if type(v) == "number" and v > 0 then return v end
+            end
+        end
+        return nil
+    end
+
+    local cap  = findNumber("BunnyHopSpeedCap")
+    local thr  = findNumber("BunnyHopPenaltyThreshold")
+    local penB = findNumber("BunnyHopPenaltyBase")
+    local penS = findNumber("BunnyHopPenaltyScale")
+    local jump = findNumber("JumpSpeed") or findNumber("JumpVelocity")
+    local grav = findNumber("Gravity")
+
+    if cap then MovementConst.SpeedCap = cap end
+    if thr then MovementConst.PenaltyThreshold = thr end
+    if penB then MovementConst.PenaltyBase = penB end
+    if penS then MovementConst.PenaltyScale = penS end
+    if jump then MovementConst.JumpSpeed = jump end
+    if grav then MovementConst.Gravity = grav end
+    if cap or thr or jump then MovementConst.Source = "game" end
+    return MovementConst
+end
+
+do
+    local bhUIS = Core.Services.UserInputService
+    if not State.BhopRayParams then
+        State.BhopRayParams = RaycastParams.new()
+        State.BhopRayParams.FilterType = Enum.RaycastFilterType.Exclude
+        State.BhopRayFilter = {}
+    end
+    State.Connections.BhopEngine = Core.RunService.PreSimulation:Connect(function()
+        if State.Unloading or not IsCurrentInstance() then return end
+        local lchar = Core.Local.Player.Character
+
+        if not Config.Cheat.AutoBhop.Enabled then return end
+        -- меню/бинд открыты
+        if (Internal.MainFrame and Internal.MainFrame.Visible)
+            or (Internal.Celestial and Internal.Celestial.SettingsFrame and Internal.Celestial.SettingsFrame.Parent ~= nil)
+            or State.BindingModule ~= nil then return end
+        if not lchar then return end
+        local hrp = lchar:FindFirstChild("HumanoidRootPart")
+        local hum = lchar:FindFirstChildOfClass("Humanoid")
+        if not hrp then return end
+        -- [ РЕЖИМ ЯКОРНОГО КОНТРОЛЛЕРА ] Blox Strike
+        if hrp.Anchored or hum == nil then return end
+        if hum.Health <= 0 then return end
+
+        -- Земля: FloorMaterial дёшев; фолбэк-рейкаст для кастомных коллайдеров Blox Strike
+        local onGround = (hum.FloorMaterial ~= Enum.Material.Air)
+        if not onGround then
+            State.BhopRayFilter[1] = lchar
+            State.BhopRayParams.FilterDescendantsInstances = State.BhopRayFilter
+            onGround = (workspace:Raycast(hrp.Position, Vector3.new(0, -6, 0), State.BhopRayParams) ~= nil)
+        end
+
+        local v = hrp.AssemblyLinearVelocity
+        local now = tick()
+        local inJumpPhase = now < (State._bhopJumpUntil or 0)
+
+        -- [ v31 ] SmartJump
+        local mconst = readMovementConst()
+        local horizVel = math.sqrt((v.X * v.X) + (v.Z * v.Z))
+        State.BhopSpeedInfo = { speed = horizVel, cap = mconst.SpeedCap, threshold = mconst.PenaltyThreshold, source = mconst.Source }
+        local spamJump = (now - (State._lastBhopJump or 0)) < 0.35
+        local smartBlocked = (Config.Cheat.AutoBhop.SmartJump ~= false) and spamJump and horizVel < (mconst.PenaltyThreshold or 19)
+
+        if onGround and not inJumpPhase and bhUIS:IsKeyDown(Enum.KeyCode.Space)
+            and not smartBlocked
+            and now - (State._lastBhopJump or 0) > 0.06 then
+            State._lastBhopJump = now
+            State._bhopJumpStart = now
+            -- скорость прыжка
+            local jumpVel
+            if hum.UseJumpPower and hum.JumpPower and hum.JumpPower > 1 then
+                jumpVel = hum.JumpPower
+            elseif hum.JumpHeight and hum.JumpHeight > 0.5 then
+                jumpVel = math.sqrt(2 * workspace.Gravity * hum.JumpHeight)
+            else
+                jumpVel = math.sqrt(2 * workspace.Gravity * 7.2)
+            end
+            State._bhopJumpVel = jumpVel
+            State._bhopJumpUntil = now + math.min(jumpVel / workspace.Gravity, 0.4)
+            inJumpPhase = true
+        end
+
+        if inJumpPhase then
+            local jumpVel = State._bhopJumpVel or 50
+            local t = now - (State._bhopJumpStart or now)
+            local vy = jumpVel - workspace.Gravity * t
+            if vy > 0 then
+                local horiz = Vector3.new(v.X, 0, v.Z)
+                local dir
+                if horiz.Magnitude > 0.5 then
+                    dir = horiz.Unit
+                else
+                    local cam0 = workspace.CurrentCamera
+                    local look = cam0 and cam0.CFrame.LookVector or Vector3.new(0, 0, 1)
+                    dir = Vector3.new(look.X, 0, look.Z)
+                    dir = (dir.Magnitude > 0.01) and dir.Unit or Vector3.new(0, 0, 1)
+                end
+                local speed = math.clamp(Config.Cheat.AutoBhop.Speed or 18, 5, 50)
+                -- JUMP BOOST
+                local horizSpeed = (Config.Cheat.AutoBhop.JumpBoost ~= false)
+                    and math.max(horiz.Magnitude, speed) or horiz.Magnitude
+                hrp.AssemblyLinearVelocity = dir * horizSpeed + Vector3.new(0, vy, 0)
+                -- Freefall
+                pcall(function() hum:ChangeState(Enum.HumanoidStateType.Freefall) end)
+            else
+                State._bhopJumpUntil = 0  -- фаза кончилась
+            end
+            return  -- кадр прыжка обработан
+        end
+
+        -- AUTO STRAFE
+        if not onGround and Config.Cheat.AutoBhop.AutoStrafe then
+            local Direction = Vector3.zero
+            local cam = workspace.CurrentCamera
+            if cam then
+                local LookVector = cam.CFrame.LookVector
+                local RightVector = cam.CFrame.RightVector
+                if bhUIS:IsKeyDown(Enum.KeyCode.W) then Direction += LookVector end
+                if bhUIS:IsKeyDown(Enum.KeyCode.S) then Direction -= LookVector end
+                if bhUIS:IsKeyDown(Enum.KeyCode.A) then Direction -= RightVector end
+                if bhUIS:IsKeyDown(Enum.KeyCode.D) then Direction += RightVector end
+                if Direction.Magnitude < 0.01 then
+                    local md = bhUIS:GetMouseDelta()
+                    if md.X > 1 then Direction = RightVector
+                    elseif md.X < -1 then Direction = -RightVector end
+                end
+            end
+            if Direction.Magnitude > 0 then
+                local moveDir = Vector3.new(Direction.X, 0, Direction.Z).Unit
+                local speed = math.clamp(Config.Cheat.AutoBhop.Speed or 18, 5, 50)
+                local targetVelocity = moveDir * speed
+                local NewX = v.X + (targetVelocity.X - v.X) * 0.2
+                local NewZ = v.Z + (targetVelocity.Z - v.Z) * 0.2
+                hrp.AssemblyLinearVelocity = Vector3.new(NewX, v.Y, NewZ)
+            end
+        end
+    end)
+
+    -- [ BHOP: РЕЖИМ ЯКОРНОГО КОНТРОЛЛЕРА v5 ] Blox Strike (Movementtv2)
+    -- [ GHOST-РЕЖИМ дуги ] Прыжок виртуальный (контроллер игры про него не знает
+    local function bhopGhostOn(lchar)
+        if State._bhopGhostOn then return end
+        State._bhopGhostOn = true
+        local colCache, sndCache = {}, {}
+        for _, d in ipairs(lchar:GetDescendants()) do
+            if d:IsA("BasePart") and d.CanCollide then
+                colCache[d] = true
+                d.CanCollide = false
+            elseif d:IsA("Sound") and d.Volume > 0 then
+                sndCache[d] = d.Volume
+                d.Volume = 0
+            end
+        end
+        State._bhopGhostCache = { col = colCache, snd = sndCache }
+    end
+
+    local function bhopGhostOff()
+        local c = State._bhopGhostCache
+        State._bhopGhostOn = false
+        State._bhopGhostCache = nil
+        if not c then return end
+        for part in pairs(c.col) do
+            if part and part.Parent then pcall(function() part.CanCollide = true end) end
+        end
+        for snd, vol in pairs(c.snd) do
+            if snd and snd.Parent then pcall(function() snd.Volume = vol end) end
+        end
+    end
+    State._bhopRestoreVisuals = bhopGhostOff  -- для unload
+
+    -- [ NATIVE JUMP v18 ] Честный прыжок через игровой MovementV2 (разбор дампа игры)
+    local function getNativeJump()
+        -- [ ФИКС v20 ] если require упал (Controllers ещё не реплицировались)
+        if State._bhopNativeJump == false and os.clock() - (State._bhopNativeTriedAt or 0) < 3 then
+            return nil
+        end
+        if State._bhopNativeJump ~= nil and State._bhopNativeJump ~= false then
+            return State._bhopNativeJump
+        end
+        State._bhopNativeTriedAt = os.clock()
+        local ok, mod = pcall(function()
+            local cc = RS:FindFirstChild("Controllers")
+            local lc = cc and cc:FindFirstChild("CharacterController")
+            local lm = lc and lc:FindFirstChild("LocalCharacter")
+            return lm and require(lm) or nil
+        end)
+        local valid = ok and mod and type(mod.jump) == "function"
+        State._bhopNativeJump = valid and mod or false
+        return valid and mod or nil
+    end
+
+    -- [ v23 ] вводовой конвейер игры
+    local function getGameControls()
+        if State._bhopGameControls ~= nil then return State._bhopGameControls or nil end
+        local ok, ctrl = pcall(function()
+            local ps = Core.Local.Player:FindFirstChild("PlayerScripts")
+            local pm = ps and ps:FindFirstChild("PlayerModule")
+            if not (pm and pm:IsA("ModuleScript")) then return nil end
+            local mod = require(pm)
+            return type(mod) == "table" and mod.GetControls and mod:GetControls() or nil
+        end)
+        State._bhopGameControls = (ok and type(ctrl) == "table" and ctrl.moveFunction) and ctrl or false
+        return State._bhopGameControls or nil
+    end
+
+    -- Y-коррекция
+    local function applyBhopArc()
+        -- [ OPT ] вызывается из CFrame-хука 200+/сек и рендер-пасса 60+/сек
+        local lchar = State._bhopCharCache
+        local hrp = State._bhopHrpCache
+        if not lchar or not hrp or lchar.Parent == nil or hrp.Parent == nil then
+            lchar = Core.Local.Player.Character
+            if not lchar then return end
+            hrp = lchar:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+            State._bhopCharCache = lchar
+            State._bhopHrpCache = hrp
+        end
+        local offset = State._bhopAirOffset or 0
+        if offset <= 0.001 then return end
+        local base = State._bhopBaseY
+        if not base then return end
+        local cur = hrp.CFrame
+        local dY = (base + offset) - cur.Y
+        if math.abs(dY) > 0.02 then
+            State._bhopWriting = true
+            hrp.CFrame = cur + Vector3.new(0, dY, 0)
+            State._bhopWriting = false
+        end
+    end
+
+    State.Connections.BhopAnchor = Core.RunService.Heartbeat:Connect(function()
+        if State.Unloading or not IsCurrentInstance() then return end
+        local lchar = Core.Local.Player.Character
+        if not lchar then return end
+        local hrp = lchar:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local hum = lchar:FindFirstChildOfClass("Humanoid")
+        -- этот движок
+        if not (hrp.Anchored or hum == nil) then
+            State._bhopAirOffset = 0
+            State._bhopAirApplied = nil
+            return
+        end
+
+        -- [ ЯДРО v4 ] сигнальный хук на CFrame
+        if State._bhopAnchorConnChar ~= lchar then
+            if State._bhopCFrameConn then pcall(function() State._bhopCFrameConn:Disconnect() end) end
+            State._bhopAnchorConnChar = lchar
+            State._bhopBaseY = nil  -- новый персонаж
+            State._bhopNativeHeld = false  -- [ NATIVE JUMP ] новый персонаж
+            State._bhopGameControls = nil  -- [ v23 ] перекэшировать moveFunction нового персонажа
+            State._bhopCharCache = lchar  -- [ OPT ] кэш для applyBhopArc / рендер-пасса
+            State._bhopHrpCache = hrp
+            State._bhopCFrameConn = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
+                if State.Unloading or State._bhopWriting then return end
+                if Config.Cheat.AutoBhop.Enabled and (State._bhopAirOffset or 0) > 0.01 then
+                    applyBhopArc()
+                end
+            end)
+        end
+
+        if not Config.Cheat.AutoBhop.Enabled then
+            -- [ NATIVE JUMP ] модуль выключили
+            if State._bhopNativeHeld then
+                local nj = State._bhopNativeJump
+                if nj then pcall(function() nj.jump(false) end) end
+                State._bhopNativeHeld = false
+            end
+            State._bhopAirOffset = 0
+            State._bhopAirApplied = nil
+            bhopGhostOff()  -- модуль выключили
+            return
+        end
+        if lchar:GetAttribute("Dead") or lchar:GetAttribute("Invincible") then return end
+
+        local now = tick()
+        local g = workspace.Gravity
+
+        -- меню/бинд открыты
+        if (Internal.MainFrame and Internal.MainFrame.Visible)
+            or (Internal.Celestial and Internal.Celestial.SettingsFrame and Internal.Celestial.SettingsFrame.Parent ~= nil)
+            or State.BindingModule ~= nil then
+            State._bhopAirOffset = 0
+            State._bhopAirApplied = nil
+            return
+        end
+
+        local inPhase = now < (State._bhopJumpUntilA or 0)
+
+        -- [ NATIVE JUMP ] сброс JumpHeld через 0.1с (или при отпускании Space)
+        if State._bhopNativeHeld and (now > (State._bhopNativeReleaseAt or 0)
+            or not bhUIS:IsKeyDown(Enum.KeyCode.Space)) then
+            local nj = State._bhopNativeJump
+            if nj then pcall(function() nj.jump(false) end) end
+            State._bhopNativeHeld = false
+        end
+
+        -- [ ФИКС v23 ] ВЕРИФИКАЦИЯ нативного прыжка
+        if State._bhopNativeArmed then
+            if not State._bhopNativeSawAir then
+                State.BhopRayFilter[1] = lchar
+                State.BhopRayParams.FilterDescendantsInstances = State.BhopRayFilter
+                local groundedNow = workspace:Raycast(hrp.Position, Vector3.new(0, -6, 0), State.BhopRayParams) ~= nil
+                if not groundedNow or hrp.Position.Y > (State._bhopNativeStartY or hrp.Position.Y) + 0.5 then
+                    State._bhopNativeSawAir = true
+                end
+            end
+            if now > (State._bhopNativeVerifyFinal or 0) then
+                State._bhopNativeArmed = false
+                if not State._bhopNativeSawAir and State._bhopNativeJump then
+                    State._bhopNativeJump = false
+                    if Internal.ShowIslandNotification then
+                        pcall(function() Internal.ShowIslandNotification("BHOP: native fail -> arc mode", Color3.fromRGB(255, 170, 60)) end)
+                    end
+                end
+            end
+        end
+
+        -- [ v31 ] SmartJump + информация о скорости для HUD (см
+        do
+            local mconstA = readMovementConst()
+            local vA = hrp.AssemblyLinearVelocity
+            local horizA = math.sqrt((vA.X * vA.X) + (vA.Z * vA.Z))
+            State.BhopSpeedInfo = { speed = horizA, cap = mconstA.SpeedCap, threshold = mconstA.PenaltyThreshold, source = mconstA.Source }
+            local spamA = (now - (State._lastBhopJumpA or 0)) < 0.35
+            State._bhopSmartBlocked = (Config.Cheat.AutoBhop.SmartJump ~= false) and spamA and horizA < (mconstA.PenaltyThreshold or 19)
+        end
+
+        -- СТАРТ ПРЫЖКА
+        if not inPhase and (State._bhopAirOffset or 0) <= 0.05 and not State._bhopNativeArmed
+            and bhUIS:IsKeyDown(Enum.KeyCode.Space)
+            and not State._bhopSmartBlocked
+            and now - (State._lastBhopJumpA or 0) > 0.06 then
+            State.BhopRayFilter[1] = lchar
+            State.BhopRayParams.FilterDescendantsInstances = State.BhopRayFilter
+            if workspace:Raycast(hrp.Position, Vector3.new(0, -6, 0), State.BhopRayParams) then
+                -- [ NATIVE JUMP ] приоритет
+                local nativeJump = getNativeJump()
+                if nativeJump then
+                    State._lastBhopJumpA = now
+                    if not State._bhopNativeHeld then
+                        pcall(function() nativeJump.jump(true) end)
+                        State._bhopNativeHeld = true
+                        -- [ ФИКС v20 ] уведомление один раз за сессию
+                        if not State._bhopNativeNotified then
+                            State._bhopNativeNotified = true
+                            if Internal.ShowIslandNotification then
+                                pcall(function() Internal.ShowIslandNotification("BHOP: native jump", Color3.fromRGB(0, 255, 150)) end)
+                            end
+                        end
+                    end
+                    State._bhopNativeReleaseAt = now + 0.1
+                    -- окно проверки (v23)
+                    State._bhopNativeArmed = true
+                    State._bhopNativeSawAir = false
+                    State._bhopNativeStartY = hrp.Position.Y
+                    State._bhopNativeVerifyUntil = now + 0.3
+                    State._bhopNativeVerifyFinal = now + 0.5
+                    inPhase = false  -- дуга не нужна
+                else
+                State._lastBhopJumpA = now
+                State._bhopJumpStartA = now
+                State._bhopBaseY = hrp.Position.Y  -- фиксируем базу земли на момент старта
+                local camS = workspace.CurrentCamera
+                if camS then State._bhopCamBase = camS.CFrame.Position.Y end  -- и базу камеры
+                bhopGhostOn(lchar)  -- ghost: без коллизий и без шагов
+                -- rage-стрейф
+                State._bhopStrafeSpd = nil
+                -- [ ДЕФОЛТНЫЙ ПРЫЖОК ] высота дуги берётся из JumpHeight ЕСЛИ он задан
+                -- [ v23 ] высота дуги = РЕАЛЬНЫЙ прыжок игры (дамп MovementV2 Config)
+                local gArc, jumpVel
+                if State._bhopNativeJump == false then
+                    gArc = 800 * 0.075
+                    jumpVel = 301.993377 * 0.075
+                else
+                    gArc = g
+                    jumpVel = math.sqrt(2 * g * 7.2)
+                end
+                State._bhopGravityA = gArc
+                State._bhopJumpUntilA = now + 2 * jumpVel / gArc
+                State._bhopJumpVelA = jumpVel
+                inPhase = true
+                end  -- [ NATIVE JUMP ] else (фолбэк-дуга)
+            end
+        end
+
+        -- Баллистическая дуга
+        local newOffset = 0
+        if inPhase then
+            local jumpVel = State._bhopJumpVelA or 50
+            local gArc = State._bhopGravityA or g
+            local t = now - (State._bhopJumpStartA or now)
+            newOffset = jumpVel * t - 0.5 * gArc * t * t
+            if newOffset < 0 then
+                newOffset = 0
+                -- [ ФИКС ] t > 0.05
+                if t > 0.05 then
+                    State._bhopJumpUntilA = 0  -- приземлились
+                    State._bhopStrafeSpd = nil  -- rage-разгон сбрасывается на приземлении
+                    bhopGhostOff()  -- коллизии и звуки обратно
+                    -- мгновенный сним остатка дуги
+                    local base0 = State._bhopBaseY
+                    if base0 and math.abs(hrp.Position.Y - base0) > 0.02 then
+                        State._bhopWriting = true
+                        hrp.CFrame = hrp.CFrame + Vector3.new(0, base0 - hrp.Position.Y, 0)
+                        State._bhopWriting = false
+                    end
+                end
+            end
+        end
+        State._bhopAirOffset = newOffset
+
+        -- Базы земли и камеры
+        if newOffset <= 0.001 then
+            State._bhopBaseY = hrp.Position.Y
+            local cam0 = workspace.CurrentCamera
+            if cam0 then State._bhopCamBase = cam0.CFrame.Position.Y end
+        else
+            -- HRP динамический (anchored=false
+            local av = hrp.AssemblyLinearVelocity
+            if av.Y < -1 then
+                hrp.AssemblyLinearVelocity = Vector3.new(av.X, 0, av.Z)
+            end
+        end
+
+        -- [ УРОК v11 ] горизонталь (стрейф) здесь НЕ применяем
+        if newOffset > 0.001 then
+            local cur = hrp.CFrame
+            local dY = ((State._bhopBaseY or cur.Y) + newOffset) - cur.Y
+            if math.abs(dY) > 0.02 then
+                State._bhopWriting = true
+                hrp.CFrame = cur + Vector3.new(0, dY, 0)
+                State._bhopWriting = false
+            end
+        end
+        State._bhopLastTickA = now
+    end)
+
+    -- [ v6 / пасс 3 ] RenderStep(Last+1000)
+    pcall(function() Core.RunService:UnbindFromRenderStep("Overmind_BhopVisual") end)
+    Core.RunService:BindToRenderStep("Overmind_BhopVisual", Enum.RenderPriority.Last.Value + 1000, function()
+        if State.Unloading or not IsCurrentInstance() then return end
+        if not Config.Cheat.AutoBhop.Enabled then return end
+        -- [ v23 ] СТРЕЙФ через СОБСТВЕННЫЙ ввод игры
+        if Config.Cheat.AutoBhop.AutoStrafe and bhUIS:IsKeyDown(Enum.KeyCode.Space) then
+            local ctrl = getGameControls()
+            if ctrl then
+                local Direction = Vector3.zero
+                local camS = workspace.CurrentCamera
+                if camS then
+                    local LookVector = camS.CFrame.LookVector
+                    local RightVector = camS.CFrame.RightVector
+                    if bhUIS:IsKeyDown(Enum.KeyCode.W) then Direction += LookVector end
+                    if bhUIS:IsKeyDown(Enum.KeyCode.S) then Direction -= LookVector end
+                    if bhUIS:IsKeyDown(Enum.KeyCode.A) then Direction -= RightVector end
+                    if bhUIS:IsKeyDown(Enum.KeyCode.D) then Direction += RightVector end
+                    if Direction.Magnitude < 0.01 then
+                        local md = bhUIS:GetMouseDelta()
+                        if md.X > 1 then Direction = RightVector
+                        elseif md.X < -1 then Direction = -RightVector end
+                    end
+                end
+                local flat = Vector3.new(Direction.X, 0, Direction.Z)
+                if flat.Magnitude > 0.01 then
+                    pcall(ctrl.moveFunction, flat.Unit, false)
+                end
+            end
+        end
+        -- [ NATIVE JUMP ] дуга/CFrame не трогаем
+        if State._bhopNativeJump then return end
+        local offset = State._bhopAirOffset or 0
+        if offset <= 0.001 then return end
+        -- [ OPT ] тоже на кэше
+        local lchar = State._bhopCharCache
+        local hrp = State._bhopHrpCache
+        if not lchar or not hrp or lchar.Parent == nil or hrp.Parent == nil then
+            lchar = Core.Local.Player.Character
+            if not lchar then return end
+            hrp = lchar:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+            State._bhopCharCache = lchar
+            State._bhopHrpCache = hrp
+        end
+        -- [ ФИКС v27 ] чтение свойств Destroyed-Instance в рендер-пассе Real отдаёт
+        if (Internal.MainFrame and Internal.MainFrame.Visible)
+            or (Internal.Celestial and Internal.Celestial.SettingsFrame and Internal.Celestial.SettingsFrame.Parent ~= nil)
+            or State.BindingModule ~= nil then return end
+        local base = State._bhopBaseY
+        if not base then return end
+        State._bhopWriting = true
+        local cur = hrp.CFrame
+        local dY = (base + offset) - cur.Y
+        -- [ v23 ] горизонталь через CFrame больше НЕ пишем
+        if math.abs(dY) > 0.02 then
+            hrp.CFrame = cur + Vector3.new(0, dY, 0)
+        end
+        -- Камера: если она не поднялась вместе с HRP (dCam≈0
+        local cam = workspace.CurrentCamera
+        local camBase = State._bhopCamBase
+        if cam and camBase then
+            local dCam = (camBase + offset) - cam.CFrame.Position.Y
+            if math.abs(dCam) > 0.02 then
+                cam.CFrame = cam.CFrame + Vector3.new(0, dCam, 0)
+            end
+        end
+        State._bhopWriting = false
+    end)
+end
+
+-- Camera Movement Loop (Legit Aimbot)
+State.Connections.MemesenseRender = Core.Services.RunService.RenderStepped:Connect(function()
+    if State.Unloading or not IsCurrentInstance() then return end
+    local cfg = Config.Combat.Memesense
+    local cam = Core.Local.Camera
+    if not cam then return end
+
+    -- 1. Camera Pull
+    if cfg.Enabled and State.MemesenseTarget then
+        pcall(function()
+            cam.CFrame = CFrame.new(cam.CFrame.Position, State.MemesenseTarget.Position)
+        end)
+    end
+
+    -- 2. Cube Checker Visual
+    if cfg.Enabled and cfg.CubeChecker and State.CubePart then
+        if not State.CubeRayParams then
+            State.CubeRayParams = RaycastParams.new()
+            State.CubeRayParams.FilterType = Enum.RaycastFilterType.Exclude
+        end
+        State.CubeRayParams.FilterDescendantsInstances = {Core.Local.Player.Character, cam}
+
+        local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * cfg.MaxRayDist, State.CubeRayParams)
+        if res then
+            State.CubePart.Parent = workspace
+            State.CubePart.Size = Vector3.new(cfg.CubeSize, cfg.CubeSize, 0.01)
+            State.CubePart.CFrame = CFrame.new(res.Position, res.Position + res.Normal)
+            State.CubePart.Transparency = 0
+            local gui = State.CubePart:FindFirstChildOfClass("SurfaceGui")
+            local frame = gui and gui:FindFirstChildOfClass("Frame")
+            if frame then
+                local col = cfg.CubeColor
+                if cfg.CubeRainbow then
+                    col = Color3.fromHSV(tick() % 5 / 5, 1, 1)
+                end
+                frame.BackgroundColor3 = col
+            end
+        else
+            State.CubePart.Transparency = 1
+        end
+    elseif State.CubePart then
+        State.CubePart.Transparency = 1
+    end
+end)
+
+-- World & Lighting Logic Loop (Moved to RenderStepped for reliability)
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if Config.Combat.Memesense.Enabled or Config.Combat.SilentAim.Enabled or Config.Combat.Ragebot.Enabled or Config.Visuals.ESP.Enabled or Config.Combat.ESP.Enabled then
+            FindAllTargets()
+        end
+        task.wait(0.1)
+    end
+end)
+
+
+
+
+-- ЛОГИКА ИЗ Logic.txt (Fly
+
+-- Вспомогательные функции для логики
+currentPathLines = {}
+function clearPathLines()
+    for _, l in currentPathLines do pcall(function() l:Destroy() end) end
+    table.clear(currentPathLines)
+end
+
+function drawPathLine(from, to)
+    if not Config.Cheat.DebugPath then return nil end
+    local part = Instance.new("Part")
+    part.Anchored = true
+    part.CanCollide = false
+    part.Material = Enum.Material.Neon
+    part.Color = Config.Cheat.PathColor
+    part.Transparency = 0.5
+    part.Size = Vector3.new(0.6, 0.6, (from - to).Magnitude)
+    part.CFrame = CFrame.new(from:Lerp(to, 0.5), to)
+    part.Parent = workspace
+    return part
+end
+
+-- Forward declaration of Fly functions to avoid nil errors in helpers
+startFly, stopFly = nil, nil
+
+stopFly = function()
+    if State.Connections.Fly then State.Connections.Fly:Disconnect() State.Connections.Fly = nil end
+    local char = Core.LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChild("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hum then hum.PlatformStand = false end
+        if hrp then
+            hrp.Anchored = false
+            for _, v in hrp:GetChildren() do
+                if v.Name == "KubchikFlyBV" or v.Name == "KubchikFlyBG" then
+                    v:Destroy()
+                end
+            end
+        end
+        -- [ v36 FIX ] Не слепо CanCollide=true ВСЕМ частям (это включало коллизию даже
+        local charDesc = char:GetDescendants()
+        local ghost = State._bhopGhostCache
+        for _, part in charDesc do
+            if part:IsA("BasePart") then
+                local wasGhost = ghost and ghost.col and ghost.col[part] == true                if wasGhost then
+                    pcall(function() part.CanCollide = true end)
+                end
+                -- (части, выключенные не нами
+            end
+        end
+    end
+end
+
+startFly = function()
+    local char = Core.LocalPlayer.Character or Core.LocalPlayer.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    local hum = char:WaitForChild("Humanoid")
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "KubchikFlyBV"
+    bv.MaxForce = Vector3.new(1,1,1) * 1e8
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.Name = "KubchikFlyBG"
+    bg.MaxTorque = Vector3.new(1,1,1) * 1e8
+    bg.P = 40000
+    bg.D = 500
+    bg.CFrame = hrp.CFrame
+    bg.Parent = hrp
+
+    State.Connections.Fly = Core.RunService.RenderStepped:Connect(function(dt)
+        -- [ KILL-SWITCH ] зомби-полёт от старой копии унёс бы персонажа в небо; защита + полный ...
+        if State.Unloading or not IsCurrentInstance() then pcall(function() stopFly() end) return end
+        if not hrp or not hrp.Parent then return end
+        hum.PlatformStand = true
+        local camera = workspace.CurrentCamera
+        local direction = Vector3.zero
+
+        if State.IsPlaying then
+            if State.PlaybackIndex > #State.RecordedPath then
+                if stopPlayback then stopPlayback() end
+                return
+            end
+
+            local targetPos = State.RecordedPath[State.PlaybackIndex]
+            local currentPos = hrp.Position
+            local toTarget = (targetPos - currentPos)
+            local horizontalDist = Vector2.new(toTarget.X, toTarget.Z).Magnitude
+
+            -- Precision Threshold
+            if horizontalDist < 2 and math.abs(toTarget.Y) < 4 then
+                State.PlaybackIndex = State.PlaybackIndex + 1
+                return
+            end
+
+            local moveDir = toTarget.Unit
+
+            -- Obstacle Detection Raycast (Optimized for proactive clearing)
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            rayParams.FilterDescendantsInstances = {char, camera}
+
+            -- Check forward AND slightly down to see if we can descend safely
+            local forwardResult = workspace:Raycast(currentPos, moveDir * 25, rayParams)
+            local targetY = targetPos.Y
+
+            if forwardResult and forwardResult.Instance and forwardResult.Instance.CanCollide then
+                local hitPart = forwardResult.Instance
+                local topY = hitPart.Position.Y + (hitPart.Size.Y / 2)
+                targetY = topY + 12  -- Rise to clear
+            end
+
+            -- DECISIVE DESCENT
+            local verticalDiff = targetY - State.CurrentPlaybackY
+            local lerpSpeed = (verticalDiff < 0) and 8 or 4  -- Faster descent (8) vs normal ascent (4)
+            State.CurrentPlaybackY = State.CurrentPlaybackY + verticalDiff * math.min(dt * lerpSpeed, 1)
+
+            local speed = Config.PathSystem.Speed
+
+            -- Horizontal Speed Scaling
+            local speedMultiplier = math.clamp(horizontalDist / 5, 0.4, 1)
+            local horizontalDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+            local horizontalVel = horizontalDir.Magnitude > 0 and horizontalDir.Unit * (speed * speedMultiplier) or Vector3.zero
+
+            -- STABILIZED VERTICAL VELOCITY
+            local verticalGap = (State.CurrentPlaybackY - currentPos.Y)
+            local yVel = math.clamp(verticalGap * 8, -speed, speed)  -- Cap vertical speed to total speed
+
+            -- ANTI-CHEAT BYPASS
+            local bypassPulse = math.floor(tick() * 10) % 32
+            if bypassPulse == 0 then
+                hum.PlatformStand = false
+                yVel = -20  -- Force a slight dip to "touch"
+            else
+                hum.PlatformStand = true
+            end
+
+            bv.Velocity = Vector3.new(horizontalVel.X, yVel, horizontalVel.Z)
+
+            -- STABLE ORIENTATION
+            bg.MaxTorque = Vector3.new(1, 1, 1) * 1e8
+            bg.D = 800  -- Higher damping for smoother rotation
+            bg.CFrame = CFrame.new(currentPos, currentPos + Vector3.new(moveDir.X, 0, moveDir.Z))
+
+            return
+        end
+
+        if Config.Cheat.VerticalFly then
+            local look = camera.CFrame.LookVector
+            local right = camera.CFrame.RightVector
+            local flatLook = Vector3.new(look.X, 0, look.Z).Unit
+            local flatRight = Vector3.new(right.X, 0, right.Z).Unit
+
+            if State.Keys.W then direction = direction + flatLook end
+            if State.Keys.S then direction = direction - flatLook end
+            if State.Keys.A then direction = direction - flatRight end
+            if State.Keys.D then direction = direction + flatRight end
+            if State.Keys.Space then direction = direction + Vector3.new(0, 1, 0) end
+            if State.Keys.LeftShift then direction = direction - Vector3.new(0, 1, 0) end
+        else
+            if State.Keys.W then direction = direction + camera.CFrame.LookVector end
+            if State.Keys.S then direction = direction - camera.CFrame.LookVector end
+            if State.Keys.A then direction = direction - camera.CFrame.RightVector end
+            if State.Keys.D then direction = direction + camera.CFrame.RightVector end
+        end
+
+        local dir = direction.Magnitude > 0 and direction.Unit or Vector3.zero
+        bv.Velocity = dir * Config.Cheat.Speed
+
+        if Config.Cheat.ViewLock then
+            bg.MaxTorque = Vector3.new(1, 1, 1) * 1e8
+            if Config.Cheat.FlyMode == "Fixed" then
+                bg.CFrame = camera.CFrame
+            else
+                local look = camera.CFrame.LookVector
+                bg.CFrame = CFrame.new(hrp.Position, hrp.Position + Vector3.new(look.X, 0, look.Z))
+            end
+        else
+            bg.MaxTorque = Vector3.new(0, 0, 0)
+        end
+    end)
+end
+
+-- Path Recording & Playback Helpers
+local function startRecording()
+    if State.IsRecording then return end
+    State.RecordedPath = {}
+    State.IsRecording = true
+
+    if not Config.Cheat.Flying then
+        if State.Modules["Fly Hack"] and State.Modules["Fly Hack"].Toggle then
+            State.Modules["Fly Hack"].Toggle()
+        else
+            Config.Cheat.Flying = true
+            startFly()
+        end
+    end
+
+    task.spawn(function()
+        local lastRecord = 0
+        while State.IsRecording do
+            local char = Core.LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local now = os.clock()
+                if now - lastRecord >= Config.PathSystem.RecordInterval then
+                    table.insert(State.RecordedPath, hrp.Position)
+                    lastRecord = now
+                end
+            end
+            task.wait()
+        end
+    end)
+    _G.Log("Recording started...", Color3.fromRGB(0, 255, 0))
+    if Internal.ShowIslandNotification then Internal.ShowIslandNotification("RECORDING STARTED", Color3.fromRGB(255, 100, 0)) end
+end
+
+local function stopRecording()
+    State.IsRecording = false
+    _G.Log("Recording stopped. Saved " .. #State.RecordedPath .. " waypoints.", Color3.fromRGB(0, 255, 0))
+    if Internal.ShowIslandNotification then Internal.ShowIslandNotification("PATH SAVED", Color3.fromRGB(0, 255, 0)) end
+end
+
+local function startPlayback()
+    if #State.RecordedPath == 0 then
+        _G.Log("No path recorded!", Color3.fromRGB(255, 0, 0))
+        return
+    end
+    if State.IsPlaying then return end
+
+    State.IsPlaying = true
+    State.PlaybackIndex = 1
+
+    if not Config.Cheat.Flying then
+        if State.Modules["Fly Hack"] and State.Modules["Fly Hack"].Toggle then
+            State.Modules["Fly Hack"].Toggle()
+        else
+            Config.Cheat.Flying = true
+            startFly()
+        end
+    end
+
+    local char = Core.LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        State.CurrentPlaybackY = hrp.Position.Y
+    end
+
+    _G.Log("Playback started...", Color3.fromRGB(0, 255, 0))
+    if Internal.ShowIslandNotification then Internal.ShowIslandNotification("PLAYBACK STARTED", Color3.fromRGB(0, 255, 150)) end
+end
+
+local function stopPlayback()
+    State.IsPlaying = false
+    if stopFly then stopFly() end
+    _G.Log("Playback stopped.", Color3.fromRGB(255, 50, 50))
+    if Internal.ShowIslandNotification then Internal.ShowIslandNotification("PLAYBACK STOPPED", Color3.fromRGB(255, 50, 50)) end
+end
+
+-- [ v54 ] Noclip keeps the original CanCollide of every part
+Automation._noclipSaved = Automation._noclipSaved or setmetatable({}, { __mode = "k" })
+
+function Automation.RestoreNoclip()
+    local char = Core.LocalPlayer and Core.LocalPlayer.Character
+    if not char then return end
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local saved = Automation._noclipSaved[part]
+            if saved ~= nil then
+                pcall(function() part.CanCollide = saved end)
+                Automation._noclipSaved[part] = nil
+            else
+                pcall(function() part.CanCollide = true end)
+            end
+        end
+    end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() hum.PlatformStand = false end) end
+end
+
+State.Connections.NoclipLoop = Core.RunService.Stepped:Connect(function()
+    if State.Unloading or not IsCurrentInstance() then return end
+    local char = Core.LocalPlayer.Character
+    if not char then return end
+    local shouldNoclip = Config.Cheat.Noclip or (Config.Cheat.FlyNoclip and Config.Cheat.Flying)
+    if shouldNoclip then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if Config.Cheat.NoclipRestore ~= false and Automation._noclipSaved[part] == nil then
+                    Automation._noclipSaved[part] = part.CanCollide
+                end
+                part.CanCollide = false
+            end
+        end
+    end
+end)
+
+State.Connections.InfiniteJump = Core.UserInputService.JumpRequest:Connect(function()
+    if State.Unloading or not IsCurrentInstance() then return end
+    if Config.Cheat.InfiniteJump then
+        local hum = Core.LocalPlayer.Character and Core.LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end)
+
+-- [ v54 ] Holding Space keeps jumping (JumpRequest fires once per press
+State.Connections.InfiniteJumpHold = Core.RunService.Heartbeat:Connect(function()
+    if State.Unloading or not IsCurrentInstance() then return end
+    if not Config.Cheat.InfiniteJump or Config.Cheat.InfiniteJumpHold == false then return end
+    if not Core.UserInputService:IsKeyDown(Enum.KeyCode.Space) then return end
+    local now = tick()
+    if now - (Automation._ijLast or 0) < 0.12 then return end
+    local hum = Core.LocalPlayer.Character and Core.LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local st = hum:GetState()
+        if st ~= Enum.HumanoidStateType.Jumping and st ~= Enum.HumanoidStateType.Freefall then
+            Automation._ijLast = now
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+-- POP FOR FREE LOGIC (Detailed Integration)
+
+Automation.PopData = {
+    LongNear = Vector3.new(123.245, 1.767, -2168.231),
+    LongFinal = Vector3.new(123, 1.767, -2185),
+    ExpertNear = Vector3.new(169.847, 9.066, 406.401),
+    ExpertFinal = Vector3.new(169.847, 9.066, 410.743),
+    BackPos = Vector3.new(111.426445, 3.08507466, -27.5621033),
+    SpecialNear = {
+        [1]  = Vector3.new(-448.992, 8143.671, 148.113),
+        [2]  = Vector3.new(-482.006, 7980.944,  99.267),
+        [3]  = Vector3.new(-268.096, 8023.735, 129.359),
+        [4]  = Vector3.new(-559.159, 7946.341, -32.635),
+        [5]  = Vector3.new(-511.265, 7957.707, -69.979),
+        [6]  = Vector3.new(-370.253, 8007.919, 129.163),
+        [7]  = Vector3.new(-359.910, 8006.653, 129.371),
+        [8]  = Vector3.new(-359.882, 8017.465, 129.044),
+        [9]  = Vector3.new(-359.413, 8027.473, 129.161),
+        [10] = Vector3.new(-452.861, 8113.436, -62.913),
+    }
+}
+
+function Automation.BypassPopCaptcha()
+    local CAPTCHA_PATHS = {
+        { "Players", "LocalPlayer", "PlayerScripts", "ImageCaptchaClient" },
+        { "StarterPlayer", "StarterPlayerScripts", "ImageCaptchaClient" },
+        { "ReplicatedStorage", "ImageCaptchaRemotes" },
+        { "CorePackages", "Workspace", "Packages", "_Index", "AuthCommon", "AuthCommon", "Utils", "GetCaptchaDataJson" },
+        { "CorePackages", "Workspace", "Packages", "_Workspace", "GenericChallenges", "GenericChallenges", "Types", "CaptchaActionType" },
+    }
+    local function resolve(path)
+        local ok, node = pcall(game.GetService, game, path[1])
+        if not ok or not node then return nil end
+        for i = 2, #path do
+            local nextNode = nil
+            pcall(function() nextNode = node[path[i]] end)
+            if not nextNode then
+                pcall(function() nextNode = node:FindFirstChild(path[i]) end)
+            end
+            if not nextNode then return nil end
+            node = nextNode
+        end
+        return node
+    end
+    for _, path in CAPTCHA_PATHS do
+        local inst = resolve(path)
+        if inst then
+            pcall(function() if inst:IsA("BaseScript") then inst.Disabled = true end end)
+            pcall(function() inst:Destroy() end)
+        end
+    end
+end
+
+function Automation.ResetPopCharacter()
+    local char = Core.Local.Player.Character
+    if not char then return end
+    for _, part in char:GetDescendants() do
+        if part:IsA("BasePart") then
+            part.AssemblyLinearVelocity = Vector3.zero
+            part.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then hrp.Anchored = false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end) end
+end
+
+function Automation.FarmOnce(touchA, touchB, nearPos, finalPos, label)
+    local hrp = Core.Local.Player.Character and Core.Local.Player.Character:FindFirstChild("HumanoidRootPart")
+    if not (hrp and touchA and touchB) then return false end
+    if label then _G.Log("Pop Farm: " .. label, Color3.fromRGB(200, 200, 0)) end
+
+    if firetouchinterest then
+        firetouchinterest(hrp, touchA, 0)
+        firetouchinterest(hrp, touchA, 1)
+        task.wait(0.5)
+        if not Config.PopForFree.Enabled then return false end
+
+        firetouchinterest(hrp, touchB, 0)
+        firetouchinterest(hrp, touchB, 1)
+        task.wait(0.5)
+    end
+    if not Config.PopForFree.Enabled then return false end
+
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = CFrame.new(nearPos)
+    task.wait(0.3)
+    if not Config.PopForFree.Enabled then return false end
+
+    local tween = Core.Services.TweenService:Create(hrp, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = CFrame.new(finalPos)})
+    tween:Play()
+    tween.Completed:Wait()
+
+    task.wait(0.3)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = CFrame.new(Automation.PopData.BackPos)
+    task.wait(0.2)
+    return true
+end
+
+function Automation.FindPopSpeedrunFolder()
+    local folderName = "LocalSpeedrun_10468409402"
+    local exact = workspace:FindFirstChild(folderName)
+    if exact then return exact end
+    for _, child in workspace:GetChildren() do
+        if string.match(child.Name, "^LocalSpeedrun_") then
+            return child
+        end
+    end
+    return nil
+end
+
+function Automation.IsPopSpecialAvailable()
+    local startPart = workspace:FindFirstChild("StartPart8")
+    if not startPart then return false end
+    local cd = startPart:FindFirstChild("Cooldown", true)
+    local label = cd and cd:FindFirstChild("TextLabel")
+    return label and label.Text == "Cooldown - 30:00"
+end
+
+function Automation.PopWaitFor(predictor, timeout, statusText)
+    local t0 = os.clock()
+    while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() and (os.clock() - t0) < timeout do
+        local result = predictor()
+        if result then return result end
+        task.wait(0.1)
+    end
+    return predictor()
+end
+
+function Automation.PopStepGap(i)
+    local t0 = os.clock()
+    while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() and (os.clock() - t0) < Config.PopForFree.SpecialStepWait do
+        task.wait(0.05)
+    end
+end
+
+function Automation.DoPopStartZone()
+    local startPortal = workspace:FindFirstChild("StartPortal")
+    local startZone = startPortal and startPortal:FindFirstChild("StartZone")
+    if not startZone then return false end
+    local hrp = Core.Local.Player.Character and Core.Local.Player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    if firetouchinterest then
+        firetouchinterest(hrp, startZone, 0)
+        firetouchinterest(hrp, startZone, 1)
+        task.wait(0.3)
+        firetouchinterest(hrp, startZone, 0)
+        firetouchinterest(hrp, startZone, 1)
+    end
+    task.wait(0.2)
+    return true
+end
+
+function Automation.GetPopEndPortalPart(endPortal)
+    if not endPortal then return nil end
+    local children = endPortal:GetChildren()
+    local preferred = children[12]
+    if preferred and preferred:IsA("BasePart") then return preferred end
+    for _, child in children do
+        if child:IsA("BasePart") then return child end
+    end
+    if endPortal:IsA("BasePart") then return endPortal end
+    return endPortal:FindFirstChildWhichIsA("BasePart", true)
+end
+
+function Automation.WaitForPopLevelClear(levelIndex, timeout)
+    local levelName = "CurrentLevel" .. levelIndex
+    local t0 = os.clock()
+    while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() and (os.clock() - t0) < timeout do
+        local folder = Automation.FindPopSpeedrunFolder()
+        if not folder then return true end
+        local level = folder:FindFirstChild(levelName)
+        if not level then return true end
+        local ep = level:FindFirstChild("End Portal")
+        if not ep then return true end
+        local nextLevel = folder:FindFirstChild("CurrentLevel" .. (levelIndex + 1))
+        if nextLevel then return true end
+        task.wait(0.1)
+    end
+    return false
+end
+
+function Automation.DoPopLevelPortalOnce(levelIndex, endPortal)
+    local hrp = Core.Local.Player.Character and Core.Local.Player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local part = Automation.GetPopEndPortalPart(endPortal)
+    if not part then return false end
+    local nearPos = Automation.PopData.SpecialNear[levelIndex]
+    if not nearPos then return false end
+
+    Automation.ResetPopCharacter()
+    task.wait(0.05)
+    hrp.Anchored = true
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = CFrame.new(nearPos)
+    task.wait(0.12)
+    if not Config.PopForFree.Enabled then hrp.Anchored = false return false end
+
+    local targetPos = part.Position
+    local tween = Core.Services.TweenService:Create(hrp, TweenInfo.new(Config.PopForFree.SpecialTweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = CFrame.new(targetPos)})
+    tween:Play()
+    tween.Completed:Wait()
+
+    task.wait(0.08)
+    hrp.Anchored = false
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.35)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    return true
+end
+
+function Automation.DoPopLevelPortal(levelIndex, endPortal, label)
+    for attempt = 1, Config.PopForFree.SpecialLevelRetries do
+        if not Config.PopForFree.Enabled then return false end
+        local folder = Automation.FindPopSpeedrunFolder()
+        local level = folder and folder:FindFirstChild("CurrentLevel" .. levelIndex)
+        local portal = level and level:FindFirstChild("End Portal") or endPortal
+        Automation.DoPopLevelPortalOnce(levelIndex, portal)
+        if Automation.WaitForPopLevelClear(levelIndex, 3.0) then
+            Automation.ResetPopCharacter()
+            return true
+        end
+        Automation.ResetPopCharacter()
+        task.wait(0.4)
+    end
+    return false
+end
+
+function Automation.RunPopSpecialObby()
+    _G.Log("Pop Farm: Starting Speedrun Obby", Color3.fromRGB(0, 255, 255))
+    Automation.ResetPopCharacter()
+    if not Automation.DoPopStartZone() then Automation.ResetPopCharacter() return false end
+    Automation.PopStepGap(1)
+
+    local speedrun = Automation.PopWaitFor(Automation.FindPopSpeedrunFolder, Config.PopForFree.SpecialPortalTimeout, "special wait folder")
+    if not speedrun then Automation.ResetPopCharacter() task.wait(0.5) return false end
+
+    for i = 1, 10 do
+        if not Config.PopForFree.Enabled then Automation.ResetPopCharacter() return false end
+        local endPortal = Automation.PopWaitFor(function()
+            local folder = Automation.FindPopSpeedrunFolder()
+            if not folder then return nil end
+            local level = folder:FindFirstChild("CurrentLevel" .. i)
+            if not level then return nil end
+            local ep = level:FindFirstChild("End Portal")
+            if not ep then return nil end
+            if Automation.GetPopEndPortalPart(ep) then return ep end
+            return nil
+        end, Config.PopForFree.SpecialPortalTimeout, "speedrun wait L" .. i)
+
+        if not endPortal then Automation.ResetPopCharacter() task.wait(0.5) return false end
+        task.wait(0.25)
+        if not Automation.DoPopLevelPortal(i, endPortal, "speedrun L" .. i) then Automation.ResetPopCharacter() task.wait(0.5) return false end
+        if i < 10 then
+            task.wait(Config.PopForFree.SpecialPostClearWait)
+            Automation.PopStepGap(i + 1)
+        end
+    end
+    local hrp = Core.Local.Player.Character and Core.Local.Player.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.Anchored = false
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(Automation.PopData.BackPos)
+    end
+    Automation.ResetPopCharacter()
+    task.wait(0.2)
+    _G.Log("Pop Farm: Speedrun Done", Color3.fromRGB(0, 255, 0))
+    return true
+end
+
+function Automation.TapPopRandomWASD()
+    local keys = {Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D}
+    local key = keys[math.random(1, #keys)]
+    pcall(function()
+        Core.Services.VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(math.random(8, 18) / 100)
+        Core.Services.VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end)
+end
+
+function Automation.PopForFreeLoop()
+    task.spawn(function()
+        _G.Log("Pop for Free Farm: Active", Color3.fromRGB(0, 255, 150))
+        Automation.BypassPopCaptcha()
+
+        -- Anti-AFK separate thread
+        task.spawn(function()
+            while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() do
+                if Config.PopForFree.AntiAfk then
+                    Automation.TapPopRandomWASD()
+                end
+                task.wait(math.random(45, 55) / 100)
+            end
+        end)
+
+        while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() do
+            pcall(function()
+                local sp5 = workspace:FindFirstChild("SP5")
+                local m5  = workspace:FindFirstChild("M5")
+                local sp4 = workspace:FindFirstChild("SP4")
+                local m4  = workspace:FindFirstChild("M4")
+
+                if Automation.IsPopSpecialAvailable() then
+                    Automation.RunPopSpecialObby()
+                end
+
+                if Config.PopForFree.Enabled then
+                    Automation.FarmOnce(sp5, m5, Automation.PopData.LongNear, Automation.PopData.LongFinal, "Long Obby")
+                end
+
+                if Config.PopForFree.Enabled then
+                    local t0 = os.clock()
+                    while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() and (os.clock() - t0) < Config.PopForFree.Cooldown do
+                        task.wait(0.1)
+                    end
+                end
+
+                if Config.PopForFree.Enabled then
+                    Automation.FarmOnce(sp4, m4, Automation.PopData.ExpertNear, Automation.PopData.ExpertFinal, "Expert Obby")
+                end
+
+                if Config.PopForFree.Enabled then
+                    local t0 = os.clock()
+                    while Config.PopForFree.Enabled and not State.Unloading and IsCurrentInstance() and (os.clock() - t0) < Config.PopForFree.Cooldown do
+                        task.wait(0.1)
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+        _G.Log("Pop for Free Farm: Stopped", Color3.fromRGB(255, 50, 50))
+    end)
+end
+
+function Automation.GetPopGlassTouchPart(panel)
+    if not panel then return nil end
+    local children = panel:GetChildren()
+    local c2 = children[2]
+    if c2 and c2:IsA("BasePart") then return c2 end
+    for _, child in children do
+        if child:IsA("BasePart") then return child end
+    end
+    for _, d in panel:GetDescendants() do
+        if d:IsA("TouchTransmitter") or d.Name == "TouchInterest" then
+            local parent = d.Parent
+            if parent and parent:IsA("BasePart") then return parent end
+        end
+    end
+    if panel:IsA("BasePart") then return panel end
+    return panel:FindFirstChildWhichIsA("BasePart", true)
+end
+
+function Automation.RunPopGlass(delay)
+    task.spawn(function()
+        local hrp = Core.Local.Player.Character and Core.Local.Player.Character:FindFirstChild("HumanoidRootPart")
+        local folder = workspace:FindFirstChild("GlassBridgeParts")
+        if not (hrp and folder) then
+            _G.Log("Glass Bridge folder not found!", Color3.fromRGB(255, 0, 0))
+            return
+        end
+
+        _G.Log("Glass Bridge: Starting...", Color3.fromRGB(255, 255, 0))
+        for i = 1, 20 do
+            for _, side in {"A", "B"} do
+                local name = tostring(i) .. side
+                local panel = folder:FindFirstChild(name)
+                local part = Automation.GetPopGlassTouchPart(panel)
+                if part and firetouchinterest then
+                    firetouchinterest(hrp, part, 0)
+                    firetouchinterest(hrp, part, 1)
+                    task.wait(delay)
+                end
+            end
+        end
+
+        task.wait(1.0)  -- GLASS_FINAL_WAIT
+        local finalPartName = "425d9aba-1a85-4ca6-a18a-1dd9f1236e93"
+        local final = workspace:FindFirstChild(finalPartName, true)
+        if final then
+            if final:IsA("TouchTransmitter") or final.Name == "TouchInterest" then final = final.Parent end
+            if final and firetouchinterest then
+                firetouchinterest(hrp, final, 0)
+                firetouchinterest(hrp, final, 1)
+            end
+        end
+        _G.Log("Glass Bridge: Done!", Color3.fromRGB(0, 255, 0))
+    end)
+end
+
+-- AutoFarm
+function Automation.DoAutofarm(v)
+    Config.Cheat.AutoFarm = v
+    if Config.Cheat.AutoFarm then
+        task.spawn(function()
+            while Config.Cheat.AutoFarm and not State.Unloading and IsCurrentInstance() do
+                pcall(function()
+                    local playerGui = Core.LocalPlayer:FindFirstChild("PlayerGui")
+                    if not playerGui then return end
+                    for _, v in playerGui:GetDescendants() do
+                        if (v:IsA("TextButton") or v:IsA("ImageButton")) and v.Visible then
+                            local labelText = v:IsA("TextButton") and v.Text or ""
+                            if labelText == "" then
+                                for _, child in v:GetChildren() do
+                                    if child:IsA("TextLabel") then labelText = child.Text break end
+                                end
+                            end
+                            if labelText:find("Получить") or labelText:find("Claim") then
+                                if firesignal then
+                                    firesignal(v.MouseButton1Click)
+                                    firesignal(v.Activated)
+                                elseif getconnections then
+                                    for _, con in getconnections(v.MouseButton1Click) do con:Fire() end
+                                    for _, con in getconnections(v.Activated) do con:Fire() end
+                                end
+                            end
+                        end
+                    end
+                end)
+                task.wait(1)
+            end
+        end)
+
+        task.spawn(function()
+            local ChestCF = CFrame.new(-57.053, -360.406, 9487.905, -0.989, 0.000, 0.146, 0.000, 1.000, 0.000, -0.146, 0.000, -0.989)
+            local SafeY = 95
+
+            while Config.Cheat.AutoFarm and not State.Unloading and IsCurrentInstance() do
+                local char = Core.LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0 then
+                    if hrp.Position.Z > 1000 then
+                        while Config.Cheat.AutoFarm and not State.Unloading and IsCurrentInstance() and Core.LocalPlayer.Character and Core.LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and Core.LocalPlayer.Character.HumanoidRootPart.Position.Z > 1000 do
+                            task.wait(1)
+                        end
+                        task.wait(2)
+                    else
+                        pcall(function()
+                            local boatStages = workspace:FindFirstChild("BoatStages")
+                            if not boatStages then return end
+                            local stages = boatStages:FindFirstChild("NormalStages")
+                            if not stages then return end
+                            local pathPoints = {}
+                            for i = 1, 10 do
+                                local stage = stages:FindFirstChild("Stage"..i)
+                                local pos = stage and stage:FindFirstChild("DarknessPart") and stage.DarknessPart.Position or Vector3.new(-55, SafeY, 1727 + (i-1) * 775)
+                                table.insert(pathPoints, Vector3.new(pos.X, SafeY, pos.Z))
+                            end
+                            table.insert(pathPoints, Vector3.new(ChestCF.X, SafeY, ChestCF.Z))
+                            table.insert(pathPoints, ChestCF.Position)
+
+                            clearPathLines()
+                            if Config.Cheat.DebugPath then
+                                local last = hrp.Position
+                                for _, p in pathPoints do
+                                    local l = drawPathLine(last, p)
+                                    if l then table.insert(currentPathLines, l) end
+                                    last = p
+                                end
+                            end
+
+                            for _, target in pathPoints do
+                                if not Config.Cheat.AutoFarm then break end
+                                while Config.Cheat.AutoFarm and not State.Unloading and IsCurrentInstance() and hrp and hrp.Parent and (hrp.Position - target).Magnitude > 5 do
+                                    local speed = Config.Cheat.Speed
+                                    local direction = (target - hrp.Position).Unit
+                                    hrp.Velocity = Vector3.zero
+                                    hrp.CFrame = hrp.CFrame + (direction * (speed * task.wait()))
+                                end
+                                if target.Y == SafeY then task.wait(0.1) end
+                            end
+                            if Config.Cheat.AutoFarm then task.wait(5) end
+                        end)
+                    end
+                end
+                clearPathLines()
+                task.wait(1)
+            end
+        end)
+    else
+        clearPathLines()
+    end
+end
+
+do
+-- Drone ESP logic for War Drone FPV
+local function createDroneESP(obj, model)
+    local bg = Instance.new("BillboardGui")
+    bg.Name = "DroneESP"
+    bg.Adornee = obj
+    bg.Size = UDim2.new(4, 0, 2, 0)
+    bg.AlwaysOnTop = true
+    bg.MaxDistance = 10000
+    bg.Parent = ScreenGui
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Config.Combat.ESP.Colors.Drones
+    label.TextStrokeTransparency = 0.5
+    label.Font = Enum.Font.GothamBold
+    label.Text = "DRONE"
+    label.TextSize = 10
+    label.Parent = bg
+
+    -- DRONE CHAMS (Highlights)
+    local h = Instance.new("Highlight")
+    h.Name = "DroneHighlight"
+    h.FillColor = Config.Combat.ESP.Colors.Drones
+    h.OutlineColor = Color3.new(1, 1, 1)
+    h.FillTransparency = Config.Combat.ESP.Transparencies.Drones or 0.4
+    h.OutlineTransparency = 0
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Adornee = model
+    h.Parent = model
+    Internal.DroneHighlights[model] = h
+
+    return bg
+end
+
+task.spawn(function()
+    while task.wait(1) and ScreenGui and ScreenGui.Parent and IsCurrentInstance() do
+        if not ScreenGui or not ScreenGui.Parent then break end
+        if Config.Visuals.ESP.Enabled and Config.Combat.ESP.Drones then
+            -- Optimized targeted scan
+            local scanAreas = {workspace:FindFirstChild("Debris"), workspace:FindFirstChild("Characters")}
+            for _, area in scanAreas do
+                if area then
+                    for _, v in area:GetChildren() do
+                        if v:IsA("Model") and (v.Name:lower():find("drone") or v:FindFirstChild("DroneScript") or v:FindFirstChild("CameraRig")) then
+                            if not Internal.DroneObjects[v] then
+                                Internal.DroneObjects[v] = true
+                                local primary = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)
+                                if primary then
+                                    Internal.DroneGuis[v] = createDroneESP(primary, v)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        else
+            for v, gui in Internal.DroneGuis do
+                if gui then gui:Destroy() end
+            end
+            for v, h in Internal.DroneHighlights do
+                if h then h:Destroy() end
+            end
+            table.clear(Internal.DroneGuis)
+            table.clear(Internal.DroneObjects)
+            table.clear(Internal.DroneHighlights)
+        end
+
+        -- Cleanup dead drones
+        for v, _ in Internal.DroneObjects do
+            if not v or not v.Parent then
+                if Internal.DroneGuis[v] then Internal.DroneGuis[v]:Destroy() end
+                if Internal.DroneHighlights[v] then Internal.DroneHighlights[v]:Destroy() end
+                Internal.DroneGuis[v] = nil
+                Internal.DroneObjects[v] = nil
+                Internal.DroneHighlights[v] = nil
+            end
+        end
+    end
+end)
+
+-- Oil Barrel ESP logic for War Tycoon
+local function createBarrelESP(obj, model)
+    local bg = Instance.new("BillboardGui")
+    bg.Name = "BarrelESP"
+    bg.Adornee = obj
+    bg.Size = UDim2.new(4, 0, 2, 0)
+    bg.AlwaysOnTop = true
+    bg.MaxDistance = 10000
+    bg.Parent = ScreenGui
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Config.Combat.ESP.Colors.Oil
+    label.TextStrokeTransparency = 0.5
+    label.Font = Enum.Font.GothamBold
+    label.Text = "OIL BARREL"
+    label.TextSize = 9
+    label.Parent = bg
+
+    -- OIL CHAMS (Highlights)
+    local h = Instance.new("Highlight")
+    h.Name = "BarrelHighlight"
+    h.FillColor = Config.Combat.ESP.Colors.Oil
+    h.OutlineColor = Color3.new(1, 1, 1)
+    h.FillTransparency = Config.Combat.ESP.Transparencies.Oil or 0.4
+    h.OutlineTransparency = 0
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Adornee = model
+    h.Parent = model
+    Internal.BarrelHighlights[model] = h
+
+    return bg
+end
+
+task.spawn(function()
+    local function processObject(v)
+        if not (Config.Combat.ESP.Enabled and Config.Combat.ESP.OilBarrels) then return end
+
+        if v:IsA("ProximityPrompt") then
+            local parent = v.Parent
+            if parent and parent:IsA("BasePart") then
+                local model = parent:FindFirstAncestorOfClass("Model") or parent
+                local name = model.Name:lower()
+                local objText = v.ObjectText:lower()
+                local actText = v.ActionText:lower()
+
+                local isTycoon = model:FindFirstAncestor("Tycoons") or model:FindFirstAncestor("Bases") or model:FindFirstAncestor("Buildings")
+                if not isTycoon and (name == "oil barrel" or objText == "oil barrel" or (actText:find("забрать") and objText:find("бочку"))) then
+                    if not Internal.BarrelObjects[model] then
+                        Internal.BarrelObjects[model] = true
+                        Internal.BarrelGuis[model] = createBarrelESP(parent, model)
+                    end
+                end
+            end
+        elseif v:IsA("Model") and not Internal.BarrelObjects[v] then
+            local name = v.Name:lower()
+            if name == "oil barrel" then
+                local isTycoon = v:FindFirstAncestor("Tycoons") or v:FindFirstAncestor("Bases") or v:FindFirstAncestor("Buildings")
+                if not isTycoon then
+                    Internal.BarrelObjects[v] = true
+                    local primary = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)
+                    if primary then
+                        Internal.BarrelGuis[v] = createBarrelESP(primary, v)
+                    end
+                end
+            end
+        end
+    end
+
+    while task.wait(5) and ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if not ScreenGui or not ScreenGui.Parent then break end
+        if Config.Visuals.ESP.Enabled and Config.Combat.ESP.OilBarrels then
+            local folders = {workspace:FindFirstChild("Debris"), workspace:FindFirstChild("Map"), workspace:FindFirstChild("Characters")}
+            for _, folder in folders do
+                if folder then
+                    for _, child in folder:GetChildren() do
+                        processObject(child)
+                    end
+                end
+            end
+        else
+            for v, gui in Internal.BarrelGuis do if gui then gui:Destroy() end end
+            for v, h in Internal.BarrelHighlights do if h then h:Destroy() end end
+            table.clear(Internal.BarrelGuis)
+            table.clear(Internal.BarrelObjects)
+            table.clear(Internal.BarrelHighlights)
+        end
+
+        for v, _ in Internal.BarrelObjects do
+            if not v or not v.Parent then
+                if Internal.BarrelGuis[v] then Internal.BarrelGuis[v]:Destroy() end
+                if Internal.BarrelHighlights[v] then Internal.BarrelHighlights[v]:Destroy() end
+                Internal.BarrelGuis[v] = nil
+                Internal.BarrelObjects[v] = nil
+                Internal.BarrelHighlights[v] = nil
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.1) and ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if Config.Visuals.ESP.Enabled and Config.Combat.ESP.OilBarrels then
+            local cam = workspace.CurrentCamera
+            for v, gui in Internal.BarrelGuis do
+                local label = gui:FindFirstChildOfClass("TextLabel")
+                if label and v.Parent then
+                    local dist = math.round((v.Position - cam.CFrame.Position).Magnitude)
+                    label.Text = "OIL BARREL [" .. dist .. "m]"
+                end
+            end
+        end
+    end
+end)
+end
+
+function Automation.StringToCFrame(str)
+    local parts = {}
+    for x in str:gmatch("-?%d+%.?%d*") do
+        table.insert(parts, tonumber(x))
+    end
+    if #parts >= 12 then
+        return CFrame.new(unpack(parts))
+    elseif #parts >= 3 then
+        return CFrame.new(parts[1], parts[2], parts[3])
+    end
+    return nil
+end
+
+function Automation.WarTycoonFarmLoop()
+    task.spawn(function()
+        _G.Log("War Tycoon Farm: Active", Color3.fromRGB(0, 255, 150))
+        while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() do
+            local success, err = pcall(function()
+                local char = Core.LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+                if hrp and hum and hum.Health > 0 then
+                    local targetCF = Automation.StringToCFrame(Config.WarTycoonFarm.TargetCFrameStr)
+                    if not targetCF then
+                        _G.Log("War Tycoon: Invalid CFrame!", Color3.fromRGB(255, 0, 0))
+                        Config.WarTycoonFarm.Enabled = false
+                        if State.Modules["War Tycoon Farm"] and State.Modules["War Tycoon Farm"].Toggle then
+                            State.Modules["War Tycoon Farm"].Toggle()
+                        end
+                        return
+                    end
+
+                    local dist = (hrp.Position - targetCF.Position).Magnitude
+                    if dist > 15 then
+                        hum.PlatformStand = true
+
+                        -- Phase 1: Fly UP
+                        local upHeight = hrp.Position.Y + 300
+                        _G.Log("War Tycoon: Rising...", Color3.fromRGB(255, 255, 0))
+                        while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() and hum.Health > 0 and hrp.Position.Y < upHeight do
+                            local dt = task.wait()
+                            hrp.Velocity = Vector3.zero
+                            hrp.CFrame = hrp.CFrame + Vector3.new(0, Config.WarTycoonFarm.Speed * dt, 0)
+
+                            if Config.WarTycoonFarm.Noclip then
+                                for _, p in char:GetDescendants() do
+                                    if p:IsA("BasePart") then p.CanCollide = false end
+                                end
+                            end
+                        end
+
+                        -- Phase 2: Fly to Target
+                        _G.Log("War Tycoon: Moving to Target...", Color3.fromRGB(255, 255, 0))
+                        while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() and hum.Health > 0 and (hrp.Position - targetCF.Position).Magnitude > 8 do
+                            local dt = task.wait()
+                            local toTarget = (targetCF.Position - hrp.Position)
+                            local dir = toTarget.Unit
+                            hrp.Velocity = Vector3.zero
+                            hrp.CFrame = hrp.CFrame + (dir * Config.WarTycoonFarm.Speed * dt)
+                            hrp.CFrame = CFrame.new(hrp.Position, targetCF.Position)
+
+                            if Config.WarTycoonFarm.Noclip then
+                                for _, p in char:GetDescendants() do
+                                    if p:IsA("BasePart") then p.CanCollide = false end
+                                end
+                            end
+                        end
+
+                        if Config.WarTycoonFarm.Enabled and hum.Health > 0 then
+                            hrp.CFrame = targetCF
+                            hum.PlatformStand = false
+                            _G.Log("War Tycoon: Reached!", Color3.fromRGB(0, 255, 0))
+                        end
+                    else
+                        hum.PlatformStand = false
+                        task.wait(1)
+                    end
+                else
+                    task.wait(1)
+                end
+            end)
+            if not success then task.wait(1) end
+        end
+        local char = Core.LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.PlatformStand = false end
+        _G.Log("War Tycoon Farm: Stopped", Color3.fromRGB(255, 50, 50))
+    end)
+end
+
+-- [ v51 ] AUTO BUILD (War Tycoon)
+
+function Automation.WarTycoonAutoBuildLog(msg, color)
+    local text = "[Auto Build] " .. tostring(msg)
+    print("[AUTO-BUILD] " .. tostring(msg))
+    if _G.Log then pcall(_G.Log, text, color or Color3.fromRGB(0, 200, 255)) end
+end
+
+-- [ v54 ] Session stats
+Automation._wtStats = Automation._wtStats or {
+    purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = 0,
+}
+
+function Automation.WarTycoonAutoBuildFormatMoney(n)
+    if type(n) ~= "number" then return "?" end
+    if n >= 1e9 then return string.format("%.2fB", n / 1e9) end
+    if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(math.floor(n))
+end
+
+function Automation.WarTycoonAutoBuildStatus(text)
+    Internal.FarmStatus = text
+    if Internal.updateIsland and Config.Island.Enabled then pcall(Internal.updateIsland) end
+end
+
+function Automation.WarTycoonAutoBuildUpdateStatus(unit, extra)
+    local st = Automation._wtStats
+    local target = extra
+    if not target and unit then
+        target = tostring(unit.label or (unit.part and unit.part.Name) or "pad")
+        if unit.price then target = target .. " $" .. Automation.WarTycoonAutoBuildFormatMoney(unit.price) end
+    end
+    local txt = "AUTO BUILD"
+    if target then txt = txt .. "  >  " .. target end
+    local money = Automation.WarTycoonAutoBuildMoney()
+    if money ~= nil then txt = txt .. "  |  cash " .. Automation.WarTycoonAutoBuildFormatMoney(money) end
+    if st.purchases > 0 or st.rebirths > 0 then
+        txt = txt .. string.format("  |  buys %d / rb %d", st.purchases, st.rebirths)
+    end
+    Automation.WarTycoonAutoBuildStatus(txt)
+end
+
+-- [ v55 ] Self-healing session state
+function Automation.WarTycoonAutoBuildState()
+    Automation._wtDonePads = Automation._wtDonePads or {}
+    Automation._wtStats = Automation._wtStats or {
+        purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = tick(),
+    }
+    return Automation._wtStats
+end
+
+function Automation.WarTycoonAutoBuildLimitReached()
+    local cfg = Config.WarTycoonBuild
+    local st = Automation._wtStats
+    local maxSpend = tonumber(cfg.MaxSpend) or 0
+    if maxSpend > 0 and st.spent >= maxSpend then
+        return "spend limit reached ($" .. Automation.WarTycoonAutoBuildFormatMoney(maxSpend) .. ")"
+    end
+    local maxRb = tonumber(cfg.StopAfterRebirths) or 0
+    if maxRb > 0 and st.rebirths >= maxRb then
+        return "rebirth limit reached (" .. tostring(maxRb) .. ")"
+    end
+    return nil
+end
+
+function Automation.WarTycoonAutoBuildReport(reason)
+    local st = Automation._wtStats
+    local dur = math.max(0, tick() - (st.startedAt or tick()))
+    local perHour = 0
+    if dur > 1 then perHour = math.floor(st.purchases / (dur / 3600)) end
+    local lines = {
+        "[Auto Build] session report",
+        string.format("  reason      : %s", tostring(reason or "stopped")),
+        string.format("  duration    : %d min %d sec", math.floor(dur / 60), math.floor(dur % 60)),
+        string.format("  purchases   : %d", st.purchases),
+        string.format("  rebirths    : %d", st.rebirths),
+        string.format("  spent       : $%s", Automation.WarTycoonAutoBuildFormatMoney(st.spent)),
+        string.format("  TP rollbacks: %d", st.rollbacks),
+        string.format("  errors      : %d", st.errors),
+        string.format("  purchases/h : %d", perHour),
+        string.format("  priority    : %s", tostring(Config.WarTycoonBuild.Priority)),
+    }
+    for _, line in ipairs(lines) do print("[AUTO-BUILD]" .. line) end
+    if Config.WarTycoonBuild.ReportFile ~= false and writefile and makefolder then
+        pcall(function()
+            if type(isfolder) == "function" then
+                if not isfolder("Overmind") then makefolder("Overmind") end
+                if not isfolder("Overmind/logs") then makefolder("Overmind/logs") end
+            end
+            local name = "Overmind/logs/autobuild_" .. os.date("%Y-%m-%d_%H-%M-%S") .. ".txt"
+            writefile(name, table.concat(lines, "\n") .. "\n")
+            Automation.WarTycoonAutoBuildLog("report saved: " .. name, Color3.fromRGB(0, 255, 150))
+        end)
+    end
+    return table.concat(lines, "\n")
+end
+
+-- Own base (plot)
+function Automation.WarTycoonAutoBuildFindBase()
+    local lp = Core.LocalPlayer
+    if not lp then return nil end
+    local lpName = lp.Name
+    local lpId = tostring(lp.UserId)
+    local teamName = lp.Team and lp.Team.Name or nil
+
+    local function ownedByMe(obj)
+        for _, attrName in ipairs({ "Owner", "owner", "OwnerId", "ownerId", "OwnerUserId", "UserId", "userId", "Player" }) do
+            local a = obj:GetAttribute(attrName)
+            if a ~= nil then
+                if a == lp then return true end
+                local s = tostring(a)
+                if s == lpId or s:lower() == lpName:lower() then return true end
+            end
+        end
+        for _, childName in ipairs({ "Owner", "owner", "OwnerValue", "Player", "TycoonOwner", "OwnerUserId" }) do
+            local v = obj:FindFirstChild(childName)
+            if v then
+                if v:IsA("ObjectValue") then
+                    if v.Value == lp or v.Value == lp.Character then return true end
+                elseif v:IsA("StringValue") then
+                    local s = tostring(v.Value)
+                    if s:lower() == lpName:lower() or s == lpId or (teamName and s:lower() == teamName:lower()) then return true end
+                elseif v:IsA("IntValue") or v:IsA("NumberValue") then
+                    if tostring(v.Value) == lpId then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    local containers = { "Tycoons", "Bases", "Plots", "Tycoon", "Base", "PlayerBases" }
+    for _, contName in ipairs(containers) do
+        local cont = workspace:FindFirstChild(contName, true)
+        if cont then
+            for _, child in ipairs(cont:GetChildren()) do
+                if (child:IsA("Model") or child:IsA("Folder")) and ownedByMe(child) then
+                    return child
+                end
+            end
+        end
+    end
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if (obj:IsA("Model") or obj:IsA("Folder")) and obj ~= lp.Character and ownedByMe(obj) and #obj:GetChildren() >= 3 then
+            return obj
+        end
+    end
+    return nil
+end
+
+function Automation.WarTycoonAutoBuildBase(forceRefresh)
+    local now = tick()
+    local b = Automation._wtBase
+    if b and b.Parent and not forceRefresh and (now - (Automation._wtBaseAt or 0)) < 20 then
+        return b
+    end
+    b = Automation.WarTycoonAutoBuildFindBase()
+    Automation._wtBase = b
+    Automation._wtBaseAt = now
+    return b
+end
+
+-- Pad label and price (GUI / Value objects / attributes)
+function Automation.WarTycoonAutoBuildPadInfo(scope)
+    local texts = {}
+    if scope then
+        for _, d in ipairs(scope:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") then
+                local txt = tostring(d.Text or "")
+                if txt ~= "" then texts[#texts + 1] = txt end
+            elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
+                local txt = tostring(d.Value or "")
+                if txt ~= "" then texts[#texts + 1] = txt end
+            end
+        end
+        for _, attrName in ipairs({ "Price", "Cost", "Amount", "price", "cost" }) do
+            local a = scope:GetAttribute(attrName)
+            if a ~= nil then texts[#texts + 1] = tostring(a) end
+        end
+    end
+
+    local function toPrice(txt)
+        local s = tostring(txt):gsub("%s", "")
+        if s:find("$", 1, true) then
+            local n = tonumber((s:gsub("%$", ""):gsub(",", "")))
+            if n then return n end
+        end
+        if s:match("^%d[%d,.]*$") then
+            local n = tonumber((s:gsub(",", "")))
+            if n then return n end
+        end
+        return nil
+    end
+
+    local label, price
+    for _, txt in ipairs(texts) do
+        local p = toPrice(txt)
+        if p ~= nil then
+            if not price or p > price then price = p end
+        elseif not label and #(txt:gsub("%s", "")) > 0 then
+            label = txt
+        end
+    end
+    return label, price
+end
+
+-- Pad category
+function Automation.WarTycoonAutoBuildCategory(hint)
+    local h = string.lower(tostring(hint or ""))
+    local function has(words)
+        for _, w in ipairs(words) do
+            if h:find(w, 1, true) then return true end
+        end
+        return false
+    end
+    if has({ "oil", "extract", "drill", "derrick", "gas", "generator", "income", "money", "cash" }) then return "money" end
+    if has({ "bunker", "missile", "silo", "drone", "laboratory", "lab" }) then return "bunker" end
+    if has({ "garage", "vehicle", "dock", "airport", "hangar", "tank", "boat", "plane", "helipad" }) then return "yard" end
+    if has({ "wall", "floor", "door", "glass", "path", "roof", "main", "hq", "second", "third", "level", "stair", "house", "home", "barrack" }) then return "house" end
+    return "other"
+end
+
+Automation.WarTycoonAutoBuildPriorityOrder = {
+    ["Money"] = { money = 1, house = 2, yard = 3, bunker = 4, other = 5 },
+    ["House"] = { house = 1, money = 2, yard = 3, bunker = 4, other = 5 },
+    ["Yard"] = { yard = 1, money = 2, house = 3, bunker = 4, other = 5 },
+    ["Bunker"] = { bunker = 1, money = 2, house = 3, yard = 4, other = 5 },
+    ["Cheapest"] = { money = 1, house = 1, yard = 1, bunker = 1, other = 1 },
+}
+
+-- Scan purchase pads inside our own base
+function Automation.WarTycoonAutoBuildScanPads(base)
+    local ignoreShield = Config.WarTycoonBuild.IgnoreShield ~= false
+    local padHints = { "buy", "purchase", "button", "pad", "sign", "unlock", "provider", "plate", "circle", "upgrade" }
+    local badHints = { "spawner", "spawnpad", "spawn pad", "spawnpoint", "drone", "uav", "rack", "armory", "prompt", "seat", "collector", "atm" }
+    local shieldHints = { "shield", "spawnprotect", "spawn protect", "protection" }
+
+    local function has(hint, words)
+        local h = string.lower(tostring(hint or ""))
+        for _, w in ipairs(words) do
+            if h:find(w, 1, true) then return true end
+        end
+        return false
+    end
+
+    local function hasPrompt(part)
+        if part:FindFirstChildOfClass("ProximityPrompt") then return true end
+        if part.Parent and part.Parent:FindFirstChildOfClass("ProximityPrompt") then return true end
+        return false
+    end
+
+    local function hasVisual(part, model)
+        for _, src in ipairs(model and { part, model } or { part }) do
+            for _, d in ipairs(src:GetChildren()) do
+                if d:IsA("SurfaceGui") or d:IsA("BillboardGui") or d:IsA("Decal") or d:IsA("Texture") then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    local function isFlatDisc(part)
+        local s = part.Size
+        if s.Y > 2.5 then return false end
+        if math.abs(s.X - s.Z) > 4 then return false end
+        return math.max(s.X, s.Z) >= 4
+    end
+
+    local units, byModel = {}, {}
+    for _, obj in ipairs(base:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local model = obj:FindFirstAncestorOfClass("Model")
+            if model and not model:IsDescendantOf(base) then model = nil end
+            local scope = obj
+            if model and #model:GetChildren() <= 40 then scope = model end
+
+            local label, price = Automation.WarTycoonAutoBuildPadInfo(scope)
+            local nameLow = string.lower(obj.Name)
+            local modelLow = model and string.lower(model.Name) or ""
+            local labelLow = string.lower(tostring(label or ""))
+            local combined = nameLow .. " " .. modelLow .. " " .. labelLow
+
+            local named = has(nameLow, padHints) or has(modelLow, padHints)
+            local looksLikePad = (price ~= nil) or named or (isFlatDisc(obj) and hasVisual(obj, model))
+            local junk = has(combined, badHints) or hasPrompt(obj)
+
+            if looksLikePad and not junk and not (ignoreShield and has(combined, shieldHints)) then
+                local key = model or obj
+                local unit = byModel[key]
+                if not unit then
+                    unit = { model = model, part = obj, label = label, price = price }
+                    unit.cat = Automation.WarTycoonAutoBuildCategory(combined)
+                    unit.key = (model and model:GetFullName() or obj:GetFullName()) .. "|" .. tostring(label or "")
+                    byModel[key] = unit
+                    units[#units + 1] = unit
+                else
+                    if not unit.price and price then unit.price = price end
+                    if (not unit.label or unit.label == "") and label then unit.label = label end
+                    local pn = string.lower(obj.Name)
+                    if pn:find("hitbox", 1, true) or pn:find("buy", 1, true) or pn:find("button", 1, true) or pn:find("pad", 1, true) then
+                        unit.part = obj
+                    end
+                    if price then unit.cat = Automation.WarTycoonAutoBuildCategory(combined) end
+                end
+            end
+        end
+    end
+
+    local order = Automation.WarTycoonAutoBuildPriorityOrder[Config.WarTycoonBuild.Priority]
+        or Automation.WarTycoonAutoBuildPriorityOrder["Money"]
+    table.sort(units, function(a, b)
+        local oa = order[a.cat] or 9
+        local ob = order[b.cat] or 9
+        if oa ~= ob then return oa < ob end
+        local pa = a.price or math.huge
+        local pb = b.price or math.huge
+        if pa ~= pb then return pa < pb end
+        return tostring(a.label or a.part.Name) < tostring(b.label or b.part.Name)
+    end)
+    return units
+end
+
+function Automation.WarTycoonAutoBuildPads(base, force)
+    local now = tick()
+    if not force and Automation._wtPads and Automation._wtPadsBase == base and (now - (Automation._wtPadsAt or 0)) < 5 then
+        return Automation._wtPads
+    end
+    local pads = Automation.WarTycoonAutoBuildScanPads(base)
+    Automation._wtPads, Automation._wtPadsAt, Automation._wtPadsBase = pads, now, base
+    return pads
+end
+
+-- MAIN FIX
+function Automation.WarTycoonAutoBuildHover(part)
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return false, "no living character" end
+    if not part or not part.Parent then return false, "pad is gone" end
+
+    local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
+    local topY = part.Position.Y + (part.Size.Y * 0.5)
+    local targetPos = Vector3.new(part.Position.X, topY + hover, part.Position.Z)
+    pcall(function() hum.PlatformStand = false end)
+    pcall(function() hum.Sit = false end)
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    hrp.CFrame = CFrame.new(targetPos)
+
+    -- [ v54 ] Rollback check
+    if Config.WarTycoonBuild.VerifyTp ~= false then
+        Automation.WarTycoonAutoBuildState()
+        local t0 = tick()
+        repeat task.wait() until tick() - t0 > 0.05
+        if hrp.Parent then
+            local delta = (hrp.Position - targetPos).Magnitude
+            if delta > 8 then
+                Automation._wtStats.rollbacks = Automation._wtStats.rollbacks + 1
+                return false, string.format("rolled back (%.1f studs away)", delta)
+            end
+        end
+    end
+
+    if Config.WarTycoonBuild.FireTouch and type(firetouchinterest) == "function" then
+        pcall(function()
+            firetouchinterest(hrp, part, 0)
+            task.wait(0.05)
+            firetouchinterest(hrp, part, 1)
+        end)
+    end
+
+    task.wait(tonumber(Config.WarTycoonBuild.Delay) or 0.35)
+    if part.Parent then
+        pcall(function()
+            hrp.CFrame = CFrame.new(Vector3.new(part.Position.X, topY + 0.15, part.Position.Z))
+        end)
+    end
+
+    local prompt = part:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt and part.Parent then
+        prompt = part.Parent:FindFirstChildOfClass("ProximityPrompt")
+    end
+    if prompt and prompt.Parent and prompt.Parent:IsA("BasePart") then
+        pcall(function()
+            if (hrp.Position - prompt.Parent.Position).Magnitude <= (prompt.MaxActivationDistance + 4) then
+                prompt:InputHoldBegin()
+                task.wait(0.1)
+                prompt:InputHoldEnd()
+            end
+        end)
+    end
+    task.wait(0.1)
+    return true
+end
+
+-- [ v54 ] Fallback for servers that undo teleports
+function Automation.WarTycoonAutoBuildWalk(part, timeout)
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or not part or not part.Parent or hum.Health <= 0 then return false end
+
+    local savedSpeed = hum.WalkSpeed
+    local deadline = tick() + (tonumber(timeout) or 6)
+    pcall(function() hum.WalkSpeed = tonumber(Config.WarTycoonBuild.WalkSpeed) or 80 end)
+    while tick() < deadline and part.Parent and Config.WarTycoonBuild.Enabled
+        and not State.Unloading and IsCurrentInstance() do
+        if (hrp.Position - part.Position).Magnitude <= 6 then break end
+        pcall(function() hum:MoveTo(part.Position) end)
+        task.wait(0.2)
+    end
+    pcall(function() hum:MoveTo(hrp.Position) end)
+    pcall(function() hum.WalkSpeed = savedSpeed end)
+    return (hrp.Position - part.Position).Magnitude <= 12
+end
+
+function Automation.WarTycoonAutoBuildMoney()
+    local lp = Core.LocalPlayer
+    if not lp then return nil end
+    for _, attrName in ipairs({ "Cash", "Money", "cash", "money", "CashValue", "MoneyValue" }) do
+        local a = lp:GetAttribute(attrName)
+        if type(a) == "number" then return a end
+    end
+    for _, child in ipairs(lp:GetChildren()) do
+        if child.Name == "leaderstats" or child:IsA("Folder") then
+            for _, v in ipairs(child:GetChildren()) do
+                if v:IsA("IntValue") or v:IsA("NumberValue") then
+                    local n = string.lower(v.Name)
+                    if n:find("cash", 1, true) or n:find("money", 1, true) or n:find("$", 1, true) then
+                        return tonumber(v.Value)
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function Automation.WarTycoonAutoBuildFindCollector(base)
+    local words = { "collect", "atm", "cash", "bank" }
+    local function score(hint)
+        local h = string.lower(tostring(hint))
+        if h:find("collect", 1, true) or h:find("atm", 1, true) then return 3 end
+        if h:find("cash", 1, true) or h:find("bank", 1, true) then return 2 end
+        for _, w in ipairs(words) do
+            if h:find(w, 1, true) then return 1 end
+        end
+        return nil
+    end
+
+    local best, bestScore
+    for _, obj in ipairs(base:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local s = score(obj.Name .. " " .. (obj.Parent and obj.Parent.Name or ""))
+            if s and (not bestScore or s > bestScore) then best, bestScore = obj, s end
+        end
+    end
+    if not best then
+        local center = base:IsA("Model") and base:GetPivot().Position or Vector3.zero
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and (obj.Position - center).Magnitude < 350 then
+                local s = score(obj.Name .. " " .. (obj.Parent and obj.Parent.Name or ""))
+                if s and (not bestScore or s > bestScore) then best, bestScore = obj, s end
+            end
+        end
+    end
+    return best
+end
+
+function Automation.WarTycoonAutoBuildClickButton(btn)
+    if not btn then return false end
+    local fired = false
+    pcall(function()
+        if type(getconnections) == "function" then
+            for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+                if c.Fire then
+                    pcall(c.Fire, c)
+                    fired = true
+                end
+            end
+        end
+    end)
+    if not fired and type(firesignal) == "function" then
+        pcall(function()
+            firesignal(btn.MouseButton1Click)
+            fired = true
+        end)
+    end
+    if not fired then
+        pcall(function()
+            btn:Activate()
+            fired = true
+        end)
+    end
+    return fired
+end
+
+function Automation.WarTycoonAutoBuildClickGui(needle)
+    local lp = Core.LocalPlayer
+    local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
+    if not pg then return false end
+    local needleLow = string.lower(needle)
+    for _, gui in ipairs(pg:GetDescendants()) do
+        if gui:IsA("GuiButton") and gui.Visible then
+            local text = ""
+            if gui:IsA("TextButton") then text = tostring(gui.Text) end
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") then text = text .. " " .. tostring(d.Text) end
+            end
+            if string.lower(text):find(needleLow, 1, true) then
+                return Automation.WarTycoonAutoBuildClickButton(gui)
+            end
+        end
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildTryRebirth()
+    if not Config.WarTycoonBuild.AutoRebirth then return false end
+    Automation.WarTycoonAutoBuildState()
+    local now = tick()
+    if now - (Automation._wtLastRebirth or 0) < 4 then return false end
+    Automation._wtLastRebirth = now
+
+    local target
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and string.lower(obj.Name):find("rebirth", 1, true) then
+            target = obj
+            break
+        end
+    end
+    if target then
+        Automation.WarTycoonAutoBuildLog("rebirth: stepping on '" .. target.Name .. "'", Color3.fromRGB(255, 255, 0))
+        Automation._wtStats.rebirths = Automation._wtStats.rebirths + 1
+        Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  rebirth " .. tostring(Automation._wtStats.rebirths))
+        Automation.WarTycoonAutoBuildHover(target)
+        return true
+    end
+
+    if Automation.WarTycoonAutoBuildClickGui("rebirth") then
+        Automation._wtStats.rebirths = Automation._wtStats.rebirths + 1
+        Automation.WarTycoonAutoBuildLog("rebirth: clicked the UI button", Color3.fromRGB(255, 255, 0))
+        Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  rebirth " .. tostring(Automation._wtStats.rebirths))
+        return true
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildTryPad(base, unit)
+    if not unit or not unit.part or not unit.part.Parent then return false end
+    Automation.WarTycoonAutoBuildState()
+    local tag = string.format("'%s'%s", tostring(unit.label or unit.part.Name),
+        unit.price and (" ($" .. tostring(math.floor(unit.price)) .. ")") or "")
+    local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
+    Automation.WarTycoonAutoBuildLog("TP above pad " .. tag .. " (+" .. tostring(hover) .. " studs)")
+
+    local attempts = math.max(1, tonumber(Config.WarTycoonBuild.Attempts) or 3)
+    for i = 1, attempts do
+        if not Config.WarTycoonBuild.Enabled or State.Unloading or not IsCurrentInstance() then return false end
+        local moneyBefore = Automation.WarTycoonAutoBuildMoney()
+        local partBefore = unit.part
+        local okTp, tpErr = Automation.WarTycoonAutoBuildHover(unit.part)
+        if not okTp and tpErr and tostring(tpErr):find("rolled back", 1, true) then
+            Automation.WarTycoonAutoBuildLog("TP rolled back -> walking to the pad instead", Color3.fromRGB(255, 140, 0))
+            Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  walking (TP blocked)")
+            if Config.WarTycoonBuild.WalkFallback ~= false then
+                Automation.WarTycoonAutoBuildWalk(unit.part)
+            end
+        end
+        task.wait(tonumber(Config.WarTycoonBuild.Delay) or 0.35)
+
+        local moneyAfter = Automation.WarTycoonAutoBuildMoney()
+        local gone = (partBefore == nil) or (partBefore.Parent == nil)
+            or (unit.model ~= nil and unit.model.Parent == nil)
+        local paid = moneyBefore ~= nil and moneyAfter ~= nil and unit.price ~= nil
+            and (moneyBefore - moneyAfter) >= (unit.price * 0.6)
+
+        if gone or paid then
+            Automation._wtStats.purchases = Automation._wtStats.purchases + 1
+            if paid and unit.price then
+                Automation._wtStats.spent = Automation._wtStats.spent + unit.price
+            end
+            Automation.WarTycoonAutoBuildLog("bought: " .. tag, Color3.fromRGB(0, 255, 120))
+            Automation._wtDonePads[unit.key] = math.huge
+            Automation._wtPads = nil
+            return true
+        end
+        Automation.WarTycoonAutoBuildLog(string.format("pad %s did not register (attempt %d/%d)", tag, i, attempts), Color3.fromRGB(255, 180, 0))
+    end
+
+    Automation._wtDonePads[unit.key] = tick() + 12
+    return false
+end
+
+function Automation.WarTycoonAutoBuildNextPad(pads)
+    if not pads then return nil end
+    Automation.WarTycoonAutoBuildState()
+    local now = tick()
+    for _, u in ipairs(pads) do
+        local skipUntil = Automation._wtDonePads[u.key]
+        if not skipUntil or now >= skipUntil then
+            return u
+        end
+    end
+    return nil
+end
+
+-- Do we need to go collect cash before the next purchase?
+function Automation.WarTycoonAutoBuildWantCash(unit)
+    local now = tick()
+    local since = now - (Automation._wtLastCollect or 0)
+    if since < 3 then return false end
+    local fallback = tonumber(Config.WarTycoonBuild.CollectFallback) or 15
+    if Config.WarTycoonBuild.CollectWhenShort == false then
+        return since >= fallback
+    end
+    if unit and unit.price then
+        local money = Automation.WarTycoonAutoBuildMoney()
+        return (money == nil) or (money < unit.price)
+    end
+    return since >= fallback
+end
+
+function Automation.WarTycoonAutoBuildLoop()
+    task.spawn(function()
+        if not Automation.WarTycoonAutoBuildPriorityOrder[Config.WarTycoonBuild.Priority] then
+            Config.WarTycoonBuild.Priority = "Money"
+        end
+        -- [ v54 ] fresh session stats on every start
+        Automation._wtStats = { purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = tick() }
+        Automation.WarTycoonAutoBuildLog("started. Priority: " .. tostring(Config.WarTycoonBuild.Priority)
+            .. ", TP above pad: +" .. tostring(Config.WarTycoonBuild.Hover) .. " studs", Color3.fromRGB(0, 255, 150))
+        Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  starting...")
+        local stopReason = "stopped by user"
+        while Config.WarTycoonBuild.Enabled and not State.Unloading and IsCurrentInstance() do
+            local limit = Automation.WarTycoonAutoBuildLimitReached()
+            if limit then
+                Automation.WarTycoonAutoBuildLog("stopping: " .. limit, Color3.fromRGB(255, 220, 0))
+                stopReason = limit
+                Config.WarTycoonBuild.Enabled = false
+                -- keep the card switch in sync with the auto-stop
+                local mod = State.Modules and State.Modules["Auto Build"]
+                if mod and mod.Set then pcall(function() mod.Set(false, false, true) end) end
+                break
+            end
+            local ok, err = pcall(function()
+                local base = Automation.WarTycoonAutoBuildBase(false)
+                if not base or not base.Parent then
+                    Automation._wtBase = nil
+                    task.wait(2)
+                    return
+                end
+
+                local pads = Automation.WarTycoonAutoBuildPads(base, false)
+                local unit = nil
+                if #pads > 0 then
+                    unit = Automation.WarTycoonAutoBuildNextPad(pads)
+                end
+
+                if Config.WarTycoonBuild.AutoCollect and Automation.WarTycoonAutoBuildWantCash(unit) then
+                    local collector = Automation.WarTycoonAutoBuildFindCollector(base)
+                    if collector then
+                        Automation.WarTycoonAutoBuildLog("cash is short -> collecting at '" .. collector.Name .. "'", Color3.fromRGB(255, 220, 0))
+                        Automation.WarTycoonAutoBuildUpdateStatus(nil, "collecting cash at '" .. collector.Name .. "'")
+                        Automation.WarTycoonAutoBuildHover(collector)
+                        Automation._wtLastCollect = tick()
+                        task.wait(0.2)
+                        return
+                    end
+                end
+
+                if not unit then
+                    Automation.WarTycoonAutoBuildUpdateStatus(nil, #pads == 0 and "waiting for pads" or "waiting for rebirth")
+                    if #pads == 0 and (tick() - (Automation._wtNoPadLog or 0)) > 30 then
+                        Automation._wtNoPadLog = tick()
+                        Automation.WarTycoonAutoBuildLog("no purchase pads detected - turn on 'Dump pads to F9' to check", Color3.fromRGB(255, 170, 0))
+                    end
+                    if Config.WarTycoonBuild.AutoRebirth then
+                        Automation.WarTycoonAutoBuildTryRebirth()
+                        Automation._wtPads = nil
+                        Automation._wtDonePads = {}
+                        Automation._wtBaseAt = 0
+                    end
+                    task.wait(2.5)
+                    return
+                end
+
+                Automation.WarTycoonAutoBuildTryPad(base, unit)
+            end)
+            if not ok then
+                Automation._wtStats.errors = Automation._wtStats.errors + 1
+                Automation.WarTycoonAutoBuildLog("error: " .. tostring(err), Color3.fromRGB(255, 60, 60))
+                task.wait(1)
+            end
+        end
+        if IsCurrentInstance() and not State.Unloading then
+            Automation.WarTycoonAutoBuildReport(stopReason)
+        end
+        Automation.WarTycoonAutoBuildStatus(nil)
+        Automation.WarTycoonAutoBuildLog("stopped: " .. stopReason, Color3.fromRGB(255, 90, 90))
+    end)
+end
+
+-- Diagnostics
+function Automation.WarTycoonAutoBuildDump()
+    local base = Automation.WarTycoonAutoBuildBase(true)
+    if not base then
+        Automation.WarTycoonAutoBuildLog("dump: own base not found (make sure you are on your own plot)", Color3.fromRGB(255, 80, 80))
+        return
+    end
+    Automation.WarTycoonAutoBuildLog("dump: base " .. tostring(base:GetFullName()))
+    local pads = Automation.WarTycoonAutoBuildScanPads(base)
+    Automation.WarTycoonAutoBuildLog("dump: candidate pads " .. #pads .. " (priority: " .. tostring(Config.WarTycoonBuild.Priority) .. ")")
+    for i, u in ipairs(pads) do
+        print(string.format("[AUTO-BUILD] #%d cat=%-6s price=%-9s label='%s' part=%s",
+            i, tostring(u.cat), tostring(u.price), tostring(u.label or ""),
+            u.part and u.part:GetFullName() or "-"))
+    end
+    local coll = Automation.WarTycoonAutoBuildFindCollector(base)
+    print("[AUTO-BUILD] collector: " .. tostring(coll and coll:GetFullName() or "NOT FOUND"))
+    local names = {}
+    for _, c in ipairs(base:GetChildren()) do
+        names[#names + 1] = c.ClassName .. ":" .. c.Name
+    end
+    print("[AUTO-BUILD] base children (" .. #names .. "): " .. string.sub(table.concat(names, " | "), 1, 900))
+    Automation.WarTycoonAutoBuildLog("dump ready - copy the [AUTO-BUILD] lines from F9 and send them", Color3.fromRGB(0, 255, 150))
+end
+
+-- [ v54 ] OVERMIND USERS
+Automation.BadgePeers = {}
+Automation.BadgeGuis = {}
+Automation.BadgeReady = false
+
+-- [ v77 ] Значки над игроками может отдавать любой из наших сервисов: свой Node на хосте
+-- и воркер на Cloudflare — контракт /api/presence у них один (см. Server/README.md).
+-- Если один лежит (503 «Site temporarily unavailable»), клиент сам берёт второй и запоминает
+-- рабочий, поэтому пауза хостинга воркера больше не ломает модуль Overmind Users.
+Automation.BadgeEndpoints = {
+    "https://site-f8cb0f2505414f00a5c0892490f3376d.freebuff.page/api/presence",
+    "http://node4.waifly.com:25088/api/presence",
+}
+-- [ v73 ] Адрес по умолчанию и запасной: если в настройках лежит мусор (в сохранённых
+-- конфигах встречалось «1»), берём этот и говорим об этом один раз, а не сыпем ошибкой.
+Automation.BadgeDefaultEndpoint = Automation.BadgeEndpoints[1]
+
+-- [ v55 ] The badge tables are created on demand as well
+function Automation.BadgeState()
+    Automation.BadgePeers = Automation.BadgePeers or {}
+    Automation.BadgeGuis = Automation.BadgeGuis or {}
+    return Automation.BadgePeers
+end
+
+function Automation.BadgeIdentity()
+    local lp = Core.LocalPlayer
+    local job = ""
+    pcall(function() job = tostring(game.JobId) end)
+    return {
+        place = tostring(game.PlaceId or 0),
+        job = job,
+        user = tostring(lp and lp.UserId or 0),
+        name = tostring(lp and lp.Name or ""),
+    }
+end
+
+function Automation.BadgeEncode(s)
+    if Core.Services.HttpService and Core.Services.HttpService.UrlEncode then
+        local ok, res = pcall(function() return Core.Services.HttpService:UrlEncode(tostring(s)) end)
+        if ok and res then return res end
+    end
+    return (tostring(s):gsub("[^%w%-%.~_]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- [ v73 ] GET текстом: сначала транспорт исполнителя (тот же, что у Friend System), потом game:HttpGet.
+-- Раньше был только game:HttpGet, и любой его сбой выглядел в островке как «bad response».
+function Automation.HttpGetText(url)
+    local body, err = Automation.FriendSendOnce("GET", url)
+    if body then return body end
+    local ok, raw = pcall(function() return game:HttpGet(url, true) end)
+    if ok and type(raw) == "string" and raw ~= "" then return raw end
+    return nil, tostring(err or raw or "no http transport")
+end
+
+-- [ v77 ] Приводим ЛЮБОЙ адрес в вид ДО запроса (раньше это делалось только для поля настроек).
+function Automation.BadgeNormalizeUrl(raw)
+    local endpoint = tostring(raw or ""):gsub("%s+", "")
+    if endpoint == "" then return nil, "empty endpoint" end
+    -- годится полный URL или хотя бы «host.tld» без схемы
+    if not endpoint:match("^https?://") then
+        if not endpoint:match("^[%w%.%-]+%.[%a][%a]+") then
+            return nil, "endpoint is not a URL: " .. endpoint
+        end
+        endpoint = "https://" .. endpoint
+    end
+    local host, rest = endpoint:match("^(https?://[^/]+)(.*)$")
+    if not host then return nil, "endpoint is not a URL: " .. endpoint end
+    local path, query = rest:match("^([^?]*)(.*)$")
+    path = path:gsub("/+$", "")
+    if path == "" then path = "/api/presence" end   -- корень сервиса отдаёт описание, а не список
+    return host .. path .. query
+end
+
+-- [ v73 ] Строка «1» в поле настроек раньше молча уходила в game:HttpGet и возвращалась
+-- «bad response»; теперь это понятная причина без запроса.
+function Automation.BadgeEndpointUrl()
+    local endpoint = tostring(Config.Badge.Endpoint or ""):gsub("%s+", "")
+    Automation.BadgeEndpointFallback = false
+    local normalized, why = Automation.BadgeNormalizeUrl(endpoint)
+    if not normalized then
+        local builtin = tostring(Automation.BadgeDefaultEndpoint or "")
+        if builtin == "" then
+            if endpoint == "" then return nil, "no endpoint" end
+            return nil, "endpoint is not a URL: " .. endpoint
+        end
+        Automation.BadgeEndpointFallback = true
+        normalized, why = Automation.BadgeNormalizeUrl(builtin)
+        if not normalized then return nil, why end
+    end
+    return normalized
+end
+
+function Automation.BadgeUrlFor(endpoint)
+    local normalized, why = Automation.BadgeNormalizeUrl(endpoint)
+    if not normalized then return nil, why end
+    local id = Automation.BadgeIdentity()
+    local params = table.concat({
+        "place=" .. Automation.BadgeEncode(id.place),
+        "job=" .. Automation.BadgeEncode(id.job),
+        "user=" .. Automation.BadgeEncode(id.user),
+        "name=" .. Automation.BadgeEncode(id.name),
+    }, "&")
+    if Config.Badge.OnlySameServer == false then params = params .. "&any=1" end
+    return normalized .. (normalized:find("?", 1, true) and "&" or "?") .. params
+end
+
+function Automation.BadgeUrl()
+    local endpoint, why = Automation.BadgeEndpointUrl()
+    if not endpoint then return nil, why end
+    return Automation.BadgeUrlFor(endpoint)
+end
+
+function Automation.BadgeParsePeers(body)
+    local text = tostring(body or "")
+    if text == "" then return nil, "empty response - check the endpoint" end
+    local ok, decoded = pcall(function() return Core.Services.HttpService:JSONDecode(text) end)
+    if not ok or type(decoded) ~= "table" then
+        -- [ v73 ] Вместо молчаливого «bad response» показываем начало тела: обычно это HTML
+        -- хостинга или чужой сервис, а не наш API.
+        -- [ v77 ] Если JSON в теле вообще нет — это страница хостинга («Site unavailable»,
+        -- «Site temporarily unavailable»), а не битый ответ. Пишем причину как она есть.
+        local snippet = string.sub((text:gsub("%s+", " ")), 1, 48)
+        if not text:find("{", 1, true) then
+            return nil, "service not answering: " .. snippet
+        end
+        return nil, "not json: " .. snippet
+    end
+    if type(decoded.peers) ~= "table" then
+        local hint = decoded.service and " (this is the service root, use /api/presence)" or ""
+        return nil, "response has no peers field" .. hint
+    end
+    local peers = {}
+    for _, p in ipairs(decoded.peers) do
+        local uid = tonumber(p and p.user)
+        if uid and uid > 0 then
+            peers[uid] = { name = tostring(p.name or ""), seen = tonumber(p.seen) or 0 }
+        end
+    end
+    return peers
+end
+
+-- [ v77 ] Порядок попыток: сначала адрес, который уже ответил (его запоминаем), потом адрес
+-- из настроек, потом остальные наши сервисы. Лежащий воркер поэтому не тормозит цикл:
+-- опрос идёт в живой сервис, а рабочий адрес остаётся выбранным до следующего перезапуска.
+function Automation.BadgeCandidateUrls()
+    local urls, seen = {}, {}
+    local function push(raw)
+        if raw == nil or raw == "" then return end
+        local normalized = Automation.BadgeNormalizeUrl(raw)
+        if normalized and not seen[normalized] then
+            seen[normalized] = true
+            table.insert(urls, normalized)
+        end
+    end
+    push(Automation.BadgeActiveEndpoint)
+    local configured = Automation.BadgeEndpointUrl()
+    push(configured)
+    for _, raw in ipairs(Automation.BadgeEndpoints or {}) do push(raw) end
+    return urls
+end
+
+-- [ v77 ] Один и тот же адрес с противоположной схемой: у нашего хостинга схема только одна
+-- и угадать её нельзя (Cloudflare — https, Waifly — http). Нужна, потому что адрес без схемы
+-- достраивается до https, и тогда http-хостинг вообще не отвечает.
+function Automation.BadgeFlipScheme(endpoint)
+    if endpoint:sub(1, 8) == "https://" then return "http://" .. endpoint:sub(9) end
+    if endpoint:sub(1, 7) == "http://" then return "https://" .. endpoint:sub(8) end
+    return nil
+end
+
+function Automation.BadgeTryEndpoint(endpoint)
+    local url, why = Automation.BadgeUrlFor(endpoint)
+    if not url then return nil, tostring(why or "no endpoint") end
+    local body, err = Automation.HttpGetText(url)
+    if not body then return nil, tostring(err or "no response") end
+    local peers, parseErr = Automation.BadgeParsePeers(body)
+    if not peers then return nil, tostring(parseErr or "bad response") end
+    Automation.BadgePeers = peers
+    Automation.BadgeReady = true
+    Automation.BadgeActiveEndpoint = endpoint
+    return peers
+end
+
+function Automation.BadgePoll()
+    local lastErr = "no endpoint"
+    local tried = {}
+    -- [ v77 ] Вторая схема нужна только там, где схему достроили мы сами: у записанного без
+    -- схемы адреса угадать её нельзя. Встроенные адреса перечислены уже с рабочей схемой, поэтому
+    -- лишних запросов при обычном сбое не добавляется.
+    local rawConfig = tostring(Config.Badge.Endpoint or ""):gsub("%s+", "")
+    local schemeGuessed = rawConfig ~= "" and not rawConfig:match("^https?://")
+    local configured = Automation.BadgeEndpointUrl()
+    for _, endpoint in ipairs(Automation.BadgeCandidateUrls()) do
+        tried[endpoint] = true
+        local peers, err = Automation.BadgeTryEndpoint(endpoint)
+        if peers then return true, peers end
+        lastErr = err
+        if schemeGuessed and endpoint == configured then
+            local flipped = Automation.BadgeFlipScheme(endpoint)
+            if flipped and not tried[flipped] then
+                tried[flipped] = true
+                peers, err = Automation.BadgeTryEndpoint(flipped)
+                if peers then return true, peers end
+                lastErr = err
+            end
+        end
+    end
+    return false, lastErr
+end
+
+function Automation.BadgeRemove(player)
+    Automation.BadgeState()
+    local gui = Automation.BadgeGuis[player]
+    if gui then
+        pcall(function() gui:Destroy() end)
+        Automation.BadgeGuis[player] = nil
+    end
+end
+
+function Automation.BadgeDraw(player, info)
+    Automation.BadgeState()
+    local char = player and player.Character
+    local anchor = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+    if not anchor then
+        Automation.BadgeRemove(player)
+        return
+    end
+
+    local gui = Automation.BadgeGuis[player]
+    if gui and gui.Parent ~= anchor then
+        pcall(function() gui:Destroy() end)
+        Automation.BadgeGuis[player] = nil
+        gui = nil
+    end
+
+    if not gui then
+        gui = Instance.new("BillboardGui")
+        gui.Name = "OvermindBadge"
+        gui.AlwaysOnTop = true
+        gui.MaxDistance = 300
+        gui.StudsOffset = Vector3.new(0, 2.4, 0)
+        gui.Parent = anchor
+
+        local logo = Instance.new("ImageLabel")
+        logo.Name = "Logo"
+        logo.BackgroundTransparency = 1
+        logo.Parent = gui
+
+        local label = Instance.new("TextLabel")
+        label.Name = "Owner"
+        label.BackgroundTransparency = 1
+        label.TextColor3 = Color3.fromRGB(255, 255, 255)
+        label.TextStrokeTransparency = 0.4
+        label.Font = Theme.FontBold
+        label.Parent = gui
+
+        Automation.BadgeGuis[player] = gui
+    end
+
+    local size = math.clamp(tonumber(Config.Badge.Size) or 1, 0.5, 3)
+    local showName = Config.Badge.ShowName ~= false
+    gui.Size = UDim2.new(0, 40 * size, 0, 40 * size + (showName and 14 * size or 0))
+
+    local logo = gui:FindFirstChild("Logo")
+    if logo then
+        logo.Size = UDim2.new(0, 32 * size, 0, 32 * size)
+        logo.Position = UDim2.new(0.5, -16 * size, 0, 0)
+        logo.Image = tostring(Config.Badge.Logo or "")
+        logo.ImageColor3 = Config.Badge.Color or Color3.fromRGB(123, 97, 255)
+    end
+
+    local label = gui:FindFirstChild("Owner")
+    if label then
+        label.Visible = showName
+        label.TextSize = math.max(8, math.floor(11 * size))
+        label.Size = UDim2.new(1, 0, 0, 14 * size)
+        label.Position = UDim2.new(0, 0, 0, 33 * size)
+        label.Text = tostring((info and info.name) or player.Name)
+    end
+end
+
+function Automation.BadgeClearAll()
+    for player in pairs(Automation.BadgeGuis) do
+        Automation.BadgeRemove(player)
+    end
+    Automation.BadgeGuis = {}
+    Automation.BadgePeers = {}
+end
+
+function Automation.BadgeApply()
+    local peers = Automation.BadgeState()
+    local lp = Core.LocalPlayer
+    for _, player in ipairs(Core.Services.Players:GetPlayers()) do
+        local uid = tonumber(player.UserId)
+        local isSelf = (player == lp)
+        if isSelf and Config.Badge.IncludeSelf then
+            Automation.BadgeDraw(player, { name = player.Name })
+        elseif not isSelf and uid and peers[uid] then
+            Automation.BadgeDraw(player, peers[uid])
+        else
+            Automation.BadgeRemove(player)
+        end
+    end
+end
+
+function Automation.BadgeLoop()
+    task.spawn(function()
+        -- [ v73 ] вместо «SET ENDPOINT URL»: если в поле не адрес, транспорт уже работает на
+        -- встроенном — говорим об этом, чтобы игрок знал, какой адрес реально используется
+        Automation.BadgeEndpointUrl()
+        if Automation.BadgeEndpointFallback then
+            _G.Log("Overmind Users: endpoint is not a URL - using the built-in one", Color3.fromRGB(255, 180, 0))
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("BADGE: USING BUILT-IN ENDPOINT", Color3.fromRGB(255, 180, 0))
+            end
+        end
+        while Config.Badge.Enabled and not State.Unloading and IsCurrentInstance() do
+            local ok, res = Automation.BadgePoll()
+            -- [ v73 ] Причину показываем один раз на изменение: при ошибке в настройках
+            -- островок иначе мигал бы каждые 6 секунд.
+            -- [ v77 ] Плюс порог в два провала подряд: хостинг иногда отдаёт 502/503 на одну
+            -- попытку, и одиночный сбой не должен мигать ошибкой поверх живых значков.
+            if ok then
+                Automation.BadgeFailStreak = 0
+                Automation.BadgeLastError = nil
+            else
+                Automation.BadgeFailStreak = (Automation.BadgeFailStreak or 0) + 1
+                local text = tostring(res)
+                if Automation.BadgeFailStreak >= 2 and text ~= Automation.BadgeLastError then
+                    Automation.BadgeLastError = text
+                    _G.Log("Overmind Users: " .. text, Color3.fromRGB(255, 180, 0))
+                    if Internal.ShowIslandNotification then
+                        Internal.ShowIslandNotification("BADGE: " .. text, Color3.fromRGB(255, 180, 0))
+                    end
+                end
+            end
+            Automation.BadgeApply()
+            task.wait(math.clamp(tonumber(Config.Badge.PollSeconds) or 6, 3, 60))
+        end
+        Automation.BadgeClearAll()
+    end)
+end
+
+-- ===========================================================================
+-- [ v65 ] FRIEND SYSTEM: присутствие друзей через свой сервис (Server/)
+-- Раз в ~25 секунд клиент пишет свой статус (кто, где, пинг) на сервер,
+-- вкладка «Друзья» читает статусы по UserId и умеет телепортироваться к другу.
+-- ===========================================================================
+
+-- [ ВАЖНО ] новых верхнеуровневых local здесь нет: в файле их уже 198 при
+-- лимите Luau 200. Всё живёт полями таблиц Automation.* и Internal.*.
+
+Automation.FriendCache = Automation.FriendCache or {}     -- [userId] = статус с сервера
+Automation.FriendPlaces = Automation.FriendPlaces or {}   -- [placeId] = название игры
+Automation.FriendPushFails = Automation.FriendPushFails or 0
+
+function Automation.FriendEndpoint()
+    local url = tostring(Config.Friends.Endpoint or ""):gsub("%s+", "")
+    url = url:gsub("/+$", "")
+    if url == "" then return nil end
+    if not url:match("^https?://") then url = "https://" .. url end
+    -- [ v71 ] Схема на этом порту только одна: хостинг отдаёт обычный HTTP, и https к нему
+    -- падает на рукопожатии (не кодом ответа, а вообще без ответа). Рабочую схему запоминаем
+    -- по строке из настроек, чтобы дальше не пробовать обе на каждом запросе.
+    local learned = Automation.FriendScheme and Automation.FriendScheme[url]
+    if learned then return learned end
+    return url
+end
+
+-- Тот же адрес с противоположной схемой (nil, если это не http/https).
+function Automation.FriendFlipScheme(url)
+    if url:sub(1, 8) == "https://" then return "http://" .. url:sub(9) end
+    if url:sub(1, 7) == "http://" then return "https://" .. url:sub(8) end
+    return nil
+end
+
+function Automation.FriendKeySuffix()
+    local key = tostring(Config.Friends.AuthKey or "")
+    if key == "" then return "" end
+    local encoded = key
+    pcall(function() encoded = Core.Services.HttpService:UrlEncode(key) end)
+    return "?key=" .. encoded
+end
+
+function Automation.FriendUrlEncode(text)
+    local encoded = tostring(text or "")
+    pcall(function() encoded = Core.Services.HttpService:UrlEncode(encoded) end)
+    return encoded
+end
+
+-- [ v72 ] Запрос по любому адресу с разбором JSON — тем же транспортом, что и запросы к нашему серверу.
+function Automation.FriendHttpJson(method, url, body)
+    local raw, err = Automation.FriendSendOnce(method, url, body)
+    if not raw then return nil, tostring(err) end
+    local ok, data = pcall(function() return Core.Services.HttpService:JSONDecode(raw) end)
+    if not ok or type(data) ~= "table" then return nil, "bad json" end
+    return data
+end
+
+-- [ v72 ] НИК -> UserId. Список друзей и сервер держат UserId (он не меняется, в отличие от ника),
+-- но вводить ник удобнее — поэтому ник превращаем в Id: сначала приподнятым API Roblox
+-- (если исполнитель дал серверный identity), затем публичным эндпоинтом через транспорт исполнителя.
+-- Возвращает (id, ник) или (nil, причина).
+function Automation.FriendResolveUserId(text)
+    local name = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then return nil, "empty" end
+    if name:match("^%d+$") then return name end
+    -- в никах Roblox только буквы, цифры и подчёркивание: остальное отсекаем,
+    -- иначе кавычка из поля ввода ломает тело JSON-запроса
+    name = name:gsub("[^%w_]", "")
+    if name == "" then return nil, "not found" end
+
+    local ok, id = pcall(function() return Core.Services.Players:GetUserIdFromNameAsync(name) end)
+    if ok and tonumber(id) and tonumber(id) > 0 then
+        return tostring(math.floor(tonumber(id))), name
+    end
+
+    local payload = string.format('{"usernames":["%s"],"excludeBannedUsers":false}', name)
+    local data, err = Automation.FriendHttpJson("POST", "https://users.roblox.com/v1/usernames/users", payload)
+    if data and type(data.data) == "table" then
+        local first = data.data[1]
+        local found = type(first) == "table" and tonumber(first.id) or nil
+        if found and found > 0 then
+            return tostring(math.floor(found)), tostring(first.name or first.requestedUsername or name)
+        end
+        return nil, "not found"   -- API ответил, но такого ника нет
+    end
+
+    local legacy, err2 = Automation.FriendHttpJson("GET",
+        "https://api.roblox.com/users/get-by-username?username=" .. Automation.FriendUrlEncode(name))
+    if legacy and tonumber(legacy.Id) then
+        return tostring(math.floor(tonumber(legacy.Id))), tostring(legacy.Username or name)
+    end
+    return nil, tostring(err or err2 or "not found")
+end
+
+-- [ v72 ] UserId -> ник на случай, когда Players:GetNameFromUserIdAsync с клиента не работает.
+function Automation.FriendNameFromUserId(userId)
+    local ok, name = pcall(function() return Core.Services.Players:GetNameFromUserIdAsync(tonumber(userId)) end)
+    if ok and type(name) == "string" and name ~= "" then return name end
+    local data = Automation.FriendHttpJson("GET", "https://users.roblox.com/v1/users/" .. tostring(userId))
+    if data and type(data.name) == "string" and data.name ~= "" then return tostring(data.name) end
+    return nil
+end
+
+function Automation.FriendNameOf(userId)
+    local id = tostring(userId)
+    local data = Automation.FriendCache[id]
+    if data and tostring(data.username or "") ~= "" then return tostring(data.username) end
+    local cache = Config.Friends.Names or {}
+    if tostring(cache[id] or "") ~= "" then return tostring(cache[id]) end
+    return "ID " .. id
+end
+
+-- online, inGame, sameServer, placeId, jobId
+function Automation.FriendFacts(userId)
+    local data = Automation.FriendCache[tostring(userId)]
+    local online = (data and data.online == true) or false
+    local placeId = tonumber(data and data.placeId) or 0
+    local jobId = tostring((data and data.gameId) or "")
+    local inGame = online and placeId > 0 and jobId ~= ""
+    local sameServer = inGame and placeId == tonumber(game.PlaceId) and jobId == tostring(game.JobId)
+    return online, inGame, sameServer, placeId, jobId
+end
+
+-- [ ПИНГ ] берём тот же, что показывает Dynamic Island
+function Automation.FriendPing()
+    local ping = tonumber(State.Ping)
+    if ping == nil then
+        local ok, value = pcall(function()
+            return game:GetService("Stats").PerformanceStats.Ping:GetValue()
+        end)
+        if ok then ping = tonumber(value) end
+    end
+    ping = math.round(tonumber(ping) or 0)
+    if ping < 0 then
+        ping = 0
+    elseif ping > 60000 then
+        ping = 60000
+    end
+    return ping
+end
+
+-- [ v69 ] ТРАНСПОРТ ЗАПРОСОВ.
+-- HttpService:PostAsync/GetAsync нельзя вызывать с клиента: сам Roblox отвечает
+-- "Http requests can only be executed by game server". Это не блокировщик сервисов и не сервер —
+-- поэтому сначала берём функцию исполнителя (request / http_request / syn.request / http.request),
+-- а HttpService оставляем последним запасным вариантом: у части исполнителей он подменён и работает.
+Automation.FriendTransport = Automation.FriendTransport or false   -- false = ещё не искали, nil = вариантов нет
+Automation.FriendScheme = Automation.FriendScheme or {}            -- [адрес из настроек] = схема, которая реально отвечает
+
+function Automation.FriendResolveTransport()
+    if Automation.FriendTransport ~= false then return Automation.FriendTransport end
+    local found = nil
+    pcall(function()
+        if type(request) == "function" then
+            found = { Name = "request", Fn = request }
+        elseif type(http_request) == "function" then
+            found = { Name = "http_request", Fn = http_request }
+        elseif type(syn) == "table" and type(syn.request) == "function" then
+            found = { Name = "syn.request", Fn = syn.request }
+        elseif type(http) == "table" and type(http.request) == "function" then
+            found = { Name = "http.request", Fn = http.request }
+        elseif Core.Services.HttpService and Core.Services.HttpService.PostAsync then
+            found = { Name = "HttpService", Fn = nil }
+        end
+    end)
+    Automation.FriendTransport = found or nil
+    Automation.FriendTransportName = found and found.Name or "none"
+    return found
+end
+
+-- Одна попытка конкретным транспортом. Тело ответа или (nil, «почему не вышло»). Никогда не бросает.
+function Automation.FriendSendOnce(method, url, body)
+    local transport = Automation.FriendResolveTransport()
+    if not transport then return nil, "no http transport (need request or http_request)" end
+
+    if transport.Name == "HttpService" then
+        local ok, res = pcall(function()
+            if method == "GET" then
+                return Core.Services.HttpService:GetAsync(url, true)
+            end
+            return Core.Services.HttpService:PostAsync(url, body or "", Enum.HttpContentType.ApplicationJson)
+        end)
+        if not ok then return nil, tostring(res) end
+        return tostring(res)
+    end
+
+    local payload = {
+        Url = url,
+        Method = method,
+        -- [ v73 ] User-Agent как у самого Roblox: часть хостингов режет запросы без
+        -- браузерного UA (Cloudflare отвечал 403 error 1010 на клиентов-ботов).
+        Headers = { ["Content-Type"] = "application/json", ["User-Agent"] = "Roblox/WinInet" },
+    }
+    if body then payload.Body = body end
+
+    local ok, res = pcall(transport.Fn, payload)
+    if not ok then return nil, transport.Name .. ": " .. tostring(res) end
+    if type(res) ~= "table" then
+        -- [ v71 ] Раньше это молчало «bad response». Показываем, что именно вернул исполнитель:
+        -- при https-запросе на http-порт здесь как раз и оказывалось хоть строкой, хоть nil.
+        local what = type(res)
+        if res ~= nil then what = what .. " " .. tostring(res) end
+        return nil, transport.Name .. ": returned " .. what .. " instead of a table (scheme/TLS?)"
+    end
+
+    local status = tonumber(res.StatusCode or res.Status) or 0
+    if status >= 400 then
+        local why = tostring(res.Body or "")
+        if #why > 90 then why = string.sub(why, 1, 90) .. "..." end
+        if why ~= "" then return nil, "http " .. tostring(status) .. ": " .. why end
+        return nil, "http " .. tostring(status)
+    end
+    if res.Success == false and status == 0 then
+        return nil, transport.Name .. ": " .. tostring(res.Body or "request failed")
+    end
+    return tostring(res.Body or "")
+end
+
+-- Возвращает тело ответа или (nil, «почему не вышло»). Никогда не бросает исключение.
+-- [ v71 ] Адрес собирается здесь из базы и пути: только так можно один раз перепробовать обе схемы
+-- и запомнить рабочую. Клиент раньше жёстко брал схему из настроек, а сервер отвечает только по http.
+function Automation.FriendHttpRequest(method, path, body)
+    local base = Automation.FriendEndpoint()
+    if not base then return nil, "no server url" end
+
+    local urls = { base }
+    local alt = Automation.FriendFlipScheme(base)
+    if alt and alt ~= base then table.insert(urls, alt) end
+
+    local lastErr = "no response"
+    for i = 1, #urls do
+        local got, why = Automation.FriendSendOnce(method, urls[i] .. path, body)
+        if got then
+            if i > 1 then
+                -- Заданная схема не ответила, вторая ответила — дальше держимся рабочей.
+                Automation.FriendScheme = Automation.FriendScheme or {}
+                Automation.FriendScheme[base] = urls[i]
+            end
+            return got
+        end
+        lastErr = why
+    end
+    return nil, tostring(lastErr)
+end
+
+function Automation.FriendPush()
+    if not Automation.FriendEndpoint() then return false, "no server url" end
+    local lp = Core.LocalPlayer
+    if not lp then return false, "no local player" end
+
+    local payload = {
+        userId = tostring(lp.UserId),
+        username = tostring(lp.Name),
+        placeId = tostring(game.PlaceId or 0),
+        gameId = tostring(game.JobId or ""),
+        ping = Automation.FriendPing(),
+    }
+    local okEncode, body = pcall(function() return Core.Services.HttpService:JSONEncode(payload) end)
+    if not okEncode or type(body) ~= "string" then return false, "encode failed" end
+
+    local res, httpErr = Automation.FriendHttpRequest("POST", "/update-status" .. Automation.FriendKeySuffix(), body)
+    if not res then return false, tostring(httpErr) end
+    Automation.FriendLastPush = os.time()
+    return true, tostring(res)
+end
+
+function Automation.FriendFetch(userId)
+    if not Automation.FriendEndpoint() then return nil, "no server url" end
+    local body, httpErr = Automation.FriendHttpRequest("GET", "/get-status/" .. tostring(userId) .. Automation.FriendKeySuffix())
+    if not body then return nil, tostring(httpErr) end
+    local okDecode, data = pcall(function() return Core.Services.HttpService:JSONDecode(body) end)
+    if not okDecode or type(data) ~= "table" then return nil, "bad response" end
+    return data
+end
+
+-- ===========================================================================
+-- [ v75 ] ЛИЧНЫЙ СПИСОК ДРУЗЕЙ НА АККАУНТ И ЗАЯВКИ В ДРУЗЬЯ
+-- Папка исполнителя одна на машину, а аккаунтов несколько — поэтому список друзей, имена
+-- и заявки у каждого аккаунта лежат в своей папке Overmind/Accounts/<UserId>/friends.json.
+-- Добавление теперь идёт по согласию: заявка ждёт на сервере, пока вторая сторона не примет
+-- или не отклонит её во вкладке Requests.
+-- ===========================================================================
+Automation.FriendRequests = Automation.FriendRequests or {}   -- входящие: [id] = { name, age }
+Automation.FriendOutgoing = Automation.FriendOutgoing or {}   -- исходящие: [id] = true
+Automation.FriendLinks = Automation.FriendLinks or {}         -- согласованные связи с сервера: [id] = true
+
+function Automation.FriendStoreDir()
+    local lp = Core.LocalPlayer
+    if not lp then return nil end
+    return "Overmind/Accounts/" .. tostring(lp.UserId)
+end
+
+function Automation.FriendsStorePath()
+    local dir = Automation.FriendStoreDir()
+    if not dir then return nil end
+    return dir .. "/friends.json"
+end
+
+-- Запись личного файла: список, имена, заявки, связи. Молча отдаёт false, если writefile недоступен.
+function Automation.FriendsStoreWrite()
+    local path = Automation.FriendsStorePath()
+    if not path or not writefile then return false, "no writefile" end
+    local data = {
+        list = Config.Friends.List or {},
+        names = Config.Friends.Names or {},
+        requests = Automation.FriendRequests or {},
+        outgoing = Automation.FriendOutgoing or {},
+        links = Automation.FriendLinks or {},
+        updated = os.time(),
+    }
+    local okEncode, text = pcall(function() return Core.Services.HttpService:JSONEncode(data) end)
+    if not okEncode or type(text) ~= "string" then return false, "encode failed" end
+    if makefolder then
+        local dir = Automation.FriendStoreDir()
+        if dir then pcall(function() makefolder(dir) end) end
+    end
+    local okWrite, err = pcall(function() writefile(path, text) end)
+    if not okWrite then return false, tostring(err) end
+    return true
+end
+
+-- Чтение личного файла. Игрок без файла получает пустой список и файл создаётся при первом изменении.
+function Automation.FriendsStoreRead()
+    local path = Automation.FriendsStorePath()
+    if not path or not (isfile and readfile) then return false end
+    local okFile = pcall(function() return isfile(path) end)
+    if not okFile then return false end
+    local okRead, text = pcall(readfile, path)
+    if not okRead or type(text) ~= "string" or text == "" then return false end
+    local okDecode, data = pcall(function() return Core.Services.HttpService:JSONDecode(text) end)
+    if not okDecode or type(data) ~= "table" then return false end
+
+    local list = {}
+    for _, raw in ipairs(data.list or {}) do
+        local id = tostring(raw)
+        if id:match("^%d+$") then table.insert(list, tonumber(id) or id) end
+    end
+    Config.Friends.List = list
+    Config.Friends.Names = (type(data.names) == "table") and data.names or {}
+    Automation.FriendRequests = (type(data.requests) == "table") and data.requests or {}
+    Automation.FriendOutgoing = (type(data.outgoing) == "table") and data.outgoing or {}
+    Automation.FriendLinks = (type(data.links) == "table") and data.links or {}
+    return true
+end
+
+-- Один раз на аккаунт: если файла нет — создаём его из текущего состояния конфига.
+function Automation.FriendsStoreEnsure()
+    local me = tostring(Core.LocalPlayer and Core.LocalPlayer.UserId or "")
+    if me == "" or Automation.FriendsStoreLoaded == me then return end
+    Automation.FriendsStoreLoaded = me
+    if Automation.FriendsStoreRead() then
+        _G.Log("Friends: loaded account " .. me .. " - " .. tostring(#(Config.Friends.List or {})) .. " friend(s)",
+            Color3.fromRGB(0, 200, 255))
+    else
+        Automation.FriendsStoreWrite()
+    end
+end
+
+-- [ ЗАЯВКА ] отправка: сервер хранит её, пока вторая сторона не ответит.
+function Automation.FriendHttpJsonBody(fields)
+    local okEncode, body = pcall(function() return Core.Services.HttpService:JSONEncode(fields) end)
+    if not okEncode or type(body) ~= "string" then return nil end
+    return body
+end
+
+function Automation.FriendRequestSend(userId)
+    local lp = Core.LocalPlayer
+    if not lp then return false, "no local player" end
+    if not Automation.FriendEndpoint() then return false, "no server url" end
+
+    local me = tostring(lp.UserId)
+    local to = tostring(userId or "")
+    if to == me then return false, "self" end
+
+    local body = Automation.FriendHttpJsonBody({ from = me, fromName = tostring(lp.Name), to = to })
+    if not body then return false, "encode failed" end
+    local raw, err = Automation.FriendHttpRequest("POST", "/friend-request", body)
+    if not raw then return false, tostring(err) end
+    local okDecode, data = pcall(function() return Core.Services.HttpService:JSONDecode(raw) end)
+    if not okDecode or type(data) ~= "table" then return false, "bad response" end
+
+    local state = tostring(data.state or "sent")
+    if state == "sent" then Automation.FriendOutgoing[to] = true end
+    Automation.FriendsStoreWrite()
+    return true, state
+end
+
+-- [ ОТВЕТ ] принять или отклонить заявку; при принятии связь появляется у обоих.
+function Automation.FriendRespond(fromId, accept)
+    local lp = Core.LocalPlayer
+    if not lp then return false, "no local player" end
+    local from = tostring(fromId or "")
+    if not from:match("^%d+$") then return false, "bad id" end
+
+    local request = Automation.FriendRequests[from]
+    local requestName = type(request) == "table" and request.name or nil
+    local body = Automation.FriendHttpJsonBody({
+        from = from,
+        to = tostring(lp.UserId),
+        accept = accept and true or false,
+    })
+    if not body then return false, "encode failed" end
+
+    local raw, err = Automation.FriendHttpRequest("POST", "/friend-request/respond", body)
+    if not raw then return false, tostring(err) end
+    local okDecode, data = pcall(function() return Core.Services.HttpService:JSONDecode(raw) end)
+    if not okDecode or type(data) ~= "table" then return false, "bad response" end
+
+    Automation.FriendRequests[from] = nil
+    if accept then
+        Automation.FriendLinks[from] = true
+        Automation.FriendOutgoing[from] = nil
+        Internal.FriendsAddById(from, requestName)
+    else
+        Internal.FriendsNotify("REQUEST FROM " .. from .. " DECLINED", true)
+    end
+    Automation.FriendsStoreWrite()
+    if Internal.FriendsRender then Internal.FriendsRender() end
+    return true, accept and "accepted" or "declined"
+end
+
+-- [ РАЗРЫВ ] снять связь на сервере, чтобы партнёр не добавил тебя обратно сам.
+function Automation.FriendUnlink(userId)
+    local lp = Core.LocalPlayer
+    if not lp or not Automation.FriendEndpoint() then return false end
+    local body = Automation.FriendHttpJsonBody({ from = tostring(lp.UserId), to = tostring(userId or "") })
+    if not body then return false end
+    Automation.FriendLinks[tostring(userId)] = nil
+    Automation.FriendUnlinkQueue = Automation.FriendUnlinkQueue or {}
+    table.insert(Automation.FriendUnlinkQueue, body)
+    if Automation.FriendUnlinkBusy then return true end
+    Automation.FriendUnlinkBusy = true
+    task.spawn(function()
+        while #(Automation.FriendUnlinkQueue or {}) > 0 do
+            local queued = table.remove(Automation.FriendUnlinkQueue, 1)
+            Automation.FriendHttpRequest("POST", "/friend-remove", queued)
+            task.wait(0.2)
+        end
+        Automation.FriendUnlinkBusy = false
+        Automation.FriendsStoreWrite()
+    end)
+    return true
+end
+
+-- [ ОПРОС ЗАЯВОК ] входящие, исходящие и согласованные связи с сервера.
+function Automation.FriendRequestsRefresh()
+    if Automation.FriendRequestsBusy then return end
+    local lp = Core.LocalPlayer
+    if not lp or not Automation.FriendEndpoint() then return end
+    Automation.FriendRequestsBusy = true
+    task.spawn(function()
+        local raw = Automation.FriendHttpRequest("GET",
+            "/friend-requests?userId=" .. tostring(lp.UserId) .. Automation.FriendKeySuffix())
+        if raw then
+            local okDecode, data = pcall(function() return Core.Services.HttpService:JSONDecode(raw) end)
+            if okDecode and type(data) == "table" then
+                local incoming, outgoing, links = {}, {}, {}
+                for _, item in ipairs(data.incoming or {}) do
+                    local id = tostring(item and item.from or "")
+                    if id:match("^%d+$") then
+                        incoming[id] = { name = tostring(item.name or ""), age = tonumber(item.ageSeconds) or 0 }
+                    end
+                end
+                for _, item in ipairs(data.outgoing or {}) do
+                    local id = tostring(item and item.to or "")
+                    if id:match("^%d+$") then outgoing[id] = true end
+                end
+                for _, item in ipairs(data.friends or {}) do
+                    local id = tostring(item and item.userId or "")
+                    if id:match("^%d+$") then links[id] = true end
+                end
+
+                Automation.FriendRequests = incoming
+                Automation.FriendOutgoing = outgoing
+
+                -- согласованную связь добавляем себе сами: вторая сторона уже приняла
+                for id in pairs(links) do
+                    if not Automation.FriendLinks[id] then
+                        Automation.FriendLinks[id] = true
+                        local known = (Config.Friends.Names or {})[id]
+                        local pending = (incoming[id] and incoming[id].name) or ""
+                        if not Internal.FriendsHas(id) then
+                            Internal.FriendsAddById(id, known ~= "" and known or pending)
+                        end
+                    end
+                end
+                -- связь разорвали с той стороны — убираем у себя
+                for id in pairs(Automation.FriendLinks) do
+                    if not links[id] then
+                        Automation.FriendLinks[id] = nil
+                        Internal.FriendsRemoveLocal(id)
+                    end
+                end
+
+                Automation.FriendsStoreWrite()
+                if Internal.FriendsRender then Internal.FriendsRender() end
+            end
+        end
+        Automation.FriendRequestsBusy = false
+    end)
+end
+
+-- [ ОПРОС ВСЕХ ] четыре параллельных воркера, чтобы не ждать друзей по очереди
+function Automation.FriendPollOnce(waitFor)
+    local pending = {}
+    for _, id in ipairs(Config.Friends.List or {}) do
+        table.insert(pending, tostring(id))
+    end
+    if #pending == 0 then return end
+
+    local cursor = { index = 0 }
+    local workers = {}
+    for _ = 1, math.clamp(#pending, 1, 4) do
+        table.insert(workers, task.spawn(function()
+            while true do
+                cursor.index = cursor.index + 1
+                local id = pending[cursor.index]
+                if not id then return end
+                local data, err = Automation.FriendFetch(id)
+                if data then
+                    Automation.FriendCache[id] = {
+                        online = data.online == true,
+                        username = tostring(data.username or ""),
+                        placeId = tostring(data.placeId or 0),
+                        gameId = tostring(data.gameId or ""),
+                        ping = tonumber(data.ping) or 0,
+                        ageSeconds = tonumber(data.ageSeconds) or 0,
+                        lastSeen = tonumber(data.lastSeen) or 0,
+                        error = nil,
+                    }
+                    local name = tostring(data.username or "")
+                    if data.online == true and name ~= "" then
+                        Config.Friends.Names = Config.Friends.Names or {}
+                        Config.Friends.Names[id] = name
+                    end
+                else
+                    local cached = Automation.FriendCache[id] or {}
+                    cached.online = false
+                    cached.error = tostring(err)
+                    Automation.FriendCache[id] = cached
+                end
+            end
+        end))
+    end
+
+    if waitFor then
+        for _, worker in ipairs(workers) do
+            while coroutine.status(worker) ~= "dead" do
+                task.wait(0.05)
+            end
+        end
+    end
+end
+
+-- [ ИМЕНА ] у офлайн-друзей имя тянем по UserId и держим в конфиге
+function Automation.FriendResolveNames()
+    if Automation.FriendNamesBusy then return end
+    Automation.FriendNamesBusy = true
+    task.spawn(function()
+        Config.Friends.Names = Config.Friends.Names or {}
+        for _, rawId in ipairs(Config.Friends.List or {}) do
+            local id = tostring(rawId)
+            if Config.Friends.Names[id] == nil then
+                -- [ v72 ] имя пробуем двумя путями (см. Automation.FriendNameFromUserId)
+                local name = Automation.FriendNameFromUserId(id)
+                if type(name) == "string" and name ~= "" then
+                    Config.Friends.Names[id] = name
+                else
+                    Config.Friends.Names[id] = ""
+                end
+                task.wait(0.4)
+            end
+        end
+        Automation.FriendNamesBusy = false
+        if Internal.FriendsRender then Internal.FriendsRender() end
+    end)
+end
+
+-- [ НАЗВАНИЕ ИГРЫ ] по PlaceId, с кэшем; ошибку показываем как "Place <id>"
+function Automation.FriendPlaceName(placeId)
+    local id = tostring(placeId or "0")
+    if id == "" or id == "0" then return nil end
+    if Automation.FriendPlaces[id] then return Automation.FriendPlaces[id] end
+    Automation.FriendPlacesPending = Automation.FriendPlacesPending or {}
+    if not Automation.FriendPlacesPending[id] then
+        Automation.FriendPlacesPending[id] = true
+        task.spawn(function()
+            local ok, info = pcall(function()
+                return Core.Services.MarketplaceService:GetProductInfo(tonumber(id), Enum.InfoType.Asset)
+            end)
+            local name = nil
+            if ok and type(info) == "table" and type(info.Name) == "string" and info.Name ~= "" then
+                name = tostring(info.Name)
+            end
+            Automation.FriendPlaces[id] = name or ("Place " .. id)
+            Automation.FriendPlacesPending[id] = nil
+            if Internal.FriendsRender then Internal.FriendsRender() end
+        end)
+    end
+    return nil
+end
+
+function Automation.FriendStatusText(userId)
+    local data = Automation.FriendCache[tostring(userId)]
+    if not data then return "Status unknown", Color3.fromRGB(107, 114, 128) end
+
+    local online, inGame, sameServer, placeId = Automation.FriendFacts(userId)
+    if not online then
+        local lastSeen = tonumber(data.lastSeen) or 0
+        if lastSeen > 0 then
+            local minutes = math.floor((os.time() - math.floor(lastSeen / 1000)) / 60)
+            if minutes < 1 then minutes = 1 end
+            return "Offline - seen " .. tostring(minutes) .. " min ago", Color3.fromRGB(107, 114, 128)
+        end
+        return "Offline", Color3.fromRGB(107, 114, 128)
+    end
+
+    local pingText = ""
+    local ping = tonumber(data.ping) or 0
+    if ping > 0 then pingText = " - " .. tostring(math.round(ping)) .. " ms" end
+
+    if sameServer then
+        return "In game - same server as you" .. pingText, Color3.fromRGB(74, 222, 128)
+    end
+    if inGame then
+        local placeName = Automation.FriendPlaceName(placeId) or ("Place " .. tostring(placeId))
+        return "In game - " .. placeName .. pingText, Color3.fromRGB(74, 222, 128)
+    end
+    return "Online - in menus" .. pingText, Color3.fromRGB(251, 191, 36)
+end
+
+-- [ JOIN ] телепорт на конкретный сервер игры, где сидит друг
+function Automation.FriendJoin(userId)
+    local id = tostring(userId)
+    local online, inGame, sameServer, placeId, jobId = Automation.FriendFacts(id)
+    if not online then return false, "FRIEND IS OFFLINE" end
+    if sameServer then return false, "YOU ARE ON THE SAME SERVER" end
+    if not inGame then return false, "FRIEND IS NOT IN A GAME" end
+    local ok, err = pcall(function()
+        Core.Services.TeleportService:TeleportToPlaceInstance(placeId, jobId, Core.LocalPlayer)
+    end)
+    if not ok then return false, "TELEPORT FAILED: " .. tostring(err) end
+    return true, "JOINING FRIEND"
+end
+
+-- [ КАРТОЧКА ДРУГА ] ник, статус, пинг, JOIN и крестик
+function Automation.FriendBuildCard(parent, userId, order)
+    local id = tostring(userId)
+    local online, inGame, sameServer = Automation.FriendFacts(id)
+
+    local card = Instance.new("Frame")
+    card.Name = "Friend_" .. id
+    card.Size = UDim2.new(1, 0, 0, 64)
+    card.BackgroundColor3 = CelestialPalette.CardBg
+    card.BorderSizePixel = 0
+    card.LayoutOrder = order
+    card.Parent = parent
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+    local cardStroke = Instance.new("UIStroke", card)
+    cardStroke.Color = CelestialPalette.CardBorder
+    cardStroke.Thickness = 1
+
+    -- [ v76 ] ГОЛОВА ИГРОКА. rbxthumb рисует движок сам: HTTP не нужен, работает для любого userId.
+    -- Тёмный фон — виден круг, даже если аватарка ещё грузится или недоступна.
+    local head = Instance.new("ImageLabel")
+    head.Name = "HeadShot"
+    head.Size = UDim2.fromOffset(36, 36)
+    head.Position = UDim2.fromOffset(10, 14)
+    head.BackgroundColor3 = Color3.fromRGB(26, 26, 34)
+    head.BorderSizePixel = 0
+    head.Image = "rbxthumb://type=AvatarHeadShot&id=" .. id .. "&w=150&h=150"
+    head.Parent = card
+    Instance.new("UICorner", head).CornerRadius = UDim.new(1, 0)
+    local headStroke = Instance.new("UIStroke", head)
+    headStroke.Color = CelestialPalette.CardBorder
+    headStroke.Thickness = 1
+
+    local dot = Instance.new("Frame")
+    dot.Name = "StatusDot"
+    dot.Size = UDim2.fromOffset(8, 8)
+    dot.AnchorPoint = Vector2.new(0.5, 0.5)
+    -- кружок статуса сидит на углу аватарки (её центр 10,14 + 36px), а не отдельно слева
+    dot.Position = UDim2.new(0, 44, 0, 48)
+    if online then
+        dot.BackgroundColor3 = inGame and Color3.fromRGB(74, 222, 128) or Color3.fromRGB(251, 191, 36)
+    else
+        dot.BackgroundColor3 = Color3.fromRGB(107, 114, 128)
+    end
+    dot.Parent = card
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    local dotRing = Instance.new("UIStroke", dot)
+    dotRing.Color = CelestialPalette.CardBg
+    dotRing.Thickness = 2
+
+    -- [ v76 ] текст сдвинут на 58px: 10 отступ + 36 аватар + 12 зазор (было 30)
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -186, 0, 16)
+    nameLabel.Position = UDim2.fromOffset(58, 8)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = Automation.FriendNameOf(id)
+    nameLabel.TextColor3 = CelestialPalette.Text
+    nameLabel.FontFace = CelestialFonts.Bold
+    nameLabel.TextSize = 13
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLabel.Parent = card
+
+    local statusText, statusColor = Automation.FriendStatusText(id)
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -186, 0, 14)
+    statusLabel.Position = UDim2.fromOffset(58, 26)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = statusText
+    statusLabel.TextColor3 = statusColor
+    statusLabel.FontFace = CelestialFonts.Medium
+    statusLabel.TextSize = 11
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    statusLabel.Parent = card
+
+    local idLabel = Instance.new("TextLabel")
+    idLabel.Size = UDim2.new(1, -186, 0, 14)
+    idLabel.Position = UDim2.fromOffset(58, 43)
+    idLabel.BackgroundTransparency = 1
+    idLabel.Text = "@" .. id
+    idLabel.TextColor3 = CelestialPalette.SubText
+    idLabel.FontFace = CelestialFonts.Medium
+    idLabel.TextSize = 10
+    idLabel.TextXAlignment = Enum.TextXAlignment.Left
+    idLabel.Parent = card
+
+    local joinBtn = Instance.new("TextButton")
+    joinBtn.Name = "Join"
+    joinBtn.AnchorPoint = Vector2.new(1, 0.5)
+    joinBtn.Position = UDim2.new(1, -40, 0.5, 0)
+    joinBtn.Size = UDim2.fromOffset(76, 28)
+    joinBtn.Text = sameServer and "HERE" or "JOIN"
+    joinBtn.FontFace = CelestialFonts.Bold
+    joinBtn.TextSize = 11
+    joinBtn.AutoButtonColor = false
+    joinBtn.Parent = card
+    Instance.new("UICorner", joinBtn).CornerRadius = UDim.new(0, 6)
+
+    if inGame and not sameServer then
+        -- [ ИМЯ "Badge" ] так кнопку красит акцент темы (см. updateAccentTheme)
+        joinBtn.Name = "Badge"
+        joinBtn.BackgroundColor3 = Config.Theme.Accent
+        joinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        joinBtn:SetAttribute("Disabled", false)
+        table.insert(Internal.UIObjects.Accents, joinBtn)
+    else
+        joinBtn.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+        joinBtn.TextColor3 = CelestialPalette.SubText
+        joinBtn:SetAttribute("Disabled", true)
+        local joinStroke = Instance.new("UIStroke", joinBtn)
+        joinStroke.Color = CelestialPalette.CardBorder
+        joinStroke.Thickness = 1
+    end
+
+    local removeBtn = Instance.new("TextButton")
+    removeBtn.Name = "Remove"
+    removeBtn.AnchorPoint = Vector2.new(1, 0.5)
+    removeBtn.Position = UDim2.new(1, -8, 0.5, 0)
+    removeBtn.Size = UDim2.fromOffset(24, 24)
+    removeBtn.BackgroundColor3 = Color3.fromRGB(60, 28, 32)
+    removeBtn.Text = "X"
+    removeBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
+    removeBtn.FontFace = CelestialFonts.Bold
+    removeBtn.TextSize = 11
+    removeBtn.AutoButtonColor = false
+    removeBtn.Parent = card
+    Instance.new("UICorner", removeBtn).CornerRadius = UDim.new(0, 6)
+
+    joinBtn.MouseButton1Click:Connect(function()
+        if joinBtn:GetAttribute("Disabled") then
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("JOIN: FRIEND IS NOT IN A GAME", Color3.fromRGB(255, 180, 0))
+            end
+            return
+        end
+        Internal.CelestialPlaySound("click")
+        local ok, message = Automation.FriendJoin(id)
+        _G.Log("Friends: " .. tostring(message), ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+        if Internal.ShowIslandNotification then
+            Internal.ShowIslandNotification(tostring(message), ok and Color3.fromRGB(120, 255, 170) or Color3.fromRGB(255, 120, 120))
+        end
+    end)
+    removeBtn.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if Internal.FriendsRemove then Internal.FriendsRemove(id) end
+    end)
+
+    return card
+end
+
+-- [ СПИСОК ] перерисовка: сначала те, к кому можно прыгнуть
+function Automation.FriendRender()
+    local ui = Internal.Celestial and Internal.Celestial.Friends
+    if not ui or not ui.List then return end
+
+    -- [ v75 ] заявки рисуются первыми: принятая заявка сразу попадает в список друзей ниже
+    if Internal.FriendsRequestRender then Internal.FriendsRequestRender() end
+
+    for _, child in ipairs(ui.List:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+
+    local list = Config.Friends.List or {}
+    local rows = {}
+    local onlineCount = 0
+    for index, rawId in ipairs(list) do
+        local id = tostring(rawId)
+        local online, inGame, sameServer = Automation.FriendFacts(id)
+        if online then onlineCount = onlineCount + 1 end
+        local rank = 4
+        if sameServer then
+            rank = 1
+        elseif inGame then
+            rank = 2
+        elseif online then
+            rank = 3
+        end
+        table.insert(rows, { id = id, rank = rank, order = index })
+    end
+    table.sort(rows, function(a, b)
+        if a.rank ~= b.rank then return a.rank < b.rank end
+        return a.order < b.order
+    end)
+
+    local shown = 0
+    for _, row in ipairs(rows) do
+        local data = Automation.FriendCache[row.id]
+        if (data and data.online) or Config.Friends.ShowOffline ~= false then
+            shown = shown + 1
+            Automation.FriendBuildCard(ui.List, row.id, shown)
+        end
+    end
+
+    ui.Count.Text = tostring(onlineCount) .. " online / " .. tostring(#list)
+    if not Config.Friends.Enabled then
+        ui.Hint.Text = "Friend System is off: turn it on in Gui -> Friend System."
+    elseif not Automation.FriendEndpoint() then
+        ui.Hint.Text = "Set the server URL in Gui -> Friend System."
+    elseif #list == 0 then
+        ui.Hint.Text = "Add by User ID: they accept it in their Requests tab."
+    else
+        ui.Hint.Text = "Ping comes from their Overmind. JOIN works when they are in a game."
+    end
+end
+
+function Automation.FriendRefreshOnce(waitFor)
+    if Config.Friends.Enabled then
+        Automation.FriendPollOnce(waitFor)
+    end
+    if Internal.FriendsRender then Internal.FriendsRender() end
+end
+
+-- [ ЛУП ] PushSeconds — свой статус, PollSeconds — статусы друзей
+function Automation.FriendLoop()
+    if Automation.FriendLoopRunning then return end
+    Automation.FriendLoopRunning = true
+    task.spawn(function()
+        if not Automation.FriendEndpoint() then
+            _G.Log("Friends: set the server URL first", Color3.fromRGB(255, 180, 0))
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("FRIENDS: SET SERVER URL", Color3.fromRGB(255, 180, 0))
+            end
+        end
+        Automation.FriendsStoreEnsure()
+        Automation.FriendResolveNames()
+        local lastPush, lastPoll = -math.huge, -math.huge
+        while Config.Friends.Enabled and not State.Unloading and IsCurrentInstance() do
+            local now = os.clock()
+            local pushEvery = math.clamp(tonumber(Config.Friends.PushSeconds) or 25, 10, 300)
+            local pollEvery = math.clamp(tonumber(Config.Friends.PollSeconds) or 20, 5, 300)
+
+            if now - lastPush >= pushEvery then
+                lastPush = now
+                local ok, err = Automation.FriendPush()
+                if not ok then
+                    task.wait(3)
+                    ok, err = Automation.FriendPush()
+                end
+                if ok then
+                    Automation.FriendPushFails = 0
+                else
+                    Automation.FriendPushFails = (Automation.FriendPushFails or 0) + 1
+                    if Automation.FriendPushFails == 3 then
+                        _G.Log("Friends: status is not reaching the server (" .. tostring(err) .. ")", Color3.fromRGB(255, 120, 120))
+                    end
+                end
+            end
+
+            if now - lastPoll >= pollEvery then
+                lastPoll = now
+                Automation.FriendPollOnce(false)
+                -- [ v75 ] в том же такте тянем заявки и согласованные связи
+                Automation.FriendRequestsRefresh()
+                if Internal.FriendsRender then Internal.FriendsRender() end
+            end
+
+            task.wait(1)
+        end
+        Automation.FriendLoopRunning = false
+    end)
+end
+
+-- [ КНОПКИ ВКЛАДКИ ] вкладка зовёт их через Internal.*
+function Internal.FriendsNotify(text, ok)
+    _G.Log("Friends: " .. tostring(text), ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 180, 0))
+    if Internal.ShowIslandNotification then
+        Internal.ShowIslandNotification(tostring(text), ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 180, 0))
+    end
+end
+
+-- [ v72 ] Добавление по готовому Id; name — ник, если он уже известен (тогда сразу и в кэш).
+Internal.FriendsAddById = function(id, name)
+    id = tostring(id or "")
+    if id == "" then return false end
+    local lp = Core.LocalPlayer
+    if lp and tonumber(id) == tonumber(lp.UserId) then
+        Internal.FriendsNotify("THAT IS YOUR OWN ID", false)
+        return false
+    end
+    Config.Friends.List = Config.Friends.List or {}
+    for _, existing in ipairs(Config.Friends.List) do
+        if tostring(existing) == id then
+            Internal.FriendsNotify("ALREADY IN THE LIST", false)
+            return false
+        end
+    end
+    table.insert(Config.Friends.List, tonumber(id) or id)
+    if type(name) == "string" and name ~= "" then
+        Config.Friends.Names = Config.Friends.Names or {}
+        Config.Friends.Names[id] = name
+    end
+    local label = id
+    if type(name) == "string" and name ~= "" and name ~= id then
+        label = name .. " (" .. id .. ")"
+    end
+    Internal.FriendsNotify(label .. " ADDED", true)
+    Automation.FriendResolveNames()
+    Automation.FriendRefreshOnce(true)
+    return true
+end
+
+-- [ v75 ] Есть ли уже такой Id в списке принятых друзей.
+Internal.FriendsHas = function(userId)
+    local id = tostring(userId or "")
+    for _, existing in ipairs(Config.Friends.List or {}) do
+        if tostring(existing) == id then return true end
+    end
+    return false
+end
+
+-- [ v75 ] Заявка вместо прямого добавления: список меняется только после согласия второй стороны.
+Internal.FriendsRequestById = function(id, name)
+    id = tostring(id or "")
+    if id == "" then return false end
+    local lp = Core.LocalPlayer
+    if lp and tonumber(id) == tonumber(lp.UserId) then
+        Internal.FriendsNotify("THAT IS YOUR OWN ID", false)
+        return false
+    end
+    if Internal.FriendsHas(id) then
+        Internal.FriendsNotify("ALREADY IN THE LIST", false)
+        return false
+    end
+    if Automation.FriendOutgoing and Automation.FriendOutgoing[id] then
+        Internal.FriendsNotify("REQUEST ALREADY SENT, WAITING FOR ACCEPT", false)
+        return false
+    end
+
+    local label = id
+    if type(name) == "string" and name ~= "" and name ~= id then
+        label = name .. " (" .. id .. ")"
+        -- ник запоминаем сразу: строка «sent» в блоке заявок тоже хочет имя, а не Id
+        Config.Friends.Names = Config.Friends.Names or {}
+        Config.Friends.Names[id] = name
+    end
+
+    Internal.FriendsNotify("SENDING REQUEST TO " .. label, true)
+    task.spawn(function()
+        local ok, state = Automation.FriendRequestSend(id)
+        if not ok then
+            Internal.FriendsNotify("REQUEST FAILED: " .. tostring(state), false)
+        elseif state == "sent" then
+            Internal.FriendsNotify("REQUEST SENT TO " .. label, true)
+        elseif state == "already" then
+            -- связь уже есть (приняли с другой машины) — просто вписываем себя
+            Automation.FriendLinks[id] = true
+            Automation.FriendOutgoing[id] = nil
+            Internal.FriendsAddById(id, name)
+        elseif state == "declined" then
+            Internal.FriendsNotify(label .. " DECLINED THE PREVIOUS REQUEST", false)
+        else
+            Internal.FriendsNotify("REQUEST TO " .. label .. ": " .. tostring(state), false)
+        end
+        Automation.FriendsStoreWrite()
+        if Internal.FriendsRender then Internal.FriendsRender() end
+    end)
+    return true
+end
+
+-- В поле добавления годится и Id, и ник: ник сначала превращается в Id (Automation.FriendResolveUserId).
+Internal.FriendsAdd = function(text)
+    local typed = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if typed == "" then return end
+    if typed:match("^%d+$") then
+        Internal.FriendsRequestById(typed)
+        return
+    end
+
+    Internal.FriendsNotify("LOOKING UP " .. string.upper(typed), true)
+    task.spawn(function()
+        local id, nameOrReason = Automation.FriendResolveUserId(typed)
+        if not id then
+            Internal.FriendsNotify("USER NOT FOUND: " .. typed .. " (" .. tostring(nameOrReason) .. ")", false)
+            return
+        end
+        Internal.FriendsRequestById(id, nameOrReason)
+    end)
+end
+
+-- [ v75 ] Ответ на входящую заявку из вкладки: список меняется только по согласию.
+Internal.FriendsRespond = function(fromId, accept)
+    local id = tostring(fromId or "")
+    if id == "" then return false end
+    Internal.FriendsNotify(accept and ("ACCEPTING " .. id) or ("DECLINING " .. id), true)
+    task.spawn(function()
+        local ok, state = Automation.FriendRespond(id, accept and true or false)
+        if not ok then
+            Internal.FriendsNotify("RESPOND FAILED: " .. tostring(state), false)
+        end
+        if Internal.FriendsRender then Internal.FriendsRender() end
+    end)
+    return true
+end
+
+-- [ v75 ] Снятие дружбы: связь рвётся и на сервере, иначе партнёр вписал бы тебя обратно сам.
+Internal.FriendsRemove = function(userId)
+    local id = tostring(userId)
+    if Internal.FriendsRemoveLocal(id) then
+        Internal.FriendsNotify(id .. " REMOVED", true)
+        Automation.FriendUnlink(id)
+        Automation.FriendsStoreWrite()
+    end
+    if Internal.FriendsRender then Internal.FriendsRender() end
+end
+
+-- Тихий вариант: им пользуется синхронизация, когда связь сняли с той стороны.
+Internal.FriendsRemoveLocal = function(userId)
+    local id = tostring(userId or "")
+    for index, existing in ipairs(Config.Friends.List or {}) do
+        if tostring(existing) == id then
+            table.remove(Config.Friends.List, index)
+            if Automation.FriendCache then Automation.FriendCache[id] = nil end
+            return true
+        end
+    end
+    return false
+end
+
+-- [ v75 ] Строка заявки: имя, Id и кнопки ACCEPT/DECLINE (у исходящих — просто «ждёт»).
+Internal.FriendsRequestRow = function(parent, item, order, isIncoming)
+    local label = item.id
+    if item.name ~= "" and item.name ~= item.id then
+        label = item.name .. " (" .. item.id .. ")"
+    end
+
+    local row = Instance.new("Frame")
+    row.Name = (isIncoming and "Request_" or "Sent_") .. item.id
+    row.Size = UDim2.new(1, 0, 0, isIncoming and 34 or 18)
+    row.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
+    row.BackgroundTransparency = isIncoming and 0 or 1
+    row.LayoutOrder = order
+    row.Parent = parent
+
+    if isIncoming then
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+        local stroke = Instance.new("UIStroke", row)
+        stroke.Color = Config.Theme.Accent
+        stroke.Thickness = 1
+        stroke.Transparency = 0.55
+        table.insert(Internal.UIObjects.Accents, stroke)
+    end
+
+    -- [ v76 ] голова игрока перед именем — как в карточке друга, чтобы человека было видно
+    -- до принятия заявки. У исходящих строк она меньше: сама строка всего 18px высотой.
+    local head = Instance.new("ImageLabel")
+    head.Name = "HeadShot"
+    head.Size = UDim2.fromOffset(isIncoming and 22 or 14, isIncoming and 22 or 14)
+    head.Position = UDim2.fromOffset(isIncoming and 8 or 4, isIncoming and 6 or 2)
+    head.BackgroundColor3 = Color3.fromRGB(26, 26, 34)
+    head.BorderSizePixel = 0
+    head.Image = "rbxthumb://type=AvatarHeadShot&id=" .. item.id .. "&w=100&h=100"
+    head.Parent = row
+    Instance.new("UICorner", head).CornerRadius = UDim.new(1, 0)
+    if isIncoming then
+        local headStroke = Instance.new("UIStroke", head)
+        headStroke.Color = CelestialPalette.CardBorder
+        headStroke.Thickness = 1
+    end
+
+    local text = Instance.new("TextLabel")
+    text.Name = "RequestLabel"
+    -- [ ГЕОМЕТРИЯ ] текст начинается после аватарки (38px у входящих, 24 у исходящих),
+    -- справа у входящих остаются те же 180px под ACCEPT+DECLINE (2×74 + отступы)
+    text.Position = UDim2.fromOffset(isIncoming and 38 or 24, 0)
+    text.Size = UDim2.new(1, isIncoming and -218 or -30, 1, 0)
+    text.BackgroundTransparency = 1
+    text.Text = isIncoming and label or ("SENT, WAITING: " .. label)
+    text.TextColor3 = isIncoming and CelestialPalette.Text or CelestialPalette.CategoryText
+    text.FontFace = isIncoming and CelestialFonts.Bold or CelestialFonts.Medium
+    text.TextSize = isIncoming and 11 or 10
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.TextTruncate = Enum.TextTruncate.AtEnd
+    text.Parent = row
+
+    if not isIncoming then return end
+
+    local function makeButton(name, caption, offset, accent)
+        local btn = Instance.new("TextButton")
+        -- [ ВАЖНО ] имя "Badge": updateAccentTheme красит такие кнопки в акцент темы
+        btn.Name = accent and "Badge" or name
+        btn.AnchorPoint = Vector2.new(1, 0)
+        btn.Position = UDim2.new(1, offset, 0, 6)
+        btn.Size = UDim2.fromOffset(74, 22)
+        btn.BackgroundColor3 = accent and Config.Theme.Accent or Color3.fromRGB(40, 41, 55)
+        btn.Text = caption
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.FontFace = CelestialFonts.Bold
+        btn.TextSize = 10
+        btn.AutoButtonColor = false
+        btn.Parent = row
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        if accent then table.insert(Internal.UIObjects.Accents, btn) end
+        return btn
+    end
+
+    local decline = makeButton("Decline", "DECLINE", -8, false)
+    local accept = makeButton("Accept", "ACCEPT", -86, true)
+    accept.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if Internal.FriendsRespond then Internal.FriendsRespond(item.id, true) end
+    end)
+    decline.MouseButton1Click:Connect(function()
+        Internal.CelestialPlaySound("click")
+        if Internal.FriendsRespond then Internal.FriendsRespond(item.id, false) end
+    end)
+end
+
+-- [ v75 ] Перерисовка блока заявок; когда заявок нет — блок скрыт целиком.
+Internal.FriendsRequestRender = function()
+    local ui = Internal.Celestial and Internal.Celestial.Friends
+    if not ui or not ui.Requests or not ui.RequestsList then return end
+
+    for _, child in ipairs(ui.RequestsList:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+
+    local incoming = {}
+    for id, info in pairs(Automation.FriendRequests or {}) do
+        local key = tostring(id)
+        if not Internal.FriendsHas(key) then
+            local name, age = "", 0
+            if type(info) == "table" then
+                name = tostring(info.name or "")
+                age = tonumber(info.age) or 0
+            end
+            table.insert(incoming, { id = key, name = name, age = age })
+        end
+    end
+    table.sort(incoming, function(a, b)
+        if a.age ~= b.age then return a.age < b.age end
+        return a.id < b.id
+    end)
+
+    local outgoing = {}
+    for id in pairs(Automation.FriendOutgoing or {}) do
+        local key = tostring(id)
+        if not Internal.FriendsHas(key) then
+            local info = Automation.FriendRequests[key]
+            local known = ""
+            if type(info) == "table" then known = tostring(info.name or "") end
+            if known == "" then known = tostring((Config.Friends.Names or {})[key] or "") end
+            table.insert(outgoing, { id = key, name = known })
+        end
+    end
+    table.sort(outgoing, function(a, b) return a.id < b.id end)
+
+    local total = #incoming + #outgoing
+    ui.Requests.Visible = total > 0
+    if total == 0 then return end
+
+    if ui.RequestsCount then
+        ui.RequestsCount.Text = #incoming > 0
+            and (tostring(#incoming) .. " waiting for you")
+            or (tostring(#outgoing) .. " sent")
+    end
+
+    local order = 0
+    for _, item in ipairs(incoming) do
+        order = order + 1
+        Internal.FriendsRequestRow(ui.RequestsList, item, order, true)
+    end
+    for _, item in ipairs(outgoing) do
+        order = order + 1
+        Internal.FriendsRequestRow(ui.RequestsList, item, order, false)
+    end
+end
+
+Internal.FriendsRefresh = function()
+    -- [ v75 ] заявки и связи живут на сервере, поэтому их тянем даже при выключенной системе
+    Automation.FriendsStoreEnsure()
+    Automation.FriendRequestsRefresh()
+    if not Config.Friends.Enabled then
+        Internal.FriendsNotify("FRIEND SYSTEM IS OFF", false)
+        return
+    end
+    Internal.FriendsNotify("REFRESHING", true)
+    task.spawn(function()
+        Automation.FriendRefreshOnce(true)
+    end)
+end
+
+Internal.FriendsRender = function()
+    Automation.FriendRender()
+end
+
+-- Ultra-Aggressive Remote Debugger (Direct Method)
+local remoteDebugEnabled = false
+local function setupRemoteDebugger()
+    pcall(function()
+        local function logRemote(self, method, ...)
+            if not remoteDebugEnabled then return end
+            local args = {...}
+            local name = tostring(self.Name)
+
+            -- Вывод в консоль F9
+            print("[OVERMIND SNIFFER] " .. name .. " (" .. method .. ")")
+            for i, v in args do
+                print("  > Arg " .. i .. ": " .. tostring(v) .. " [" .. type(v) .. "]")
+            end
+
+            -- Вывод в наше лог-окно
+            _G.Log("Remote: " .. name, Color3.fromRGB(0, 255, 255))
+        end
+
+        -- Хук FireServer напрямую в класс RemoteEvent
+        local oldFire
+        oldFire = hookfunction(Instance.new("RemoteEvent").FireServer, newcclosure(function(self, ...)
+            logRemote(self, "FireServer", ...)
+            return oldFire(self, ...)
+        end))
+
+        -- Хук InvokeServer напрямую в класс RemoteFunction
+        local oldInvoke
+        oldInvoke = hookfunction(Instance.new("RemoteFunction").InvokeServer, newcclosure(function(self, ...)
+            logRemote(self, "InvokeServer", ...)
+            return oldInvoke(self, ...)
+        end))
+
+        _G.Log("Debugger: HOOKED SUCCESS", Color3.fromRGB(0, 255, 0))
+    end)
+end
+setupRemoteDebugger()
+
+function Automation.pickCarTerminal(lp)
+    local terminal, promptObj = nil, nil
+    local lpName, lpId = lp.Name, tostring(lp.UserId)
+    local lpTeamName = lp.Team and lp.Team.Name or nil
+
+    local function fixCarSpawnerEnabled(spawnerPart)
+        if spawnerPart and spawnerPart:IsA("BasePart") then
+            pcall(function()
+                if not spawnerPart:FindFirstChild("Enabled") then
+                    local bv = Instance.new("BoolValue")
+                    bv.Name = "Enabled"
+                    bv.Value = true
+                    bv.Parent = spawnerPart
+                    print("[OVERMIND] Fixed game bug: Created missing 'Enabled' BoolValue in " .. spawnerPart:GetFullName())
+                end
+            end)
+        end
+    end
+
+    local function ownerOf(node)
+        local curr = node
+        local depth = 0
+        while curr and depth < 8 do
+            -- 1. Attributes
+            local o = curr:GetAttribute("Owner")
+            if o ~= nil then return tostring(o) end
+            for _, attr in { "ownerId", "OwnerId", "ownerUserId", "OwnerUserId", "userId", "UserId", "Player", "Team" } do
+                o = curr:GetAttribute(attr)
+                if o ~= nil then return tostring(o) end
+            end
+
+            -- 2. ValueBase instances
+            for _, childName in { "Owner", "owner", "OwnerValue", "Player", "TycoonOwner", "UserId", "userId", "OwnerUserId", "Team", "TeamValue" } do
+                local val = curr:FindFirstChild(childName)
+                if val and val:IsA("ValueBase") then
+                    if val:IsA("ObjectValue") then
+                        if val.Value == lp or val.Value == lp.Character then
+                            return lpName
+                        end
+                    elseif val:IsA("StringValue") then
+                        local sVal = tostring(val.Value)
+                        if sVal:lower() == lpName:lower() or sVal == lpId or (lpTeamName and sVal:lower() == lpTeamName:lower()) then
+                            return lpName
+                        end
+                    elseif val:IsA("IntValue") or val:IsA("NumberValue") then
+                        if tostring(val.Value) == lpId then
+                            return lpName
+                        end
+                    end
+                end
+            end
+
+            -- 3. Model/Folder name matching lpName or lpTeamName (e.g. "Alpha"
+            if curr:IsA("Model") or curr:IsA("Folder") then
+                local nLower = curr.Name:lower()
+                if nLower:find(lpName:lower(), 1, true) or (lpTeamName and (nLower == lpTeamName:lower() or nLower:find(lpTeamName:lower(), 1, true))) then
+                    return lpName
+                end
+            end
+
+            curr = curr.Parent
+            depth += 1
+        end
+        return nil
+    end
+
+    -- 1. Сначала ищем СВОЙ ТАЙКУН в workspace (например
+    local myTycoon = nil
+    for _, obj in workspace:GetDescendants() do
+        if obj:IsA("Model") and (obj.Parent and (obj.Parent.Name == "Tycoons" or obj.Parent.Name == "Tycoon" or obj.Parent.Name == "Bases")) then
+            local o = ownerOf(obj)
+            if o and (o == lpName or o == lpId or o:lower() == lpName:lower()) then
+                myTycoon = obj
+                print("[OVERMIND] My Tycoon found: " .. myTycoon:GetFullName())
+                break
+            end
+        end
+    end
+
+    local searchScope = myTycoon and myTycoon:GetDescendants() or workspace:GetDescendants()
+    local targetVeh = (Config.VehiclesFarm.Vehicle or "MRZR Buggy"):lower()
+
+    -- Исправляем возможные отсутствующие Enabled во всех найденных спавнерах
+    for _, v in ipairs(searchScope) do
+        if v:IsA("BasePart") then
+            local n = v.Name:lower()
+            if n:find("spawner") or n:find("spawnpad") then
+                fixCarSpawnerEnabled(v)
+            end
+        end
+    end
+
+    -- 2. Поиск спавнера в пределах СВОЕГО тайкуна под целевой тип техники (игнорируя дроны)
+    local found = 0
+    local candidates = {}
+
+    for _, v in ipairs(searchScope) do
+        if v:IsA("BasePart") then
+            local n = v.Name:lower()
+            local bad = (v:FindFirstAncestor("Drone") ~= nil) or (v:FindFirstAncestor("UAV") ~= nil) or n:find("drone")
+
+            if not bad and (n == "carspawner" or n == "vehiclespawner" or n == "helispawner" or n == "planespawner" or n == "spawner") then
+                found += 1
+                local p = v:FindFirstChildOfClass("ProximityPrompt")
+                    or (v.Parent and v.Parent:FindFirstChildOfClass("ProximityPrompt"))
+                    or v:FindFirstChildWhichIsA("ProximityPrompt", true)
+
+                local priority = 1
+                if targetVeh:find("heli") or targetVeh:find("chopper") then
+                    if n:find("heli") then priority = 10 end
+                elseif targetVeh:find("plane") or targetVeh:find("jet") then
+                    if n:find("plane") then priority = 10 end
+                else
+                    if n == "carspawner" or n == "vehiclespawner" then priority = 10 end
+                end
+
+                table.insert(candidates, { v = v, p = p, priority = priority })
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b) return a.priority > b.priority end)
+
+    if #candidates > 0 then
+        terminal = candidates[1].v
+        promptObj = candidates[1].p
+    end
+
+    return terminal, promptObj, found
+end
+
+-- [ v46 ] ПРЯМОЙ СПАВН ТЕХНИКИ
+function Automation.TryDirectMountSpawn(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local fired = {}
+
+    -- 1) СЫРОЙ РЕМОУТ
+    pcall(function()
+        local svc = RS:FindFirstChild("Packages")
+        svc = svc and svc:FindFirstChild("Knit")
+        svc = svc and svc:FindFirstChild("Services")
+        svc = svc and svc:FindFirstChild("MountService")
+        local refolder = svc and svc:FindFirstChild("RE")
+        local remote = refolder and refolder:FindFirstChild("SpawnMount")
+        if not remote then
+            print("[SPAWN-DIRECT] not found " .. tostring(refolder and refolder:GetFullName() or "Knit.Services.MountService.RE") .. ".SpawnMount")
+            return
+        end
+        if remote:IsA("RemoteEvent") then
+            remote:FireServer(name)
+            table.insert(fired, "raw:RemoteEvent " .. remote:GetFullName())
+        elseif remote:IsA("RemoteFunction") then
+            remote:InvokeServer(name)
+            table.insert(fired, "raw:RemoteFunction " .. remote:GetFullName())
+        end
+    end)
+
+    -- 2) если сырой ремоут не найден
+    if #fired == 0 then
+        pcall(function()
+            local pk = RS:FindFirstChild("Packages")
+            local knitMod = pk and pk:FindFirstChild("Knit")
+            if not knitMod then return end
+            local Knit = require(knitMod)
+            local MountService = Knit.GetService("MountService")
+            if MountService and MountService.SpawnMount and type(MountService.SpawnMount.Fire) == "function" then
+                MountService.SpawnMount:Fire(name)
+                table.insert(fired, "knit:SpawnMount")
+            end
+        end)
+    end
+
+    if #fired > 0 then
+        print("[SPAWN-DIRECT] sent (" .. table.concat(fired, " | ") .. ") mount='" .. name .. "'")
+        return true
+    end
+    print("[SPAWN-DIRECT] direct spawn unavailable -> falling back to the UI flow")
+    return false
+end
+-- [ v48 ] TP AFTER SPAWN + авто-цикл после смерти
+function Automation.ParseCFrameString(s)
+    if type(s) ~= "string" or s == "" then return nil end
+    local nums = {}
+    for n in string.gmatch(s, "%-?%d+%.?%d*") do
+        local v = tonumber(n)
+        if v then
+            nums[#nums + 1] = v
+        end
+        if #nums >= 12 then break end
+    end
+    if #nums >= 12 then
+        local ok, cf = pcall(CFrame.new, nums[1], nums[2], nums[3], nums[4], nums[5], nums[6],
+            nums[7], nums[8], nums[9], nums[10], nums[11], nums[12])
+        if ok and cf then return cf end
+    end
+    if #nums >= 3 then
+        local ok, cf = pcall(CFrame.new, nums[1], nums[2], nums[3])
+        if ok and cf then return cf end
+    end
+    return nil
+end
+
+-- [ v49 ] Едем ли мы в технике прямо сейчас
+function Automation.IsSeatedInVehicle()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if hum.SeatPart then return true end
+    return hum.Sit == true
+end
+
+-- [ v49 ] Модель техники
+function Automation.GetRidingVehicle()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    local function asVehicleModel(part)
+        if not part then return nil end
+        local model = part:FindFirstAncestorOfClass("Model")
+        local guard = 0
+        while model and (model == char or model:IsDescendantOf(char)) and guard < 8 do
+            model = model.Parent and model.Parent:FindFirstAncestorOfClass("Model") or nil
+            guard = guard + 1
+        end
+        return model
+    end
+
+    -- 1) сиденье
+    if hum and hum.SeatPart then
+        local m = asVehicleModel(hum.SeatPart)
+        if m then return m end
+    end
+
+    -- 2) любое сиденье/VehicleSeat
+    if hum then
+        for _, v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("Seat") or v:IsA("VehicleSeat") then
+                local ok, occ = pcall(function() return v.Occupant end)
+                if ok and occ == hum then
+                    local m = asVehicleModel(v)
+                    if m then return m end
+                end
+            end
+        end
+    end
+
+    -- 3) свежая модель техники рядом с нами (игра могла ещё не посадить игрока)
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local targetName = tostring(Config.VehiclesFarm.Vehicle or ""):lower()
+    if hrp and targetName ~= "" then
+        local best, bestDist = nil, math.huge
+        for _, v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("Model") and v ~= char and not v:IsDescendantOf(char) then
+                local seat = v:FindFirstChildWhichIsA("Seat", true)
+                local isVeh = seat or v:FindFirstChild("Chassis") or v:FindFirstChild("Body")
+                if isVeh and v.Name:lower():find(targetName, 1, true) then
+                    local ok, pivot = pcall(function() return v:GetPivot() end)
+                    if ok then
+                        local d = (pivot.Position - hrp.Position).Magnitude
+                        if d < 250 and d < bestDist then
+                            best, bestDist = v, d
+                        end
+                    end
+                end
+            end
+        end
+        if best then return best end
+    end
+    return nil
+end
+
+-- [ v49 ] Телепорт на сохранённые координаты
+function Automation.TeleportToCoords(s, attempts)
+    local cf = Automation.ParseCFrameString(s)
+    if not cf then return false, "could not parse the coordinates" end
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    if not char then return false, "character not found" end
+
+    attempts = math.max(1, tonumber(attempts) or 4)
+    local lastErr = "teleport did not happen"
+
+    for i = 1, attempts do
+        local veh = Automation.GetRidingVehicle()
+        local label = veh and ("vehicle '" .. tostring(veh.Name) .. "'") or "character"
+
+        -- 1) забираем сетевую власть у частей техники (иначе сервер откатит позицию)
+        if veh then
+            for _, p in ipairs(veh:GetDescendants()) do
+                if p:IsA("BasePart") then
+                    pcall(function() p:SetNetworkOwner(lp) end)
+                end
+            end
+            if veh.PrimaryPart then
+                pcall(function() veh.PrimaryPart.AssemblyLinearVelocity = Vector3.zero end)
+            end
+        end
+
+        -- 2) сам телепорт
+        local moved = false
+        if veh then
+            moved = pcall(function() veh:PivotTo(cf) end)
+        end
+        if not moved then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+                moved = pcall(function() hrp.CFrame = cf end)
+            end
+            if not moved then
+                moved = pcall(function() char:PivotTo(cf) end)
+            end
+        end
+
+        -- 3) проверяем факт
+        task.wait(0.15)
+        local nowPos
+        local veh2 = Automation.GetRidingVehicle()
+        if veh2 then
+            local ok, pivot = pcall(function() return veh2:GetPivot() end)
+            if ok then nowPos = pivot.Position end
+        else
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then nowPos = hrp.Position end
+        end
+        local dist = nowPos and (nowPos - cf.Position).Magnitude or nil
+        print(string.format("[TP-AFTER-SPAWN] attempt %d/%d: %s %s, distance to target %.1f studs",
+            i, attempts, label, moved and "moved" or "NOT moved", dist or -1))
+
+        if dist and dist <= 15 then
+            return true
+        end
+        if dist then
+            lastErr = string.format("did not arrive: %.1f studs left", dist)
+        else
+            lastErr = moved and "target disappeared after the teleport" or "teleport did not happen"
+        end
+        task.wait(0.35)
+    end
+    return false, lastErr
+end
+
+-- [ v49 ] Спавн -> ждём посадку в технику -> TP -> (цикл ждёт смерть и повторяет)
+function Automation.TpAfterSpawnRoutine()
+    local try = (Automation._tpSeq or 0) + 1
+    Automation._tpSeq = try
+    local delaySec = tonumber(Config.VehiclesFarm.TpDelay) or 1.0
+
+    task.spawn(function()
+        task.wait(delaySec)
+        if Automation._tpSeq ~= try then return end
+        if not (Config.VehiclesFarm.Enabled and Config.VehiclesFarm.TpAfterSpawn) then return end
+        if (Config.VehiclesFarm.TpCoords or "") == "" then return end
+
+        -- ждём, пока игра посадит нас в заспавненную технику (до 3 с)
+        local waited = 0
+        while waited < 3 and not Automation.IsSeatedInVehicle() do
+            if Automation._tpSeq ~= try then return end
+            task.wait(0.2)
+            waited = waited + 0.2
+        end
+        if waited >= 3 then
+            print("[TP-AFTER-SPAWN] seat not confirmed within 3 s - teleporting what we have")
+        end
+        if Automation._tpSeq ~= try then return end
+
+        local ok, err = Automation.TeleportToCoords(Config.VehiclesFarm.TpCoords)
+        if ok then
+            print(string.format("[TP-AFTER-SPAWN] teleport done (delay %.1f + wait %.1f s)", delaySec, waited))
+            if _G.Log then pcall(_G.Log, "TP: teleport done", Color3.fromRGB(0, 255, 150)) end
+        else
+            print("[TP-AFTER-SPAWN] FAILED: " .. tostring(err))
+            if _G.Log then pcall(_G.Log, "TP: FAILED - " .. tostring(err), Color3.fromRGB(255, 80, 80)) end
+        end
+    end)
+end
+
+-- [ v48 ] Цикл
+function Automation.SpawnTpLoop()
+    if Automation._tpLoopActive then return end
+    Automation._tpLoopActive = true
+
+    task.spawn(function()
+        local Players_ = game:GetService("Players")
+        local function log(msg)
+            print("[TP-CYCLE] " .. tostring(msg))
+            if _G.Log then pcall(_G.Log, "TP: " .. tostring(msg), Color3.fromRGB(0, 220, 190)) end
+        end
+
+        local function active()
+            return Config.VehiclesFarm.Enabled and Config.VehiclesFarm.TpAfterSpawn
+                and not State.Unloading and IsCurrentInstance()
+        end
+
+        log("loop started (spawn -> TP -> wait for death -> repeat)")
+
+        while active() do
+            local lp = Players_.LocalPlayer
+            local char = lp and lp.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+            -- 1) живы -> спавним (SpawnVehicle сам телепортирует
+            if hum and hum.Health > 0 then
+                Automation.SpawnVehicle(Config.VehiclesFarm.Vehicle)
+            end
+
+            -- 2) ждём смерть текущего персонажа
+            local conn
+            local died = false
+            local curChar = lp and lp.Character
+            local curHum = curChar and curChar:FindFirstChildOfClass("Humanoid")
+            if curHum then
+                pcall(function() conn = curHum.Died:Connect(function() died = true end) end)
+                local deadline = tick() + 300
+                while active() and not died and tick() < deadline do
+                    if not curHum.Parent or (curHum.Health or 0) <= 0 then
+                        died = true
+                        break
+                    end
+                    task.wait(0.2)
+                end
+                if conn then pcall(function() conn:Disconnect() end) end
+            else
+                task.wait(1)
+            end
+
+            if not active() then break end
+            log("death detected -> waiting for respawn")
+
+            -- 3) ждём новый живой персонаж
+            local waited = 0
+            repeat
+                task.wait(0.2)
+                waited = waited + 0.2
+                lp = Players_.LocalPlayer
+                char = lp and lp.Character
+                hum = char and char:FindFirstChildOfClass("Humanoid")
+            until (hum and hum.Health > 0) or waited > 20 or not active()
+
+            task.wait(0.4)
+        end
+
+        Automation._tpLoopActive = false
+        log("loop stopped")
+    end)
+end
+
+function Automation.SpawnVehicle(name)
+    -- [ v46 ] Сначала ПРЯМОЙ спавн через Knit MountService.SpawnMount
+    if Automation.TryDirectMountSpawn(name) then
+        -- [ v49 ] TP After Spawn
+        if Config.VehiclesFarm.TpAfterSpawn == true and (Config.VehiclesFarm.TpCoords or "") ~= "" then
+            Automation.TpAfterSpawnRoutine()
+        end
+        return
+    end
+    task.spawn(function()
+        local fired = false
+        local startTime = tick()
+
+        local function safeLog(msg, color)
+            if _G.Log then pcall(_G.Log, msg, color) end
+        end
+
+        -- Helper to click any GuiObject or GuiButton with Native GuiService Selection & VIM
+        local function safeClick(obj)
+            if not obj or typeof(obj) ~= "Instance" then return end
+
+            -- 1. GuiService.SelectedObject + Return Key (Native Roblox UI Activation)
+            pcall(function()
+                local guiService = game:GetService("GuiService")
+                local vim = game:GetService("VirtualInputManager")
+                local targetBtn = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj
+                guiService.SelectedObject = targetBtn
+                task.wait(0.04)
+                vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                task.wait(0.04)
+                vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+                guiService.SelectedObject = nil
+            end)
+
+            -- 2. VirtualInputManager MouseClick at exact center
+            if obj:IsA("GuiObject") and obj.AbsoluteSize.X > 0 and obj.AbsoluteSize.Y > 0 then
+                local cx = obj.AbsolutePosition.X + obj.AbsoluteSize.X / 2
+                local cy = obj.AbsolutePosition.Y + obj.AbsoluteSize.Y / 2
+
+                pcall(function()
+                    print(string.format("[SPAWN-CLICK] VIM MouseClick at (%d, %d) on %s", cx, cy, obj:GetFullName()))
+                    local vim = game:GetService("VirtualInputManager")
+                    vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+                    task.wait(0.05)
+                    vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                end)
+            end
+
+            -- 3. firesignal (if supported)
+            if firesignal and obj:IsA("GuiButton") then
+                pcall(function() firesignal(obj.MouseButton1Down) end)
+                pcall(function() firesignal(obj.MouseButton1Up) end)
+                pcall(function() firesignal(obj.MouseButton1Click) end)
+                pcall(function() firesignal(obj.Activated) end)
+            end
+
+            -- 4. getconnections (executor-agnostic)
+            if getconnections then
+                for _, evName in ipairs({ "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated", "TouchTap" }) do
+                    pcall(function()
+                        local ok, sig = pcall(function() return obj[evName] end)
+                        if ok and sig and typeof(sig) == "RBXScriptSignal" then
+                            local okC, conns = pcall(getconnections, sig)
+                            if okC and type(conns) == "table" then
+                                for _, c in ipairs(conns) do
+                                    pcall(function()
+                                        if type(c) == "table" or typeof(c) == "RBXScriptConnection" or type(c) == "userdata" then
+                                            if type(c.Fire) == "function" then
+                                                c:Fire()
+                                            elseif type(c.Function) == "function" then
+                                                c.Function()
+                                            end
+                                        end
+                                    end)
+                                end
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+
+
+        safeLog("Vehicles Farm: Spawning " .. name, Color3.fromRGB(255, 255, 0))
+
+        -- Снимок моделей workspace ДО спавна
+        local preModels = {}
+        pcall(function()
+            for _, m in workspace:GetDescendants() do
+                if m:IsA("Model") and m.Name:lower():find(name:lower(), 1, true) then
+                    preModels[m] = true
+                end
+            end
+        end)
+
+        local function checkNewModel(timeoutSec)
+            local deadline = tick() + (timeoutSec or 4)
+            while tick() < deadline do
+                task.wait(0.4)
+                for _, m in workspace:GetDescendants() do
+                    if m:IsA("Model") and m.Name:lower():find(name:lower(), 1, true) and not preModels[m] then
+                        return m
+                    end
+                end
+            end
+            return nil
+        end
+
+        -- 1. АСИНХРОННЫЙ ВЫЗОВ REMOTES KNIT (без задержек)
+        pcall(function()
+            local knitServices = RS:FindFirstChild("Packages") and RS.Packages:FindFirstChild("Knit") and RS.Packages.Knit:FindFirstChild("Services")
+            if knitServices then
+                for _, service in ipairs(knitServices:GetChildren()) do
+                    local sName = service.Name:lower()
+                    if sName:find("mount") or sName:find("spawner") or sName:find("vehicle") or sName:find("tycoon") then
+                        local reFolder = service:FindFirstChild("RE")
+                        if reFolder then
+                            for _, re in ipairs(reFolder:GetChildren()) do
+                                if re:IsA("RemoteEvent") then
+                                    pcall(function() re:FireServer(name) end)
+                                    pcall(function() re:FireServer(name, "Default") end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+
+        local function isGuiVisible(gui)
+            if not gui or not gui:IsA("GuiObject") then return false end
+            if gui.AbsoluteSize.X <= 5 or gui.AbsoluteSize.Y <= 5 then return false end
+            local curr = gui
+            while curr and curr:IsA("GuiObject") do
+                if not curr.Visible then return false end
+                curr = curr.Parent
+            end
+            return true
+        end
+
+        local function isBadAncestor(v)
+            local bad = false
+            pcall(function()
+                bad = (v:FindFirstAncestor("DroneSpawner") ~= nil)
+                    or (v:FindFirstAncestor("LargeDroneSpawner") ~= nil)
+                    or (v:FindFirstAncestor("GunshipSelectionInterface") ~= nil)
+                    or (v:FindFirstAncestor("ProximityPrompts") ~= nil)
+                    or (v:FindFirstAncestor("ProximityPrompt") ~= nil)
+                    or (v:FindFirstAncestor("Prompt") ~= nil)
+                    or (v.Name:lower():find("proximity") ~= nil)
+            end)
+            return bad
+        end
+
+        -- 2. МГНОВЕННЫЙ ГРАФИЧЕСКИЙ КЛИК ПО UI MountSpawner
+        while tick() - startTime < 10 and not fired and not State.Unloading do
+            local pg = Core.LocalPlayer:FindFirstChild("PlayerGui")
+            if not pg then break end
+
+            local mountSpawner = pg:FindFirstChild("MountSpawner", true)
+                or pg:FindFirstChild("VehicleSpawner", true)
+                or pg:FindFirstChild("Spawner", true)
+
+            if mountSpawner and not isGuiVisible(mountSpawner) then
+                pcall(function() mountSpawner.Visible = true end)
+            end
+
+            -- ШАГ 1: Выбор техники в списке UI
+            local vehicleSelected = false
+            local searchRoot = mountSpawner or pg
+            for _, v in ipairs(searchRoot:GetDescendants()) do
+                if v:IsA("GuiObject") and isGuiVisible(v) and not isBadAncestor(v) then
+                    local text = ""
+                    if v:IsA("TextButton") or v:IsA("TextLabel") then text = v.Text:lower() end
+                    for _, desc in ipairs(v:GetDescendants()) do
+                        if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                            text = text .. " " .. desc.Text:lower()
+                        end
+                    end
+
+                    if text:find(name:lower(), 1, true) or v.Name:lower():find(name:lower(), 1, true) then
+                        local clickTarget = v:IsA("GuiButton") and v or v:FindFirstAncestorWhichIsA("GuiButton") or v
+                        print(string.format("[SPAWN-STEP 1] Selecting vehicle '%s' at %s", name, clickTarget:GetFullName()))
+                        safeClick(clickTarget)
+                        vehicleSelected = true
+                        break
+                    end
+                end
+            end
+
+            if vehicleSelected then task.wait(0.3) end
+
+            -- ШАГ 2: ПРЯМОЕ НАЖАТИЕ SpawnMountButton В MountSpawner
+            local spawnBtn = nil
+            if mountSpawner then
+                spawnBtn = mountSpawner:FindFirstChild("SpawnMountButton", true)
+                    or mountSpawner:FindFirstChild("SpawnButton", true)
+                    or mountSpawner:FindFirstChild("Spawn", true)
+            end
+
+            -- Если не нашли точный SpawnMountButton
+            if not spawnBtn then
+                local spawnArea = 0
+                for _, v in ipairs(searchRoot:GetDescendants()) do
+                    if v:IsA("GuiObject") and isGuiVisible(v) and not isBadAncestor(v) then
+                        local ownText = v.Name:lower()
+                        if v:IsA("TextButton") or v:IsA("TextLabel") then ownText = ownText .. " " .. v.Text:lower() end
+                        for _, desc in ipairs(v:GetDescendants()) do
+                            if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                                ownText = ownText .. " " .. desc.Text:lower()
+                            end
+                        end
+
+                        if (ownText:find("spawn") or ownText:find("спавн") or ownText:find("deploy"))
+                            and not ownText:find("dock") and not ownText:find("req") then
+
+                            local area = v.AbsoluteSize.X * v.AbsoluteSize.Y
+                            if area > spawnArea then
+                                spawnArea = area
+                                spawnBtn = v
+                            end
+                        end
+                    end
+                end
+            end
+
+            if spawnBtn then
+                local clickObj = spawnBtn:IsA("GuiButton") and spawnBtn or spawnBtn:FindFirstAncestorWhichIsA("GuiButton") or spawnBtn
+                print(string.format("[SPAWN-STEP 2] Clicking SPAWN button: %s", clickObj:GetFullName()))
+                safeClick(clickObj)
+                safeClick(spawnBtn)
+                fired = true
+            end
+
+            if not fired then task.wait(0.5) end
+        end
+
+        -- ПРОВЕРКА ФАКТА
+        if fired then
+            local newModel = checkNewModel(5)
+            if newModel then
+                safeLog("Vehicles Farm: Spawn CONFIRMED (new model in workspace)", Color3.fromRGB(0, 255, 150))
+            else
+                safeLog("Vehicles Farm: click sent, waiting for the vehicle to appear...", Color3.fromRGB(255, 160, 0))
+            end
+        else
+            safeLog("Vehicles Farm: Spawn failed (button not found in the UI)", Color3.fromRGB(255, 50, 50))
+        end
+
+        -- [ v49 ] TP After Spawn работает и при спавне через UI
+        if Config.VehiclesFarm.TpAfterSpawn == true and (Config.VehiclesFarm.TpCoords or "") ~= "" then
+            Automation.TpAfterSpawnRoutine()
+        end
+    end)
+end
+
+function Automation.VehiclesFarmHelper()
+    if tick() - (Automation.lastHelperRun or 0) < 2 then return end
+    Automation.lastHelperRun = tick()
+
+    task.spawn(function()
+        local safeLog = function(msg, color)
+            if _G.Log then pcall(_G.Log, msg, color) end
+        end
+
+        local targetVeh = Config.VehiclesFarm.Vehicle or "MRZR Buggy"
+        safeLog("Vehicles Farm: Spawning " .. tostring(targetVeh) .. "...", Color3.fromRGB(255, 255, 0))
+        print("[VEHICLES-FARM] VehiclesFarmHelper executed! Target: " .. tostring(targetVeh))
+
+        local lp = Core.LocalPlayer
+        local terminal, promptObj, foundCount = Automation.pickCarTerminal(lp)
+
+        if terminal then
+            local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                safeLog("Teleporting to Vehicle Spawner!", Color3.fromRGB(0, 255, 0))
+                print("[VEHICLES-FARM] Teleporting to terminal: " .. terminal:GetFullName())
+                hrp.CFrame = terminal.CFrame * CFrame.new(0, 0, 3) + Vector3.new(0, 2, 0)
+                task.wait(0.3)
+
+                if promptObj and fireproximityprompt then
+                    pcall(function() fireproximityprompt(promptObj) end)
+                end
+
+                if firetouchinterest then
+                    pcall(function()
+                        firetouchinterest(hrp, terminal, 0)
+                        task.wait(0.05)
+                        firetouchinterest(hrp, terminal, 1)
+                    end)
+                end
+
+                task.wait(0.5)
+                Automation.SpawnVehicle(targetVeh)
+            end
+        else
+            safeLog("Vehicles Farm: own spawner not found, trying a direct spawn...", Color3.fromRGB(255, 160, 0))
+            print("[VEHICLES-FARM] No terminal found, running direct SpawnVehicle...")
+            Automation.SpawnVehicle(targetVeh)
+        end
+    end)
+end
+
+function Automation.VehiclesFarmLoop()
+    task.spawn(function()
+        local safeLog = function(msg, color)
+            if _G.Log then pcall(_G.Log, msg, color) end
+        end
+
+        safeLog("Vehicles Farm Loop: Active", Color3.fromRGB(0, 255, 150))
+        print("[VEHICLES-FARM] Loop started")
+        while Config.VehiclesFarm.Enabled and not State.Unloading and IsCurrentInstance() do
+            if Config.VehiclesFarm.TpAfterSpawn == true then
+                -- [ v48 ] в режиме TP-цикла спавном управляет Automation.SpawnTpLoop
+                task.wait(1)
+            else
+                Automation.VehiclesFarmHelper()
+                task.wait(6)
+            end
+        end
+        safeLog("Vehicles Farm Loop: Stopped", Color3.fromRGB(255, 50, 50))
+        print("[VEHICLES-FARM] Loop stopped")
+    end)
+end
+
+-- ESP и Rage (из Logic.txt)
+createModule("ESP (BS)", "See players and items through walls", "Visuals", Config.Visuals.ESP.Enabled, function(v)
+    Config.Visuals.ESP.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.ESP
+    local sub = Internal.createSubCard(p)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show Teammates"), cfg.ShowTeammates, function(v) cfg.ShowTeammates = v end, nil, nil, true)
+    -- [ v32 ] ESP в наблюдателях (после смерти)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "ESP While Dead (Spectator)"), cfg.SpectatorESP == true, function(v) cfg.SpectatorESP = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "World Entities")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Drones ESP"), Config.Combat.ESP.Drones, function(v) Config.Combat.ESP.Enabled = v; Config.Combat.ESP.Drones = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Oil Barrels ESP"), Config.Combat.ESP.OilBarrels, function(v) Config.Combat.ESP.Enabled = v; Config.Combat.ESP.OilBarrels = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "Box ESP")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Box ESP Enabled"), cfg.Box.Enabled, function(v) cfg.Box.Enabled = v end, nil, nil, true)
+    Internal.createSelector(sub, "Type", {"None", "2D Box", "3D Box", "Corner"}, cfg.Box.Type, function(v) cfg.Box.Type = v end)
+
+    Internal.addColorSetting(sub, "Box Color A", cfg.Box.ColorA, function(c) cfg.Box.ColorA = c end)
+    Internal.addColorSetting(sub, "Box Color B", cfg.Box.ColorB, function(c) cfg.Box.ColorB = c end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Fill Gradient"), cfg.Box.FillGradient, function(v) cfg.Box.FillGradient = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Fill Color A", cfg.Box.FillColorA, function(c) cfg.Box.FillColorA = c end)
+    Internal.addColorSetting(sub, "Fill Color B", cfg.Box.FillColorB, function(c) cfg.Box.FillColorB = c end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Fill Rotation"), cfg.Box.FillRotation, function(v) cfg.Box.FillRotation = v end, nil, nil, true)
+    Internal.createSlider(sub, "Rotation Speed", 1, 10, cfg.Box.RotationSpeed, function(v) cfg.Box.RotationSpeed = v end)
+
+    Internal.createLabel(sub, "Name ESP")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Name ESP Enabled"), cfg.Names.Enabled, function(v) cfg.Names.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Name Color", cfg.Names.Color, function(c) cfg.Names.Color = c end)
+
+    Internal.createLabel(sub, "Health Bar")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Health Bar Enabled"), cfg.HealthBar.Enabled, function(v) cfg.HealthBar.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Health Top Color", cfg.HealthBar.TopColor, function(c) cfg.HealthBar.TopColor = c end)
+    Internal.addColorSetting(sub, "Health Bottom Color", cfg.HealthBar.BottomColor, function(c) cfg.HealthBar.BottomColor = c end)
+
+    Internal.createLabel(sub, "Health Text")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Health Text Enabled"), cfg.HealthText.Enabled, function(v) cfg.HealthText.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "HP Text Color", cfg.HealthText.Color, function(c) cfg.HealthText.Color = c end)
+
+    Internal.createLabel(sub, "Distance ESP")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Distance Enabled"), cfg.Distance.Enabled, function(v) cfg.Distance.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Distance Color", cfg.Distance.Color, function(c) cfg.Distance.Color = c end)
+
+    Internal.createLabel(sub, "Weapon ESP")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Weapon Enabled"), cfg.Weapon.Enabled, function(v) cfg.Weapon.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Weapon Color", cfg.Weapon.Color, function(c) cfg.Weapon.Color = c end)
+
+    Internal.createLabel(sub, "Tracers")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Tracers Enabled"), cfg.Tracers.Enabled, function(v) cfg.Tracers.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Tracer Color A", cfg.Tracers.ColorA, function(c) cfg.Tracers.ColorA = c end)
+    Internal.addColorSetting(sub, "Tracer Color B", cfg.Tracers.ColorB, function(c) cfg.Tracers.ColorB = c end)
+    Internal.createSelector(sub, "Tracer Origin", {"Bottom", "Center", "Top"}, cfg.Tracers.Origin, function(v) cfg.Tracers.Origin = v end)
+
+    Internal.createLabel(sub, "Skeleton")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Skeleton Enabled"), cfg.Skeleton.Enabled, function(v) cfg.Skeleton.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Skeleton Color A", cfg.Skeleton.ColorA, function(c) cfg.Skeleton.ColorA = c end)
+    Internal.addColorSetting(sub, "Skeleton Color B", cfg.Skeleton.ColorB, function(c) cfg.Skeleton.ColorB = c end)
+
+    Internal.createLabel(sub, "Target Indicator")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Indicator Enabled"), cfg.TargetIndicator.Enabled, function(v) cfg.TargetIndicator.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Indicator Color", cfg.TargetIndicator.Color, function(c) cfg.TargetIndicator.Color = c end)
+end)
+
+-- Chams Module
+createModule("Chams (BS)", "Player chams and materials", "Visuals", Config.Visuals.Chams.Enabled, function(v)
+    Config.Visuals.Chams.Enabled = v
+    if not v and State.removeAllChams then
+        State.removeAllChams()
+    end
+end, function(p)
+    local cfg = Config.Visuals.Chams
+    local sub = Internal.createSubCard(p)
+
+    Internal.createLabel(sub, "Main Settings")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+
+    -- [ v31 ] «Взял меня на прицел»
+    Internal.createLabel(sub, "Aim Warning (who aims at you)")
+    local awCfg = Config.Visuals.AimWarn
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Aim Warning"), awCfg.Enabled, function(v) awCfg.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Warning Color", awCfg.Color, function(c) awCfg.Color = c end)
+    Internal.createSlider(sub, "Warning Angle (deg)", 5, 90, awCfg.Angle or 25, function(v) awCfg.Angle = v end)
+    Internal.createSlider(sub, "Warning Distance", 40, 400, awCfg.Distance or 220, function(v) awCfg.Distance = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Warning Sound"), awCfg.Sound ~= false, function(v) awCfg.Sound = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Damage Flash"), Config.Visuals.DamageLog.FlashChams ~= false, function(v) Config.Visuals.DamageLog.FlashChams = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "Visible Chams (In Sight)")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Visible Enabled"), cfg.Visible.Enabled, function(v) cfg.Visible.Enabled = v end, nil, nil, true)
+    Internal.createSelector(sub, "Material", {"Neon", "Metal", "ForceField", "SmoothPlastic", "Glass"}, cfg.Visible.Material, function(v) cfg.Visible.Material = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Outline"), cfg.Visible.Outline ~= false, function(v) cfg.Visible.Outline = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Fill Color", cfg.Visible.Color, function(c) cfg.Visible.Color = c end)
+    Internal.addColorSetting(sub, "Outline Color", cfg.Visible.OutlineColor, function(c) cfg.Visible.OutlineColor = c end)
+    Internal.createSlider(sub, "Fill Transparency", 0, 10, cfg.Visible.FillTransparency * 10, function(v) cfg.Visible.FillTransparency = v / 10 end, 0.1)
+    Internal.createSlider(sub, "Outline Transparency", 0, 10, cfg.Visible.OutlineTransparency * 10, function(v) cfg.Visible.OutlineTransparency = v / 10 end, 0.1)
+
+    Internal.createLabel(sub, "Unvisible Chams (Behind Walls)")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Unvisible Enabled"), cfg.Unvisible.Enabled, function(v) cfg.Unvisible.Enabled = v end, nil, nil, true)
+    Internal.createSelector(sub, "Material", {"Neon", "Metal", "ForceField", "SmoothPlastic", "Glass"}, cfg.Unvisible.Material, function(v) cfg.Unvisible.Material = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Outline"), cfg.Unvisible.Outline ~= false, function(v) cfg.Unvisible.Outline = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Fill Color", cfg.Unvisible.Color, function(c) cfg.Unvisible.Color = c end)
+    Internal.addColorSetting(sub, "Outline Color", cfg.Unvisible.OutlineColor, function(c) cfg.Unvisible.OutlineColor = c end)
+    Internal.createSlider(sub, "Fill Transparency", 0, 10, cfg.Unvisible.FillTransparency * 10, function(v) cfg.Unvisible.FillTransparency = v / 10 end, 0.1)
+    Internal.createSlider(sub, "Outline Transparency", 0, 10, cfg.Unvisible.OutlineTransparency * 10, function(v) cfg.Unvisible.OutlineTransparency = v / 10 end, 0.1)
+end)
+
+-- Weapon Chams Module (Memesense style)
+createModule("Weapon Chams", "Viewmodel chams and materials", "Visuals", Config.Visuals.WeaponChams.Enabled, function(v)
+    Config.Visuals.WeaponChams.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.WeaponChams
+    local sub = Internal.createSubCard(p)
+
+    Internal.addColorSetting(sub, "Color", cfg.Color, function(c) cfg.Color = c end)
+
+    Internal.createSelector(sub, "Chams Material/Type", {"Glass", "ForceField", "Metal", "Highlight", "Neon"}, cfg.Material, function(v) cfg.Material = v end)
+    Internal.createSlider(sub, "Glass Transparency", 0, 10, cfg.Transparency * 10, function(v) cfg.Transparency = v / 10 end, 0.1)
+    Internal.createSlider(sub, "Metal Reflectance", 0, 10, cfg.Reflectance * 10, function(v) cfg.Reflectance = v / 10 end, 0.1)
+end)
+
+-- Universal ESP Module
+createModule("ESP", "See all players through walls (Any Game)", "Visuals", Config.Visuals.UniversalESP.Enabled, function(v)
+    Config.Visuals.UniversalESP.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.UniversalESP
+    local sub = Internal.createSubCard(p)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Box ESP"), cfg.Box, function(v) cfg.Box = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Names ESP"), cfg.Names, function(v) cfg.Names = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Health ESP"), cfg.Health, function(v) cfg.Health = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Distance ESP"), cfg.Distance, function(v) cfg.Distance = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Tracers ESP"), cfg.Tracers, function(v) cfg.Tracers = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Skeleton ESP"), cfg.Skeleton, function(v) cfg.Skeleton = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "ESP Color", cfg.Color, function(c) cfg.Color = c end)
+end, nil, "Universal")
+
+-- Universal Chams Module
+createModule("Chams", "Highlight all players through walls (Any Game)", "Visuals", Config.Visuals.UniversalChams.Enabled, function(v)
+    Config.Visuals.UniversalChams.Enabled = v
+    if not v and State.removeAllUniversalChams then
+        State.removeAllUniversalChams()
+    end
+end, function(p)
+    local cfg = Config.Visuals.UniversalChams
+    local sub = Internal.createSubCard(p)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Chams Color", cfg.Color, function(c) cfg.Color = c end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Outline"), cfg.Outline, function(v) cfg.Outline = v end, nil, nil, true)
+    Internal.createSlider(sub, "Transparency", 0, 10, cfg.FillTransparency * 10, function(v) cfg.FillTransparency = v / 10 end, 0.1)
+end, nil, "Universal")
+
+
+-- Speed and Highjump Logic
+task.spawn(function()
+    while task.wait(0.1) and ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if not ScreenGui or not ScreenGui.Parent then break end
+        pcall(function()
+            local char = Core.LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                if Config.Cheat.SpeedHack.Enabled then
+                    hum.WalkSpeed = Config.Cheat.SpeedHack.Value
+                end
+                if Config.Cheat.Highjump.Enabled then
+                    hum.JumpPower = Config.Cheat.Highjump.Value
+                    hum.UseJumpPower = true
+                end
+            end
+        end)
+    end
+end)
+
+-- [ VISUAL ENGINE ]
+
+-- Константы
+local ZONE_SEGMENTS = 40
+local BOX_3D_EDGES = {
+    {1, 2}, {2, 4}, {4, 3}, {3, 1},  -- Bottom
+    {5, 6}, {6, 8}, {8, 7}, {7, 5},  -- Top
+    {1, 5}, {2, 6}, {3, 7}, {4, 8}  -- Pillars
+}
+local AABB_CORNER_SIGNS = {
+    {0,0,0},{1,0,0},{0,1,0},{1,1,0},{0,0,1},{1,0,1},{0,1,1},{1,1,1},
+}
+local BASE_DIST = 20
+local BASE_W, BASE_H = 86, 155
+
+local BONES = {
+    R6 = { {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"}, {"Torso", "Left Leg"}, {"Torso", "Right Leg"} },
+    R15 = {
+        {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
+    }
+}
+
+State.VisualRegistry = { Entities = {}, Zones = {} }
+local partHalfExtentCache = {}
+
+-- Оптимизированные локальные функции Luau
+local math_abs, math_huge = math.abs, math.huge
+local Vector3_new, Vector2_new = Vector3.new, Vector2.new
+
+local function get_part_half_extent(part)
+    local c = partHalfExtentCache[part]
+    if not c then
+        local s = part.Size
+        c = {hx = s.X * 0.5, hy = s.Y * 0.5, hz = s.Z * 0.5}
+        partHalfExtentCache[part] = c
+    end
+    return c.hx, c.hy, c.hz
+end
+
+local function compute_world_aabb(parts)
+    local x0, y0, z0 = math_huge, math_huge, math_huge
+    local x1, y1, z1 = -math_huge, -math_huge, -math_huge
+    for i = 1, #parts do
+        local p = parts[i]
+        local hx, hy, hz = get_part_half_extent(p)
+        local px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = p.CFrame:GetComponents()
+        local ex = math_abs(r00) * hx + math_abs(r01) * hy + math_abs(r02) * hz
+        local ey = math_abs(r10) * hx + math_abs(r11) * hy + math_abs(r12) * hz
+        local ez = math_abs(r20) * hx + math_abs(r21) * hy + math_abs(r22) * hz
+        if px - ex < x0 then x0 = px - ex end; if py - ey < y0 then y0 = py - ey end; if pz - ez < z0 then z0 = pz - ez end
+        if px + ex > x1 then x1 = px + ex end; if py + ey > y1 then y1 = py + ey end; if pz + ez > z1 then z1 = pz + ez end
+    end
+    if x0 == math_huge then return nil end
+    return x0, y0, z0, x1, y1, z1
+end
+
+local function project_fixed_box(x0, y0, z0, x1, y1, z1)
+    local cx, cy, cz = (x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5
+    local cam = workspace.CurrentCamera
+    if not cam then return nil, nil, false end
+
+    local sp, vis = cam:WorldToViewportPoint(Vector3_new(cx, cy, cz))
+    if not vis and sp.Z <= 0 then return nil, nil, false end
+
+    local depth = sp.Z
+    if depth <= 0 then depth = 0.1 end
+
+    -- [FIX] Полное динамическое FOV-масштабирование для снайперских прицелов
+    local scale = (BASE_DIST / depth) * (70 / cam.FieldOfView)
+    local w, h = BASE_W * scale, BASE_H * scale
+
+    return Vector2_new(sp.X - w * 0.5, sp.Y - h * 0.5), Vector2_new(sp.X + w * 0.5, sp.Y + h * 0.5), true
+end
+
+local function project_aabb_corners_3d(camera, x0, y0, z0, x1, y1, z1)
+    local sc, on = {}, false
+    for i = 1, 8 do
+        local s = AABB_CORNER_SIGNS[i]
+        local wx = s[1] == 0 and x0 or x1
+        local wy = s[2] == 0 and y0 or y1
+        local wz = s[3] == 0 and z0 or z1
+        local pos, vis = camera:WorldToViewportPoint(Vector3_new(wx, wy, wz))
+        sc[i] = Vector2_new(pos.X, pos.Y); if vis then on = true end
+    end
+    return sc, on
+end
+
+local function get_character_parts(char)
+    local vis = State.VisualRegistry.Entities[char]
+    if vis and vis.partlist then return vis.partlist end
+
+    local list = {}
+    -- ОПТИМИЗАЦИЯ
+    for _, p in ipairs(char:GetChildren()) do
+        if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+            table.insert(list, p)
+        end
+    end
+
+    if vis then vis.partlist = list end
+    return list
+end
+
+local function getGroundY(x, y, z, ignore)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = ignore or {workspace.CurrentCamera}
+    local res = workspace:Raycast(Vector3.new(x, y + 5, z), Vector3.new(0, -20, 0), params)
+    return res and res.Position.Y or y
+end
+
+local function computeZoneBounds(parent)
+    local center = parent:IsA("BasePart") and parent.Position or parent:GetPivot().Position
+    local radius = 0
+    for _, v in parent:GetDescendants() do
+        if v:IsA("BasePart") then
+            local dist = (v.Position - center).Magnitude + (v.Size.Magnitude / 2)
+            if dist > radius then radius = dist end
+        end
+    end
+    return center, math.clamp(radius, 5, 25), radius > 0
+end
+
+local weaponAttrCache = {}
+local weaponNameCache = {}
+
+local WEAPON_ICONS = {
+    -- Common Blox Strike Icons
+    ["Knife"] = "rbxassetid://12195030232",
+    ["Karambit"] = "rbxassetid://12195030232",
+    ["Butterfly"] = "rbxassetid://12195030232",
+    ["Pistol"] = "rbxassetid://12195031122",
+    ["Glock"] = "rbxassetid://12195031122",
+    ["Deagle"] = "rbxassetid://12195031122",
+    ["Rifle"] = "rbxassetid://12195031581",
+    ["AK47"] = "rbxassetid://12195031581",
+    ["M4A4"] = "rbxassetid://12195031581",
+    ["Sniper"] = "rbxassetid://12195032128",
+    ["AWP"] = "rbxassetid://12195032128",
+    ["SMG"] = "rbxassetid://12195032541",
+    ["P90"] = "rbxassetid://12195032541",
+    ["Shotgun"] = "rbxassetid://12195032541"
+}
+
+local function GetWeaponIcon(name)
+    for k, v in WEAPON_ICONS do
+        if name:find(k) then return v end
+    end
+    return "rbxassetid://12195031581"  -- Default rifle icon
+end
+
+local function GetWeaponName(player)
+    if not player then return "None" end
+    local char = player.Character
+    if char then
+        local weaponModel = char:FindFirstChild("WeaponModel")
+        if weaponModel then
+            -- Если есть модель оружия
+            return weaponModel:GetAttribute("WeaponName") or weaponModel.Name
+        end
+    end
+
+    local attr = player:GetAttribute("CurrentEquipped")
+    if attr ~= weaponAttrCache[player] then
+        weaponAttrCache[player] = attr
+        if attr then
+            local ok, dec = pcall(function() return Core.Services.HttpService:JSONDecode(attr) end)
+            weaponNameCache[player] = (ok and dec and dec.Name) or "None"
+        else weaponNameCache[player] = "None" end
+    end
+    return weaponNameCache[player] or "None"
+end
+
+-- [ SNIPEr DETECT ] держит ли локальный игрок снайперку (для кастомного крестика Custom ...
+local SNIPER_NAME_PATTERNS = { "awp", "ssg", "scout", "sniper", "awm" }
+local _sniperCheckCache, _sniperCheckAt = false, 0
+local _lastSniperSource = nil
+local function isHoldingSniper(cam)
+    local now = tick()
+    if now - _sniperCheckAt < 0.1 then return _sniperCheckCache end
+    _sniperCheckAt = now
+    _sniperCheckCache = false
+    _lastSniperSource = nil
+
+    -- 1) Вьюмодель оружия в камере (имя модели = имя оружия
+    if cam then
+        for _, ch in ipairs(cam:GetChildren()) do
+            if ch:IsA("Model") and ch.Name ~= "Arms" and ch.Name ~= "Arms1" and ch.Name ~= "Arms2" and ch.Name ~= "Viewmodel" then
+                local n = ch.Name:lower()
+                for _, p in ipairs(SNIPER_NAME_PATTERNS) do
+                    if n:find(p, 1, true) then _sniperCheckCache = true _lastSniperSource = "camera:" .. ch.Name break end
+                end
+                if _sniperCheckCache then break end
+            end
+        end
+    end
+
+    -- 2) Фолбэк 1
+    if not _sniperCheckCache then
+        local char = Core.Local.Player.Character
+        local wm = char and char:FindFirstChild("WeaponModel")
+        if wm then
+            local n = (wm:GetAttribute("WeaponName") or wm.Name or ""):lower()
+            for _, p in ipairs(SNIPER_NAME_PATTERNS) do
+                if n:find(p, 1, true) then _sniperCheckCache = true _lastSniperSource = "char:" .. n break end
+            end
+        end
+    end
+
+    -- 3) Фолбэк 2
+    if not _sniperCheckCache then
+        local attr = Core.Local.Player:GetAttribute("CurrentEquipped")
+        if attr and type(attr) == "string" then
+            local ok, dec = pcall(function() return Core.Services.HttpService:JSONDecode(attr) end)
+            local n = (ok and dec and dec.Name or attr):lower()
+            for _, p in ipairs(SNIPER_NAME_PATTERNS) do
+                if n:find(p, 1, true) then _sniperCheckCache = true _lastSniperSource = "attr:" .. n break end
+            end
+        end
+    end
+
+    -- 4) Фолбэк 3
+    if not _sniperCheckCache and Weapon and Weapon.IsEquipped then
+        local ok, n = pcall(function() return tostring(Weapon.Name or "") end)
+        n = (ok and n or ""):lower()
+        for _, p in ipairs(SNIPER_NAME_PATTERNS) do
+            if n:find(p, 1, true) then _sniperCheckCache = true _lastSniperSource = "weapon:" .. n break end
+        end
+    end
+    return _sniperCheckCache
+end
+
+-- [ DRAWING HELPERS ]
+
+local MAX_HP_SEGMENTS = 12
+local MAX_FILL_LINES = 400
+
+local function setupFillLines()
+    local lines = {}
+    for i = 1, MAX_FILL_LINES do
+        local l = createDrawing("Line", {Thickness = 4.0, Transparency = 0.3})
+        lines[i] = l
+    end
+    return lines
+end
+
+local function hideBox(box)
+    box.outline.Visible = false; box.fill.Visible = false
+    for _, l in ipairs(box.grad_lines)      do l.Visible = false end
+    for _, l in ipairs(box.fill_grad_lines)  do l.Visible = false end
+    for _, l in ipairs(box.corner_fill)     do l.Visible = false end
+    for _, l in ipairs(box.corner_outline)   do l.Visible = false end
+    for _, l in ipairs(box.box_3d_lines)    do l.Visible = false end
+end
+
+local function getEntityVisuals(entity)
+    if not State.VisualRegistry.Entities[entity] then
+        local player = game:GetService("Players"):GetPlayerFromCharacter(entity)
+        local hrp = entity:FindFirstChild("HumanoidRootPart") or entity.PrimaryPart
+
+        local d = {
+            box = {
+                outline = createDrawing("Square", {Thickness = 3, Filled = false}),
+                fill = createDrawing("Square", {Thickness = 1, Filled = false}),
+                grad_lines = {}, fill_grad_lines = setupFillLines(),
+                corner_fill = {}, corner_outline = {},
+                box_3d_lines = {}
+            },
+            healthbar = {
+                background = createDrawing("Square", {Thickness = 1, Filled = true, Color = Color3.new(0,0,0), Transparency = 0.5}),
+                segments = {}
+            },
+            healthtext = createDrawing("Text", {Size = 12, Color = Color3.new(1,1,1)}),
+            name = createDrawing("Text", {Size = 13, Color = Color3.new(1,1,1)}),
+            distance = createDrawing("Text", {Size = 13, Color = Color3.new(1,1,1)}),
+            tracer = {
+                outline = createDrawing("Line", {Thickness = 3}),
+                fill = createDrawing("Line", {Thickness = 1})
+            },
+            weapon = createDrawing("Text", {Size = 13, Color = Color3.new(1,1,1)}),
+            circulartarget = {
+                lines = {}, trailLines = {}, neonGlowLines = {},
+                alpha = 0, movingUp = true, trailHistory = {}
+            }
+        }
+
+        for i=1,16 do d.box.grad_lines[i] = createDrawing("Line", {Thickness = 1}) end
+        for i=1,8 do
+            d.box.corner_fill[i] = createDrawing("Line", {Thickness = 1})
+            d.box.corner_outline[i] = createDrawing("Line", {Thickness = 3})
+        end
+        for i=1,12 do d.box.box_3d_lines[i] = createDrawing("Line", {Thickness = 2}) end
+        for i=1,MAX_HP_SEGMENTS do d.healthbar.segments[i] = createDrawing("Line", {Thickness = 3}) end
+
+        local isR15 = entity:FindFirstChild("UpperTorso") ~= nil
+        local bones = isR15 and BONES.R15 or BONES.R6
+        d.skeleton = { lines = {}, bone_parts = {}, screenCache = {} }
+        for i=1,#bones do
+            d.skeleton.lines[i] = createDrawing("Line", {Thickness = 2})
+            d.skeleton.bone_parts[i] = {entity:FindFirstChild(bones[i][1]), entity:FindFirstChild(bones[i][2])}
+        end
+
+        local SEGS = 32
+        for i=1,SEGS do d.circulartarget.lines[i] = createDrawing("Line", {Thickness = 1.5}) end
+        for i=1,25 do
+            d.circulartarget.trailLines[i] = createDrawing("Line", {Thickness = 2.5, Transparency = 0.4})
+            d.circulartarget.neonGlowLines[i] = createDrawing("Line", {Thickness = 5.0, Transparency = 0.15})
+        end
+
+        State.VisualRegistry.Entities[entity] = d
+    end
+    return State.VisualRegistry.Entities[entity]
+end
+
+local function drawFillGradient360(fillLines, x, y, w, h, colorA, colorB, angle)
+    local dx, dy = math.cos(angle), math.sin(angle)
+    local cx, cy = x + w * 0.5, y + h * 0.5
+    local maxDot = math.max((math.abs(dx) * w + math.abs(dy) * h) * 0.5, 1)
+    local targetRows = math.clamp(math.floor(h * 0.8), 15, MAX_FILL_LINES)
+    local rowH = h / targetRows
+
+    for i = 1, targetRows do
+        local py = y + (i - 0.5) * rowH
+        local dotL = ((x - cx) * dx + (py - cy) * dy) / maxDot
+        local dotR = ((x + w - cx) * dx + (py - cy) * dy) / maxDot
+        local line = fillLines[i]
+        line.Color = colorA:Lerp(colorB, (math.clamp(dotL * 0.5 + 0.5, 0, 1) + math.clamp(dotR * 0.5 + 0.5, 0, 1)) * 0.5)
+        line.Thickness = math.clamp(rowH + 1.5, 2, 8)
+        line.From, line.To = Vector2.new(x + 1, py), Vector2.new(x + w - 1, py)
+        line.Visible = true
+    end
+    for i = targetRows + 1, #fillLines do fillLines[i].Visible = false end
+end
+
+local function drawBoxOutlineGradient(gradLines, x, y, w, h, colorA, colorB, rotOff)
+    local sides = {{x,y,x+w,y},{x+w,y,x+w,y+h},{x+w,y+h,x,y+h},{x,y+h,x,y}}
+    local idx = 0
+    for si=1,4 do
+        local s = sides[si]
+        for step=0,3 do
+            idx = idx + 1
+            local tA, tB = step/4, (step+1)/4
+            local tMid = (((si-1)/4) + (tA/4) + rotOff) % 1
+            local line = gradLines[idx]
+            if line then
+                line.From = Vector2.new(s[1]+(s[3]-s[1])*tA, s[2]+(s[4]-s[2])*tA)
+                line.To = Vector2.new(s[1]+(s[3]-s[1])*tB, s[2]+(s[4]-s[2])*tB)
+                line.Color = colorA:Lerp(colorB, tMid)
+                line.Visible = true
+            end
+        end
+    end
+end
+
+local function hide_all_vis(data)
+    if not data then return end
+    if data.box      then hideBox(data.box) end
+    if data.healthbar then
+        data.healthbar.background.Visible=false
+        for _,seg in ipairs(data.healthbar.segments) do seg.Visible=false end
+    end
+    if data.healthtext then data.healthtext.Visible=false end
+    if data.name      then data.name.Visible=false end
+    if data.distance  then data.distance.Visible=false end
+    if data.tracer    then data.tracer.outline.Visible=false; data.tracer.fill.Visible=false end
+    if data.skeleton  then for _,l in ipairs(data.skeleton.lines) do l.Visible=false end end
+    if data.weapon    then data.weapon.Visible=false end
+    if data.circulartarget then
+        for _,l in ipairs(data.circulartarget.lines) do l.Visible=false end
+        for _,l in ipairs(data.circulartarget.trailLines) do l.Visible=false end
+        for _,l in ipairs(data.circulartarget.neonGlowLines) do l.Visible=false end
+    end
+end
+
+local function cleanup_instance(instance, data)
+    pcall(function()
+        if data.box then
+            data.box.outline:Remove(); data.box.fill:Remove()
+            for _,l in next,data.box.grad_lines      do l:Remove() end
+            for _,l in next,data.box.fill_grad_lines  do l:Remove() end
+            for _,l in next,data.box.corner_fill      do l:Remove() end
+            for _,l in next,data.box.corner_outline   do l:Remove() end
+            for _,l in next,data.box.box_3d_lines     do l:Remove() end
+        end
+        if data.healthbar  then
+            data.healthbar.background:Remove()
+            for _,seg in ipairs(data.healthbar.segments) do seg:Remove() end
+        end
+        if data.healthtext then data.healthtext:Remove() end
+        if data.name       then data.name:Remove() end
+        if data.distance   then data.distance:Remove() end
+        if data.tracer     then data.tracer.outline:Remove(); data.tracer.fill:Remove() end
+        if data.skeleton   then for _,l in next,data.skeleton.lines do l:Remove() end end
+        if data.weapon     then data.weapon:Remove() end
+        if data.circulartarget then
+            for _,l in ipairs(data.circulartarget.lines) do l:Remove() end
+            for _,l in ipairs(data.circulartarget.trailLines) do l:Remove() end
+            for _,l in ipairs(data.circulartarget.neonGlowLines) do l:Remove() end
+        end
+        if data.partConnAdd    then data.partConnAdd:Disconnect() end
+        if data.partConnRemove then data.partConnRemove:Disconnect() end
+    end)
+end
+
+-- Chams Logic (Logic directly from Memesens.luau)
+local ChamsContainer
+pcall(function()
+    ChamsContainer = game:GetService("CoreGui"):FindFirstChild("Overmind_Chams_Container") or Instance.new("Folder")
+    ChamsContainer.Name = "Overmind_Chams_Container"
+    ChamsContainer.Parent = game:GetService("CoreGui")
+end)
+
+local HighlightsCache = {}  -- [char] = { visible = hlVis
+local ChamsDamageFlash = {}
+
+local function getChamsMaterial(str)
+    if str == "Metal"          then return Enum.Material.Metal
+    elseif str == "ForceField" then return Enum.Material.ForceField
+    elseif str == "SmoothPlastic" or str == "Plastic" then return Enum.Material.SmoothPlastic
+    elseif str == "Glass"         then return Enum.Material.Glass
+    else return Enum.Material.Neon end
+end
+
+local function removeChams(char)
+    if HighlightsCache[char] then
+        pcall(function() if HighlightsCache[char].visible then HighlightsCache[char].visible:Destroy() end end)
+        pcall(function() if HighlightsCache[char].unvisible then HighlightsCache[char].unvisible:Destroy() end end)
+        HighlightsCache[char] = nil
+    end
+    if State.AimWarnSet then State.AimWarnSet[char] = nil end
+    ChamsDamageFlash[char] = nil
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        pcall(function()
+            if obj:IsA("BasePart") and obj:GetAttribute("OrigMat") then
+                obj.Material = Enum.Material[obj:GetAttribute("OrigMat")]
+                obj.Color    = obj:GetAttribute("OrigColor") or obj.Color
+                obj:SetAttribute("OrigMat",   nil)
+                obj:SetAttribute("OrigColor", nil)
+            end
+        end)
+    end
+end
+
+function State.removeAllChams()
+    for char in pairs(HighlightsCache) do
+        removeChams(char)
+    end
+end
+
+local ChamsRayParams = RaycastParams.new()
+ChamsRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function isChamsVisible(char)
+    local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+    if not root then return false end
+    local camPos = workspace.CurrentCamera.CFrame.Position
+    local dir    = root.Position - camPos
+    local lpChar = Core.Local.Player and Core.Local.Player.Character
+    ChamsRayParams.FilterDescendantsInstances = {lpChar, char}
+    local result = workspace:Raycast(camPos, dir, ChamsRayParams)
+    return result == nil
+end
+
+local function updateChams(char)
+    local cfg = Config.Visuals.Chams
+    if not cfg.Enabled then
+        removeChams(char)
+        return
+    end
+
+    if not ChamsContainer or not ChamsContainer.Parent then
+        pcall(function()
+            local cg = game:GetService("CoreGui")
+            ChamsContainer = cg:FindFirstChild("Overmind_Chams_Container") or Instance.new("Folder")
+            ChamsContainer.Name = "Overmind_Chams_Container"
+            ChamsContainer.Parent = cg
+        end)
+        if not ChamsContainer or not ChamsContainer.Parent then return end
+    end
+
+    -- Проверка смерти
+    local deadAttr = char:GetAttribute("Dead")
+    local isDeadChar = deadAttr == true
+    if not isDeadChar and deadAttr == nil then
+        local hpAttr = char:GetAttribute("Health")
+        if hpAttr and hpAttr <= 0 then isDeadChar = true end
+    end
+    if isDeadChar then
+        removeChams(char)
+        return
+    end
+
+    -- Тим-чек
+    if cfg.TeamCheck and isCharacterAlly(char) then
+        removeChams(char)
+        return
+    end
+
+    -- Пересоздаём Highlight если их нет или не 2 штуки
+    if not HighlightsCache[char] or not HighlightsCache[char].visible or not HighlightsCache[char].unvisible then
+        if HighlightsCache[char] then removeChams(char) end
+
+        local hlVis = Instance.new("Highlight")
+        hlVis.DepthMode = Enum.HighlightDepthMode.Occluded
+        hlVis.Adornee   = char
+        hlVis.Parent    = ChamsContainer
+
+        local hlUnvis = Instance.new("Highlight")
+        hlUnvis.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hlUnvis.Adornee   = char
+        hlUnvis.Parent    = ChamsContainer
+
+        HighlightsCache[char] = { visible = hlVis, unvisible = hlUnvis }
+
+        local ancConn
+        ancConn = char.AncestryChanged:Connect(function(_, newParent)
+            if newParent == nil then
+                if ancConn then pcall(function() ancConn:Disconnect() end) end
+                removeChams(char)
+            end
+        end)
+
+        local childConn
+        childConn = char.ChildAdded:Connect(function()
+            if not char or not char.Parent then
+                if childConn then pcall(function() childConn:Disconnect() end) end
+                return
+            end
+            if HighlightsCache[char] then
+                pcall(function()
+                    if HighlightsCache[char].visible then HighlightsCache[char].visible.Adornee = char end
+                    if HighlightsCache[char].unvisible then HighlightsCache[char].unvisible.Adornee = char end
+                end)
+            end
+        end)
+    end
+
+    local hl   = HighlightsCache[char]
+    local seen = isChamsVisible(char)
+
+    local matVisible   = getChamsMaterial(cfg.Visible.Material or "Neon")
+    local matUnvisible = getChamsMaterial(cfg.Unvisible.Material or "Metal")
+    local colVisible   = cfg.Visible.Color or Color3.fromRGB(0, 200, 0)
+    local outColVisible = cfg.Visible.OutlineColor or colVisible
+    local colUnvisible = cfg.Unvisible.Color or Color3.fromRGB(200, 0, 0)
+    local outColUnvisible = cfg.Unvisible.OutlineColor or colUnvisible
+
+    local fillAlphaVis    = cfg.Visible.FillTransparency or 0.3
+    local fillAlphaUnvis  = cfg.Unvisible.FillTransparency or 0.3
+    local outAlphaVis     = cfg.Visible.OutlineTransparency or 0
+    local outAlphaUnvis   = cfg.Unvisible.OutlineTransparency or 0
+
+    -- [ v31 ] «держит на прицеле»
+    if Config.Visuals.AimWarn.Enabled and State.AimWarnSet and State.AimWarnSet[char] then
+        colVisible   = Config.Visuals.AimWarn.Color or Color3.fromRGB(255, 60, 60)
+        colUnvisible = Config.Visuals.AimWarn.Color or Color3.fromRGB(255, 60, 60)
+        fillAlphaVis = 0.2
+        fillAlphaUnvis = 0.2
+    end
+
+    -- [ v31 ] вспышка на попадании
+    local dmgFlash = ChamsDamageFlash[char]
+    if dmgFlash then
+        if os.clock() < dmgFlash.until_ then
+            local flashCol = dmgFlash.head and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(255, 70, 70)
+            colVisible   = flashCol
+            colUnvisible = flashCol
+            fillAlphaVis = 0.2
+            fillAlphaUnvis = 0.2
+        else
+            ChamsDamageFlash[char] = nil
+        end
+    end
+
+    -- Visible highlight (Occluded
+    hl.visible.Adornee             = char
+    hl.visible.FillColor           = colVisible
+    hl.visible.OutlineColor        = outColVisible
+    hl.visible.FillTransparency    = fillAlphaVis
+    hl.visible.OutlineTransparency = outAlphaVis
+    hl.visible.Enabled             = seen and (cfg.Visible.Enabled ~= false)
+
+    -- Unvisible highlight (AlwaysOnTop
+    hl.unvisible.Adornee           = char
+    hl.unvisible.FillColor         = colUnvisible
+    hl.unvisible.OutlineColor      = outColUnvisible
+    hl.unvisible.FillTransparency  = fillAlphaUnvis
+    hl.unvisible.OutlineTransparency = outAlphaUnvis
+    hl.unvisible.Enabled           = (not seen) and (cfg.Unvisible.Enabled ~= false)
+
+    -- Покраска частей тела и текстур (как в Memesens)
+    local targetMat = seen and matVisible or matUnvisible
+    local targetCol = seen and colVisible or colUnvisible
+
+    -- Снимаем прозрачность LTM для Unvisible режима
+    if cfg.Unvisible.Enabled ~= false then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Name ~= "Hitbox" then
+                if part.LocalTransparencyModifier > 0 then
+                    if part:GetAttribute("OvermindLTM") == nil then
+                        part:SetAttribute("OvermindLTM", part.LocalTransparencyModifier)
+                    end
+                    part.LocalTransparencyModifier = 0
+                end
+            end
+        end
+    end
+
+    for _, part in ipairs(char:GetDescendants()) do
+        pcall(function()
+            if part:IsA("SurfaceAppearance") or part:IsA("Decal") or part:IsA("Texture") then
+                part:Destroy()
+            elseif part:IsA("MeshPart") and part.TextureID ~= "" then
+                part.TextureID = ""
+            elseif part:IsA("SpecialMesh") and part.TextureId ~= "" then
+                part.TextureId = ""
+            end
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" and part.Name ~= "Hitbox" then
+                if not part:GetAttribute("OrigMat") then
+                    part:SetAttribute("OrigMat",   part.Material.Name)
+                    part:SetAttribute("OrigColor", part.Color)
+                end
+                part.Material = targetMat
+                part.Color    = targetCol
+            end
+        end)
+    end
+end
+
+-- [ UNIVERSAL VISUALS LOGIC ]
+
+-- [ ФИКС ] Кэши для Universal-чамсов (ранее не были объявлены -> "attempt to index nil")
+local UniversalHighlightsCache = {}
+local UniversalChamsLastSeenState = {}
+
+local function isUniversalAlly(player)
+    if not player or not Core.Local.Player then return false end
+    if player.Character then
+        return isCharacterAlly(player.Character)
+    end
+    if player.Team ~= nil and Core.Local.Player.Team ~= nil then
+        return player.Team == Core.Local.Player.Team
+    end
+    return false
+end
+
+if not State.UniversalESPRegistry then State.UniversalESPRegistry = {} end
+
+local function createUniversalESP(player)
+    local char = player.Character
+    if not char then return end
+
+    local drawings = {
+        Box = createDrawing("Square", {Thickness = 1, Filled = false}),
+        Name = createDrawing("Text", {Size = 13, Center = true, Outline = true}),
+        Distance = createDrawing("Text", {Size = 11, Center = true, Outline = true}),
+        Health = createDrawing("Line", {Thickness = 2}),
+        Tracer = createDrawing("Line", {Thickness = 1})
+    }
+
+    State.UniversalESPRegistry[player] = drawings
+    return drawings
+end
+
+local function updateUniversalESP(player)
+    local cfg = Config.Visuals.UniversalESP
+    local drawings = State.UniversalESPRegistry[player]
+
+    if not cfg.Enabled or not player.Character or player == Core.Local.Player then
+        if drawings then
+            for _, d in drawings do d.Visible = false end
+        end
+        return
+    end
+
+    if cfg.TeamCheck and isUniversalAlly(player) then
+        if drawings then
+            for _, d in drawings do d.Visible = false end
+        end
+        return
+    end
+
+    if not drawings then
+        drawings = createUniversalESP(player)
+    end
+
+    local char = player.Character
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    if not hrp or not hum or hum.Health <= 0 then
+        for _, d in drawings do d.Visible = false end
+        return
+    end
+
+    local cam = workspace.CurrentCamera
+    local pos, on = cam:WorldToViewportPoint(hrp.Position)
+
+    if not on then
+        for _, d in drawings do d.Visible = false end
+        return
+    end
+
+    local distance = (cam.CFrame.Position - hrp.Position).Magnitude
+    local scale = 1 / (distance * math.tan(math.rad(cam.FieldOfView / 2)) * 2) * 1000
+    local w, h = 4 * scale, 6 * scale
+    local x, y = pos.X - w/2, pos.Y - h/2
+
+    -- Box
+    if cfg.Box then
+        drawings.Box.Visible = true
+        drawings.Box.Size = Vector2.new(w, h)
+        drawings.Box.Position = Vector2.new(x, y)
+        drawings.Box.Color = cfg.Color
+    else drawings.Box.Visible = false end
+
+    -- Name
+    if cfg.Names then
+        drawings.Name.Visible = true
+        -- [ v31 ] плюс оружие врага
+        local enemyWeapon = getEnemyWeapon(char)
+        drawings.Name.Text = enemyWeapon and (player.Name .. " [" .. enemyWeapon .. "]") or player.Name
+        drawings.Name.Position = Vector2.new(pos.X, y - 15)
+        drawings.Name.Color = cfg.Color
+    else drawings.Name.Visible = false end
+
+    -- Distance
+    if cfg.Distance then
+        drawings.Distance.Visible = true
+        drawings.Distance.Text = math.floor(distance) .. "m"
+        drawings.Distance.Position = Vector2.new(pos.X, y + h + 5)
+        drawings.Distance.Color = cfg.Color
+    else drawings.Distance.Visible = false end
+
+    -- Health
+    if cfg.Health then
+        drawings.Health.Visible = true
+        local healthPercent = hum.Health / hum.MaxHealth
+        drawings.Health.From = Vector2.new(x - 5, y + h)
+        drawings.Health.To = Vector2.new(x - 5, y + h - (h * healthPercent))
+        drawings.Health.Color = Color3.fromHSV(healthPercent * 0.3, 1, 1)
+    else drawings.Health.Visible = false end
+
+    -- Tracers
+    if cfg.Tracers then
+        drawings.Tracer.Visible = true
+        drawings.Tracer.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+        drawings.Tracer.To = Vector2.new(pos.X, pos.Y)
+        drawings.Tracer.Color = cfg.Color
+    else drawings.Tracer.Visible = false end
+end
+
+local UniversalVisTick = {}
+
+local function removeUniversalChams(char)
+    if not char then return end
+    if UniversalHighlightsCache[char] then
+        -- [ v30 ] новый формат
+        pcall(function() if UniversalHighlightsCache[char].fill then UniversalHighlightsCache[char].fill:Destroy() end end)
+        pcall(function() if UniversalHighlightsCache[char].visible then UniversalHighlightsCache[char].visible:Destroy() end end)
+        pcall(function() if UniversalHighlightsCache[char].unvisible then UniversalHighlightsCache[char].unvisible:Destroy() end end)
+        UniversalHighlightsCache[char] = nil
+    end
+    UniversalChamsLastSeenState[char] = nil
+    UniversalVisTick[char] = nil
+end
+
+function State.removeAllUniversalChams()
+    for char, _ in pairs(UniversalHighlightsCache) do
+        removeUniversalChams(char)
+    end
+    table.clear(UniversalHighlightsCache)
+    table.clear(UniversalChamsLastSeenState)
+end
+
+local function updateUniversalChams(player)
+    local cfg = Config.Visuals.UniversalChams
+    local char = player.Character
+    if not cfg.Enabled or not char or player == Core.Local.Player then
+        removeUniversalChams(char)
+        return
+    end
+
+    if cfg.TeamCheck and isUniversalAlly(player) then
+        removeUniversalChams(char)
+        return
+    end
+
+    -- [ v30 ] ОДИН Highlight на игрока вместо двух
+    if UniversalHighlightsCache[char] and not UniversalHighlightsCache[char].fill then
+        removeUniversalChams(char)  -- миграция со старого формата
+    end
+    if not UniversalHighlightsCache[char] then
+        if not ChamsContainer or not ChamsContainer.Parent then return end
+        local hlFill = Instance.new("Highlight")
+        hlFill.DepthMode = Enum.HighlightDepthMode.Occluded
+        hlFill.Parent = ChamsContainer
+        UniversalHighlightsCache[char] = { fill = hlFill }
+    end
+
+    local hl = UniversalHighlightsCache[char]
+    -- проверка видимости
+    local uTick = (UniversalVisTick[char] or 0) + 1
+    UniversalVisTick[char] = uTick
+    local seen = UniversalChamsLastSeenState[char]
+    if seen == nil or (uTick % 2) == 1 then
+        seen = isChamsVisible(char)
+        UniversalChamsLastSeenState[char] = seen
+    end
+    local col = cfg.Color or Color3.new(1, 1, 1)
+
+    hl.fill.Adornee = char
+    hl.fill.FillColor = col
+    hl.fill.OutlineColor = col
+    hl.fill.FillTransparency = seen and 0.5 or 0.8
+    hl.fill.DepthMode = seen and Enum.HighlightDepthMode.Occluded or Enum.HighlightDepthMode.AlwaysOnTop
+    hl.fill.Enabled = true
+end
+
+-- Weapon Chams Logic (Logic from Memesens.luau)
+local activeWeaponHighlights = {}
+local WeaponSnapshot = {}
+
+local function updateWeaponChams()
+    local cfg = Config.Visuals.WeaponChams
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local chamsEnabled = cfg.Enabled
+    local chamsMode = cfg.Material or "Glass"
+    local chamsColor = cfg.Color or Color3.fromRGB(0, 150, 255)
+
+    local weaponModel = nil
+    for _, child in ipairs(cam:GetChildren()) do
+        if child:IsA("Model") and child.Name ~= "Viewmodel" and not child.Name:lower():find("light") then
+            local w = child:FindFirstChild("Weapon") or child
+            if w:IsA("Model") and w.Name ~= "Viewmodel" and not w.Name:lower():find("light") then
+                weaponModel = w
+                break
+            end
+        end
+    end
+
+    if not chamsEnabled or not weaponModel or State.Unloading then
+        for _, h in pairs(activeWeaponHighlights) do
+            if h and h.Parent then h:Destroy() end
+        end
+        activeWeaponHighlights = {}
+
+        -- Восстановление оригинальных свойств из snapshot (для корректного анинжекта)
+        for part, s in pairs(WeaponSnapshot) do
+            pcall(function()
+                if part and part.Parent then
+                    part.Material = s.Material
+                    part.Color = s.Color
+                    part.Transparency = s.Transparency
+                    part.Reflectance = s.Reflectance
+                    if s.SA and s.SA_Parent then s.SA.Parent = s.SA_Parent end
+                end
+            end)
+        end
+        table.clear(WeaponSnapshot)
+        return
+    end
+
+    local currentNeonParts = {}
+
+    for _, part in ipairs(weaponModel:GetDescendants()) do
+        if part:IsA("BasePart") and part.Name ~= "Hitbox" and part.Name ~= "HumanoidRootPart" then
+            if part.Name == "ViewmodelLight" or part:FindFirstAncestor("ViewmodelLight") or part:FindFirstAncestor("Viewmodel") then
+                continue
+            end
+            pcall(function()
+                if chamsMode == "Highlight" then
+                    currentNeonParts[part] = true
+                    local h = part:FindFirstChild("WeaponChamsHighlight")
+                    if not h then
+                        h = Instance.new("Highlight")
+                        h.Name = "WeaponChamsHighlight"
+                        h.Adornee = part
+                        h.Parent = part
+                        h.FillTransparency = 0
+                        h.OutlineTransparency = 1
+                        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        table.insert(activeWeaponHighlights, h)
+                    end
+                    h.FillColor = chamsColor
+                else
+                    local h = part:FindFirstChild("WeaponChamsHighlight")
+                    if h then h:Destroy() end
+
+                    if not WeaponSnapshot[part] then
+                        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
+                        WeaponSnapshot[part] = {
+                            Material = part.Material,
+                            Color = part.Color,
+                            Transparency = part.Transparency,
+                            Reflectance = part.Reflectance,
+                            SA = sa,
+                            SA_Parent = sa and sa.Parent or nil
+                        }
+                    end
+
+                    if chamsMode ~= "Neon" then
+                        for _, v in ipairs(part:GetChildren()) do
+                            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
+                                pcall(function() v.Parent = nil end)  -- Reversible hide
+                            end
+                        end
+                    end
+
+                    if chamsMode == "Glass" then
+                        part.Material = Enum.Material.Glass
+                        part.Color = chamsColor
+                        part.Transparency = cfg.Transparency or 0.4
+                    elseif chamsMode == "ForceField" then
+                        part.Material = Enum.Material.ForceField
+                        part.Color = chamsColor
+                        part.Transparency = 0
+                    elseif chamsMode == "Metal" then
+                        part.Material = Enum.Material.Metal
+                        part.Color = chamsColor
+                        part.Reflectance = cfg.Reflectance or 1.0
+                        part.Transparency = 0
+                    elseif chamsMode == "Neon" then
+                        part.Material = Enum.Material.Neon
+                        part.Color = chamsColor
+                        part.Transparency = 0
+                        for _, v in ipairs(part:GetChildren()) do
+                            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
+                                pcall(function() v.Parent = nil end)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+
+    if chamsMode == "Highlight" then
+        for i = #activeWeaponHighlights, 1, -1 do
+            local h = activeWeaponHighlights[i]
+            if not h or not h.Parent or not currentNeonParts[h.Adornee] then
+                if h then h:Destroy() end
+                table.remove(activeWeaponHighlights, i)
+            end
+        end
+    end
+end
+
+function State.removeAllWeaponChams()
+    Config.Visuals.WeaponChams.Enabled = false
+    updateWeaponChams()
+end
+
+
+local function updateViewmodelOffset()
+    local cfg = Config.Visuals.World.Viewmodel
+    if not cfg.Enabled or not cfg.CustomOffsets then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    for _, child in cam:GetChildren() do
+        if child:IsA("Model") then
+            local stats = child:FindFirstChild("Stats")
+            if stats then
+                local def = stats:FindFirstChild("Default")
+                if def and def:IsA("Vector3Value") then
+                    def.Value = Vector3.new(cfg.X, cfg.Y, cfg.Z)
+                end
+            end
+        end
+    end
+end
+
+-- Grenade Flight Tracers
+local function VisualizeShrapnel(pos)
+    local lines = {}
+    for i = 1, 16 do
+        local line = createDrawing("Line", {Visible = true, Color = Color3.fromRGB(255,100,0), Thickness = 2, Transparency = 1})
+        local dir = Vector3.new(math.random()*2-1,math.random()*2-1,math.random()*2-1).Unit
+        table.insert(lines, {obj=line, dir=dir})
+    end
+    task.spawn(function()
+        local Cam = workspace.CurrentCamera
+        local s = tick()
+        while tick()-s < 0.8 do
+            local t = tick()-s
+            local a = math.clamp(t/0.8,0,1)
+            local e = (1-(1-a)^2)*12
+            for _,l in lines do
+                local wS = pos+l.dir*(e*0.2)
+                local wE = pos+l.dir*e
+                local sS,o1 = Cam:WorldToViewportPoint(wS)
+                local sE,o2 = Cam:WorldToViewportPoint(wE)
+                l.obj.Visible = o1 or o2
+                if l.obj.Visible then
+                    l.obj.From = Vector2.new(sS.X,sS.Y)
+                    l.obj.To   = Vector2.new(sE.X,sE.Y)
+                    l.obj.Transparency = 1-a
+                end
+            end
+            task.wait()
+        end
+        for _,l in lines do l.obj:Remove() end
+    end)
+end
+
+local function TriggerHitMarkerEvent(hitPos)
+    if State.Unloading or not Config.Visuals.Hitmarker.Enabled then return end
+    local cfg = Config.Visuals.Hitmarker
+    local dur = cfg.Duration
+    local thick = cfg.Thickness
+    local style = cfg.Style or "Cross"
+
+    local lines = {}
+    local circle = nil
+    local img = nil
+
+    if style == "Image" then
+        -- [ НОВОЕ ] Картинка-хитмаркер из репо (Overmind/Hitmarkers/<Image>.png
+        local imgName = cfg.Image or "RedHit"
+        Internal._hitImageAssets = Internal._hitImageAssets or {}
+        local cached = Internal._hitImageAssets[imgName]
+        -- nil/false = ещё не найден; false кэшируется на 10с (не долбить диск каждым хитом)
+        if cached == nil or (cached == false and (os.clock() - (Internal._hitImageTriedAt or 0)) > 10) then
+            Internal._hitImageTriedAt = os.clock()
+            local ok, asset = pcall(function()
+                -- сперва Overmind/Hitmarkers/ (новая папка)
+                local a = (Internal.GetLocalAsset and Internal.GetLocalAsset(imgName, AssetManager.HitmarkersFolder)) or nil
+                if not a then a = (Internal.GetLocalAsset and Internal.GetLocalAsset(imgName)) or nil end
+                return a
+            end)
+            cached = (ok and asset) or false
+            Internal._hitImageAssets[imgName] = cached
+        end
+        local resolvedAsset = cached
+        if resolvedAsset then
+            img = Instance.new("ImageLabel")
+            img.Name = "OvermindHitImage"
+            img.BackgroundTransparency = 1
+            img.AnchorPoint = Vector2.new(0.5, 0.5)
+            img.Image = resolvedAsset
+            img.ScaleType = Enum.ScaleType.Fit
+            img.Visible = false
+            img.ZIndex = 50
+            img.Parent = scopeCrosshairGui  -- тот же CoreGui-хост
+        end
+    elseif style == "Cross" or style == "Crosshair" then
+        for i = 1, 4 do
+            local line = createDrawing("Line", {Thickness = thick, Transparency = 1, Visible = false})
+            lines[i] = line
+        end
+    elseif style == "Circle" then
+        circle = createDrawing("Circle", {Thickness = thick, Transparency = 1, NumSides = 32, Filled = false, Visible = false})
+    end
+
+    task.spawn(function()
+        local cam = workspace.CurrentCamera
+        local spawnTick = tick()
+        local expireTick = spawnTick + dur
+        while tick() < expireTick do
+            local currentTick = tick()
+            local screenPos, onScreen = cam:WorldToViewportPoint(hitPos)
+            if onScreen then
+                local center = Vector2.new(screenPos.X, screenPos.Y)
+                local lifetime = currentTick - spawnTick
+                local spinSpeed = cfg.SpinSpeed
+                local currentAngle = math.rad((lifetime * spinSpeed) % 360)
+
+                local pulseFactor = 1 + 0.35 * math.sin(currentTick * math.pi * 2)
+                local baseSize = cfg.Size * pulseFactor
+                local gap = (style == "Crosshair") and (6 * pulseFactor) or 0
+
+                local col = cfg.Color
+                if cfg.Rainbow then col = Color3.fromHSV((currentTick % 5) / 5, 1, 1) end
+
+                if style == "Cross" or style == "Crosshair" then
+                    local baseAngles = {45, 135, 225, 315}  -- Для классического крестика (X)
+                    if style == "Crosshair" then
+                        baseAngles = {0, 90, 180, 270}  -- Для классического прицела (+)
+                    end
+
+                    for j = 1, 4 do
+                        local line = lines[j]
+                        line.Color = col
+                        local totalAngle = currentAngle + math.rad(baseAngles[j])
+                        local cosA, sinA = math.cos(totalAngle), math.sin(totalAngle)
+                        line.From = center + Vector2.new(cosA * gap, sinA * gap)
+                        line.To = center + Vector2.new(cosA * (gap + baseSize), sinA * (gap + baseSize))
+                        line.Visible = true
+                    end
+                elseif style == "Circle" and circle then
+                    circle.Color = col
+                    circle.Radius = baseSize
+                    circle.Position = center
+                    circle.Visible = true
+                elseif style == "Image" and img then
+                    -- Пульс размера + плавное затухание в последние 30% времени; Rainbow красит через ...
+                    img.ImageColor3 = cfg.Rainbow and col or Color3.new(1, 1, 1)
+                    local lifeRatio = lifetime / dur
+                    img.ImageTransparency = (lifeRatio < 0.7) and 0 or ((lifeRatio - 0.7) / 0.3)
+                    local sz = baseSize * 2.4
+                    img.Size = UDim2.fromOffset(sz, sz)
+                    img.Position = UDim2.fromOffset(center.X, center.Y)
+                    img.Visible = true
+                end
+            else
+                if circle then circle.Visible = false end
+                if img then img.Visible = false end
+                for _, l in lines do l.Visible = false end
+            end
+            task.wait()
+        end
+        if circle then circle:Remove() end
+        if img then img:Destroy() end
+        for _, l in lines do l:Remove() end
+    end)
+end
+
+local function StartGrenadeFlightTracer(part)
+    if not part or not part:IsA("BasePart") then return end
+    if Internal.GrenadeTracers[part] then return end
+
+    local MAX_TRAIL = 30
+    local history = {}
+    local lines = {}
+
+    for i = 1, MAX_TRAIL do
+        local l = createDrawing("Line", {Thickness = 2, Transparency = 1, Visible = false})
+        lines[i] = l
+    end
+
+    Internal.GrenadeTracers[part] = lines
+
+    local conn
+    conn = Core.Services.RunService.RenderStepped:Connect(function()
+        if State.Unloading or not IsCurrentInstance() then
+            conn:Disconnect()
+            Internal.GrenadeTracers[part] = nil
+            for _, l in lines do pcall(function() l:Remove() end) end
+            return
+        end
+        local cfg = Config.Visuals.Projectiles
+        local enabled = cfg.Enabled and cfg.GrenadeESP.Enabled and cfg.GrenadeESP.Tracers
+        local col = cfg.GrenadeESP.TracerColor
+
+        if not part or not part.Parent then
+            conn:Disconnect()
+            Internal.GrenadeTracers[part] = nil
+            if #history > 0 then VisualizeShrapnel(history[1]) end
+            for _, l in lines do pcall(function() l:Remove() end) end
+            return
+        end
+
+        if not enabled then
+            for _, l in lines do l.Visible = false end
+            return
+        end
+
+        table.insert(history, 1, part.Position)
+        if #history > MAX_TRAIL + 1 then table.remove(history) end
+
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+
+        for i = 1, MAX_TRAIL do
+            local l = lines[i]
+            local p1 = history[i]
+            local p2 = history[i + 1]
+            if not p1 or not p2 then
+                l.Visible = false
+            else
+                local s1, o1 = cam:WorldToViewportPoint(p1)
+                local s2, o2 = cam:WorldToViewportPoint(p2)
+                if (o1 or o2) and s1.Z > 0 and s2.Z > 0 then
+                    local fade = 1 - (i / MAX_TRAIL)
+                    l.From = Vector2.new(s1.X, s1.Y)
+                    l.To = Vector2.new(s2.X, s2.Y)
+                    l.Color = col
+                    l.Thickness = math.max(2 * fade, 0.5)
+                    l.Transparency = 1 - fade
+                    l.Visible = true
+                else
+                    l.Visible = false
+                end
+            end
+        end
+    end)
+end
+
+local TrackedGrenades = {}
+local GRENADE_PATTERNS = {"grenade","flash","molotov","bang","frag","he_","_he","throwable","projectile","nade","incendiary","decoy","c4"}
+local GRENADE_BLACKLIST = {"gun","rifle","pistol","bullet","casing","debris","light","muzzle","launch","effect","arm","leg","torso","head","humanoid","mesh","constraint","weld","motor","zone","voxel"}
+
+local function isGrenadeObject(obj)
+    if not obj or (not obj:IsA("BasePart") and not obj:IsA("Model")) then return false end
+    local name = obj.Name:lower()
+    for _, p in ipairs(GRENADE_BLACKLIST) do if name:find(p) then return false end end
+    for _, p in ipairs(GRENADE_PATTERNS) do if name:find(p) then return true end end
+    return false
+end
+
+local function TryTrackGrenade(obj)
+    if not obj or TrackedGrenades[obj] then return end
+    local part = obj
+    if obj:IsA("Model") then
+        part = obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart")
+    end
+    if not part or not part:IsA("BasePart") then return end
+    if part.Size.Magnitude > 8 then return end
+    if Core.Services.Players:GetPlayerFromCharacter(obj) then return end
+
+    -- [ v31 ] АВТО-КАЛИБРОВКА БРОСКА
+    do
+        local gcfg = Config.Visuals.Projectiles.GrenadeESP
+        if gcfg.AutoCalibrate ~= false then
+            local myChar = Core.Local.Player and Core.Local.Player.Character
+            local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+            if myRoot and (part.Position - myRoot.Position).Magnitude < 20 then
+                local spd = part.AssemblyLinearVelocity.Magnitude
+                if spd > 15 and spd < 400 then
+                    local rounded = math.floor(spd + 0.5)
+                    if math.abs((gcfg.ThrowSpeed or 90) - rounded) >= 2 then
+                        local was = gcfg.ThrowSpeed
+                        gcfg.ThrowSpeed = rounded
+                        if Config.DebugMode then
+                            print(string.format("[GRENADE] auto-calibrated ThrowSpeed = %d (was %s)", rounded, tostring(was)))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    TrackedGrenades[obj] = true
+    obj.AncestryChanged:Connect(function(_, p)
+        if p == nil then TrackedGrenades[obj] = nil end
+    end)
+    StartGrenadeFlightTracer(part)
+end
+
+local function ScanForGrenades(folder)
+    if not folder then return end
+    for _, child in ipairs(folder:GetChildren()) do
+        if isGrenadeObject(child) then TryTrackGrenade(child) end
+        if child:IsA("Model") then
+            for _, sub in ipairs(child:GetChildren()) do
+                if isGrenadeObject(sub) then TryTrackGrenade(sub) end
+            end
+        end
+    end
+end
+
+-- [ GRENADE PREDICTION TRAJECTORY ARC SYSTEM v30 ]
+local PRED_SEGMENTS = 40
+local PRED_DOTS     = 14
+local PredictionLines = {}
+local PredictionDots  = {}
+local PredictionImpactRing = nil
+local PredictionImpactFill = nil
+local PredictionDropLine   = nil
+local PredictionPoints     = {}  -- переиспользуемый буфер точек (без аллокаций каждый кадр)
+local PredictionRayParams  = RaycastParams.new()
+PredictionRayParams.FilterType = Enum.RaycastFilterType.Exclude
+local PredictionRayFilter  = { nil, nil }
+
+for i = 1, PRED_SEGMENTS do
+    PredictionLines[i] = createDrawing("Line", {Thickness = 2, Visible = false})
+end
+for i = 1, PRED_DOTS do
+    PredictionDots[i] = createDrawing("Circle", {Thickness = 1, Filled = true, Radius = 2, Transparency = 0.35, Visible = false})
+end
+PredictionImpactRing = createDrawing("Circle", {Radius = 7, Thickness = 2, Filled = false, Visible = false})
+PredictionImpactFill = createDrawing("Circle", {Radius = 1.7, Thickness = 1, Filled = true, Visible = false})
+PredictionDropLine   = createDrawing("Line", {Thickness = 1, Visible = false})
+
+local function HideGrenadePrediction()
+    for i = 1, PRED_SEGMENTS do if PredictionLines[i] then PredictionLines[i].Visible = false end end
+    for i = 1, PRED_DOTS do if PredictionDots[i] then PredictionDots[i].Visible = false end end
+    if PredictionImpactRing then PredictionImpactRing.Visible = false end
+    if PredictionImpactFill then PredictionImpactFill.Visible = false end
+    if PredictionDropLine then PredictionDropLine.Visible = false end
+end
+
+local function UpdateGrenadePrediction()
+    local cfg = Config.Visuals.Projectiles
+    local enabled = cfg.Enabled and cfg.GrenadeESP.Enabled and cfg.GrenadeESP.Prediction ~= false
+    if not enabled or State.Unloading then
+        HideGrenadePrediction()
+        return
+    end
+
+    local cam = workspace.CurrentCamera
+    local lp = Core.Local.Player
+    local lchar = lp and lp.Character
+    if not cam or not lchar then
+        HideGrenadePrediction()
+        return
+    end
+
+    -- Проверка на гранату в руках у локального игрока
+    local isHoldingGrenade = false
+    for _, item in ipairs(lchar:GetChildren()) do
+        if item:IsA("Tool") or item:IsA("Model") then
+            local n = item.Name:lower()
+            if n:find("grenade") or n:find("flash") or n:find("molotov") or n:find("smoke") or n:find("he") or n:find("throwable") or n:find("frag") then
+                isHoldingGrenade = true
+                break
+            end
+        end
+    end
+
+    if not isHoldingGrenade then
+        for _, child in ipairs(cam:GetChildren()) do
+            if child:IsA("Model") then
+                local n = child.Name:lower()
+                if n:find("grenade") or n:find("flash") or n:find("molotov") or n:find("smoke") or n:find("he") or n:find("throwable") then
+                    isHoldingGrenade = true
+                    break
+                end
+            end
+        end
+    end
+
+    if not isHoldingGrenade then
+        HideGrenadePrediction()
+        return
+    end
+
+    -- [ v30 ] скорость броска и гравитация
+    local cfgG = cfg.GrenadeESP
+    local camCF = cam.CFrame
+    local origin = camCF.Position + (camCF.LookVector * (cfgG.StartOffset or 1.5))
+    local throwSpeed = cfgG.ThrowSpeed or 90
+    local gravityScale = cfgG.GravityScale or 1
+    local gravity = Vector3.new(0, -(workspace.Gravity * gravityScale), 0)
+    local curVel = camCF.LookVector * throwSpeed
+    local stepDt = cfgG.SimStep or 0.04
+
+    PredictionRayFilter[1] = lchar
+    PredictionRayFilter[2] = cam
+    PredictionRayParams.FilterDescendantsInstances = PredictionRayFilter
+
+    local points = PredictionPoints
+    table.clear(points)
+    points[1] = origin
+    local curPos = origin
+    local hitPoint = nil
+    local bounces = 0
+    local maxBounces = cfgG.Bounce and 2 or 0
+
+    for i = 1, PRED_SEGMENTS do
+        local nextPos = curPos + (curVel * stepDt) + (0.5 * gravity * stepDt * stepDt)
+        local nextVel = curVel + (gravity * stepDt)
+
+        local res = workspace:Raycast(curPos, nextPos - curPos, PredictionRayParams)
+        if res then
+            points[#points + 1] = res.Position
+            if not hitPoint then hitPoint = res.Position end
+            bounces = bounces + 1
+            if bounces > maxBounces then break end
+            -- отскок: отражаем скорость относительно нормали (затухание 0.55)
+            local n = res.Normal
+            nextVel = (nextVel - n * (2 * nextVel:Dot(n))) * 0.55
+            curPos = res.Position + (n * 0.05)
+            points[#points + 1] = curPos
+        else
+            points[#points + 1] = nextPos
+            curPos = nextPos
+        end
+        curVel = nextVel
+        if #points >= PRED_SEGMENTS then break end
+    end
+
+    local colA  = cfgG.TracerColor or Color3.fromRGB(255, 200, 0)
+    local colB  = cfgG.TracerColor2 or Color3.fromRGB(255, 90, 0)
+    local style = cfgG.Style or "Arc + Dots"
+    local wantArc  = (style ~= "Dots")
+    local wantDots = (style ~= "Arc")
+    local nPoints  = #points
+    local span     = math.max(nPoints - 1, 1)
+
+    -- 1. ДУГА: градиент от colA к colB + затухание и утоньшение к концу траектории
+    for i = 1, PRED_SEGMENTS do
+        local line = PredictionLines[i]
+        local p1, p2 = points[i], points[i + 1]
+        if wantArc and p1 and p2 then
+            local s1, o1 = cam:WorldToViewportPoint(p1)
+            local s2, o2 = cam:WorldToViewportPoint(p2)
+            if (o1 or o2) and s1.Z > 0 and s2.Z > 0 then
+                local t = (i - 1) / span
+                line.From         = Vector2.new(s1.X, s1.Y)
+                line.To           = Vector2.new(s2.X, s2.Y)
+                line.Color        = colA:Lerp(colB, math.clamp(t, 0, 1))
+                line.Thickness    = 2.4 - (t * 1.1)
+                line.Transparency = 0.05 + (t * 0.35)
+                line.Visible      = true
+                continue
+            end
+        end
+        line.Visible = false
+    end
+
+    -- 2. ТОЧКИ по траектории
+    local dotUsed = 0
+    if wantDots then
+        for i = 1, nPoints, 3 do
+            dotUsed = dotUsed + 1
+            local dot = PredictionDots[dotUsed]
+            if not dot then break end
+            local sp, on = cam:WorldToViewportPoint(points[i])
+            local t = (i - 1) / span
+            if on and sp.Z > 0 then
+                dot.Position     = Vector2.new(sp.X, sp.Y)
+                dot.Radius       = 2.6 - (t * 1.3)
+                dot.Color        = colA:Lerp(colB, math.clamp(t, 0, 1))
+                dot.Transparency = 0.15 + (t * 0.5)
+                dot.Visible      = true
+            else
+                dot.Visible = false
+            end
+        end
+    end
+    for i = dotUsed + 1, PRED_DOTS do PredictionDots[i].Visible = false end
+
+    -- 3. ЗОНА ПАДЕНИЯ
+    if hitPoint then
+        local sp, on = cam:WorldToViewportPoint(hitPoint)
+        if on and sp.Z > 0 then
+            local sp2 = Vector2.new(sp.X, sp.Y)
+            local pulse = 1 + (math.sin(tick() * 7) * 0.14)
+
+            PredictionImpactRing.Position     = sp2
+            PredictionImpactRing.Radius       = (cfgG.ImpactRadius or 7) * pulse
+            PredictionImpactRing.Thickness    = 2
+            PredictionImpactRing.Color        = colB
+            PredictionImpactRing.Transparency = 0.05
+            PredictionImpactRing.Visible      = true
+
+            PredictionImpactFill.Position     = sp2
+            PredictionImpactFill.Radius       = 1.7
+            PredictionImpactFill.Color        = colB
+            PredictionImpactFill.Transparency = 0.25
+            PredictionImpactFill.Visible      = true
+
+            local up, onUp = cam:WorldToViewportPoint(hitPoint + Vector3.new(0, cfgG.DropLineHeight or 9, 0))
+            if onUp and up.Z > 0 then
+                PredictionDropLine.From         = sp2
+                PredictionDropLine.To           = Vector2.new(up.X, up.Y)
+                PredictionDropLine.Color        = colB
+                PredictionDropLine.Thickness    = 1
+                PredictionDropLine.Transparency = 0.45
+                PredictionDropLine.Visible      = true
+            else
+                PredictionDropLine.Visible = false
+            end
+        else
+            HideGrenadePrediction()
+        end
+    else
+        HideGrenadePrediction()
+    end
+end
+
+-- Реальное отслеживание летящих гранат (ChildAdded)
+task.spawn(function()
+    task.wait(0.5)
+    ScanForGrenades(workspace)
+
+    for _, fname in ipairs({"Debris", "FX", "Effects", "Projectiles", "Grenades", "Characters"}) do
+        local f = workspace:FindFirstChild(fname)
+        if f then
+            ScanForGrenades(f)
+            State.Connections["GrenadeWatch_" .. fname] = f.ChildAdded:Connect(function(child)
+                task.wait()
+                if isGrenadeObject(child) then TryTrackGrenade(child) end
+            end)
+        end
+    end
+
+    State.Connections.GrenadeWorkspaceAdded = workspace.ChildAdded:Connect(function(child)
+        task.wait()
+        if isGrenadeObject(child) then TryTrackGrenade(child) end
+        local n = child.Name:lower()
+        if n == "debris" or n == "effects" or n == "fx" or n == "projectiles" or n == "grenades" then
+            ScanForGrenades(child)
+            child.ChildAdded:Connect(function(sub)
+                task.wait()
+                if isGrenadeObject(sub) then TryTrackGrenade(sub) end
+            end)
+        end
+    end)
+end)
+
+-- Terrain Hugging Zones
+local skyboxtable = {
+    ["Night"] = { SkyboxBk = "rbxassetid://1514717643", SkyboxDn = "rbxassetid://1514716936", SkyboxFt = "rbxassetid://1514715910", SkyboxLf = "rbxassetid://1514714945", SkyboxRt = "rbxassetid://1514714011", SkyboxUp = "rbxassetid://1514713374" },
+    ["Ocean Sunset"] = { SkyboxBk = "rbxassetid://17525686840", SkyboxDn = "rbxassetid://17525678473", SkyboxFt = "rbxassetid://17525684686", SkyboxLf = "rbxassetid://17525680663", SkyboxRt = "rbxassetid://17525682665", SkyboxUp = "rbxassetid://17525674545" },
+    ["My Summer Car"] = { SkyboxBk = "rbxassetid://16648590964", SkyboxDn = "rbxassetid://16648617436", SkyboxFt = "rbxassetid://16648595424", SkyboxLf = "rbxassetid://16648566370", SkyboxRt = "rbxassetid://16648577071", SkyboxUp = "rbxassetid://16648598180" },
+    ["Standard"] = { SkyboxBk = "http://www.roblox.com/asset/?id=91458024", SkyboxDn = "http://www.roblox.com/asset/?id=91457980", SkyboxFt = "http://www.roblox.com/asset/?id=91458024", SkyboxLf = "http://www.roblox.com/asset/?id=91458024", SkyboxRt = "http://www.roblox.com/asset/?id=91458024", SkyboxUp = "http://www.roblox.com/asset/?id=91458002" },
+    ["Minecraft"] = { SkyboxBk = "http://www.roblox.com/asset/?id=8735166756", SkyboxDn = "http://www.roblox.com/asset/?id=8735166707", SkyboxFt = "http://www.roblox.com/asset/?id=8735231668", SkyboxLf = "http://www.roblox.com/asset/?id=8735166755", SkyboxRt = "http://www.roblox.com/asset/?id=8735166751", SkyboxUp = "http://www.roblox.com/asset/?id=8735166729" },
+    ["Spongebob"] = { SkyboxBk = "http://www.roblox.com/asset/?id=277099484", SkyboxDn = "http://www.roblox.com/asset/?id=277099500", SkyboxFt = "http://www.roblox.com/asset/?id=277099554", SkyboxLf = "http://www.roblox.com/asset/?id=277099531", SkyboxRt = "http://www.roblox.com/asset/?id=277099589", SkyboxUp = "http://www.roblox.com/asset/?id=277101591" },
+    ["Deep Space"] = { SkyboxBk = "http://www.roblox.com/asset/?id=159248188", SkyboxDn = "http://www.roblox.com/asset/?id=159248183", SkyboxFt = "http://www.roblox.com/asset/?id=159248187", SkyboxLf = "http://www.roblox.com/asset/?id=159248173", SkyboxRt = "http://www.roblox.com/asset/?id=159248192", SkyboxUp = "http://www.roblox.com/asset/?id=159248176" },
+    ["Clouded Sky"] = { SkyboxBk = "http://www.roblox.com/asset/?id=252760981", SkyboxDn = "http://www.roblox.com/asset/?id=252763035", SkyboxFt = "http://www.roblox.com/asset/?id=252761439", SkyboxLf = "http://www.roblox.com/asset/?id=252760980", SkyboxRt = "http://www.roblox.com/asset/?id=252760986", SkyboxUp = "http://www.roblox.com/asset/?id=252762652" },
+    ["Retro"] = { SkyboxBk = "rbxasset://sky/null_plainsky512_bk.jpg", SkyboxDn = "rbxasset://sky/null_plainsky512_dn.jpg", SkyboxFt = "rbxasset://sky/null_plainsky512_ft.jpg", SkyboxLf = "rbxasset://sky/null_plainsky512_lf.jpg", SkyboxRt = "rbxasset://sky/null_plainsky512_rt.jpg", SkyboxUp = "rbxasset://sky/null_plainsky512_up.jpg" },
+    ["City"] = { SkyboxBk = "http://www.roblox.com/asset/?id=9134792889", SkyboxDn = "http://www.roblox.com/asset/?id=9134791975", SkyboxFt = "http://www.roblox.com/asset/?id=9134793457", SkyboxLf = "http://www.roblox.com/asset/?id=9134791234", SkyboxRt = "http://www.roblox.com/asset/?id=9134790419", SkyboxUp = "http://www.roblox.com/asset/?id=9134791633" },
+    ["Purple Nebula"] = { SkyboxBk = "http://www.roblox.com/asset/?id=15983968922", SkyboxDn = "http://www.roblox.com/asset/?id=15983966825", SkyboxFt = "http://www.roblox.com/asset/?id=15983965025", SkyboxLf = "http://www.roblox.com/asset/?id=15983967420", SkyboxRt = "http://www.roblox.com/asset/?id=15983966246", SkyboxUp = "http://www.roblox.com/asset/?id=15983964246" },
+    ["Pink Sky"] = { SkyboxBk = "http://www.roblox.com/asset/?id=7890140060", SkyboxDn = "http://www.roblox.com/asset/?id=7890140060", SkyboxFt = "http://www.roblox.com/asset/?id=7890140060", SkyboxLf = "http://www.roblox.com/asset/?id=7890140060", SkyboxRt = "http://www.roblox.com/asset/?id=7890140060", SkyboxUp = "http://www.roblox.com/asset/?id=7890140060" }
+}
+
+local function UpdateSkybox(name)
+    local data = skyboxtable[name]
+    if not data then return end
+    local lighting = game:GetService("Lighting")
+    local sky = lighting:FindFirstChild("Overmind_Sky") or Instance.new("Sky")
+    sky.Name = "Overmind_Sky"; sky.Parent = lighting
+    for k, v in data do sky[k] = v end
+    sky.SunTextureId = ""; sky.MoonTextureId = ""; sky.StarCount = 0
+end
+
+local WeatherObjects = { Part = nil, Emitter = nil }
+local function UpdateWeather(wType)
+    if WeatherObjects.Part then WeatherObjects.Part:Destroy() WeatherObjects.Part = nil end
+    if wType == "None" then return end
+    local p = Instance.new("Part")
+    p.Name = "Overmind_Weather"; p.Size = Vector3.new(100, 1, 100); p.Transparency = 1; p.Anchored = true; p.CanCollide = false; p.Parent = workspace.CurrentCamera
+    local e = Instance.new("ParticleEmitter", p)
+    e.EmissionDirection = Enum.NormalId.Bottom; e.Enabled = true
+    if wType == "Rain" then
+        e.Texture = "rbxassetid://241868005"; e.Rate = 10000; e.Size = NumberSequence.new(3, 6); e.Lifetime = NumberRange.new(2, 2.5); e.Speed = NumberRange.new(80, 100); e.Acceleration = Vector3.new(0, -50, 0)
+    elseif wType == "Snow" then
+        e.Texture = "rbxassetid://99851851"; e.Rate = 200; e.Size = NumberSequence.new(0.25, 0.35); e.Speed = NumberRange.new(30, 30); e.Lifetime = NumberRange.new(5, 10); e.SpreadAngle = Vector2.new(50, 50)
+    elseif wType == "Hell Fire" then
+        e.Texture = "rbxassetid://242205518"; e.Rate = 400; e.Color = ColorSequence.new(Color3.fromRGB(255, 100, 0), Color3.fromRGB(150, 0, 0)); e.Size = NumberSequence.new(2, 4); e.Speed = NumberRange.new(40, 60); e.Lifetime = NumberRange.new(2, 3)
+    end
+    WeatherObjects.Part, WeatherObjects.Emitter = p, e
+end
+
+local function updateZone(parent, isMolly)
+    if State.VisualRegistry.Zones[parent] then return end
+    local color = isMolly and Config.Visuals.Projectiles.GrenadeESP.MolotovColor or Config.Visuals.Projectiles.GrenadeESP.SmokeColor
+    local cylinders = {}
+
+    for i = 1, ZONE_SEGMENTS do
+        local p = Instance.new("Part")
+        p.Name = "Overmind_Zone_Segment"; p.Anchored = true; p.CanCollide = false; p.Material = Enum.Material.Neon; p.Shape = Enum.PartType.Cylinder; p.Color = color; p.Transparency = 0.5; p.Parent = workspace
+        table.insert(cylinders, p)
+        table.insert(State.Objects, p)
+    end
+
+    State.VisualRegistry.Zones[parent] = cylinders
+
+    task.spawn(function()
+        while parent.Parent do
+            local cfg = Config.Visuals.Projectiles
+            if not cfg.Enabled or not cfg.GrenadeESP.Enabled or (isMolly and not cfg.GrenadeESP.MolotovZone) or (not isMolly and not cfg.GrenadeESP.SmokeZone) then
+                for _, cyl in cylinders do cyl.Transparency = 1 end
+            else
+                local center, radius, found = computeZoneBounds(parent)
+                if not found then break end
+
+                for i, cyl in cylinders do
+                    local angleA = (i-1)/ZONE_SEGMENTS * math.pi * 2
+                    local angleB = i/ZONE_SEGMENTS * math.pi * 2
+                    local pA = center + Vector3.new(math.cos(angleA)*radius, 0, math.sin(angleA)*radius)
+                    local pB = center + Vector3.new(math.cos(angleB)*radius, 0, math.sin(angleB)*radius)
+
+                    local yA = getGroundY(pA.X, center.Y, pA.Z) + 0.3
+                    local yB = getGroundY(pB.X, center.Y, pB.Z) + 0.3
+
+                    local posA = Vector3.new(pA.X, yA, pA.Z)
+                    local posB = Vector3.new(pB.X, yB, pB.Z)
+                    local mid = (posA + posB) / 2
+                    local dir = (posB - posA)
+
+                    cyl.CFrame = CFrame.lookAt(mid, posB) * CFrame.Angles(0, math.rad(90), 0)
+                    cyl.Size = Vector3.new(dir.Magnitude, 0.2, 0.2)
+                    cyl.Transparency = 0.5
+                end
+            end
+            task.wait(0.1)
+        end
+        for _, c in cylinders do c:Destroy() end
+        VisualRegistry.Zones[parent] = nil
+    end)
+end
+
+local function get_cached_screen_pos(cache, part)
+    local c = cache[part]
+    if c then return c[1], c[2] end
+    local pos, vis = workspace.CurrentCamera:WorldToViewportPoint(part.Position)
+    local sp = Vector2_new(pos.X, pos.Y)
+    cache[part] = {sp, vis}
+    return sp, vis
+end
+
+local function drawAdvancedTargetIndicator(player, char, root, data, esp, cam, dt)
+    local isLocked = false
+    if player and player.Character and State.lockedTargetInstance then
+        isLocked = (player.Character == State.lockedTargetInstance.Parent)
+    end
+    local ct = data.circulartarget
+    local head = char:FindFirstChild("Head")
+    if esp.TargetIndicator.Enabled and isLocked and head and root then
+        local speed = 2.0
+        if ct.movingUp then
+            ct.alpha = ct.alpha + dt * speed
+            if ct.alpha >= 1 then ct.alpha, ct.movingUp = 1, false end
+        else
+            ct.alpha = ct.alpha - dt * speed
+            if ct.alpha <= 0 then ct.alpha, ct.movingUp = 0, true end
+        end
+
+        local footPos = root.Position - Vector3_new(0, (root.Size.Y * 0.8) + 1.2, 0)
+        local headPos = head.Position + Vector3_new(0, 0.3, 0)
+        local currentWorldPos = footPos:Lerp(headPos, ct.alpha)
+
+        table.insert(ct.trailHistory, 1, currentWorldPos)
+        if #ct.trailHistory > 25 then table.remove(ct.trailHistory) end
+
+        for i = 1, 24 do
+            local p1, p2 = ct.trailHistory[i], ct.trailHistory[i+1]
+            local trailLine = ct.trailLines[i]
+            local glowLine = ct.neonGlowLines[i]
+            if p1 and p2 then
+                local s1, v1 = cam:WorldToViewportPoint(p1)
+                local s2, v2 = cam:WorldToViewportPoint(p2)
+                if v1 or v2 then
+                    local fade = math.clamp(1 - (i/25), 0.05, 1)
+                    glowLine.From, glowLine.To, glowLine.Color, glowLine.Transparency, glowLine.Visible = Vector2_new(s1.X, s1.Y), Vector2_new(s2.X, s2.Y), esp.TargetIndicator.Color, 1 - (fade * 0.35), true
+                    trailLine.From, trailLine.To, trailLine.Color, trailLine.Transparency, trailLine.Visible = Vector2_new(s1.X, s1.Y), Vector2_new(s2.X, s2.Y), esp.TargetIndicator.Color, 1 - (fade * 0.85), true
+                else trailLine.Visible, glowLine.Visible = false, false end
+            else trailLine.Visible, glowLine.Visible = false, false end
+        end
+
+        local R, SEGS = 2.2, 32
+        for i = 1, SEGS do
+            local aA = (math.pi * 2) * ((i - 1) / SEGS)
+            local aB = (math.pi * 2) * (i / SEGS)
+            local wA = currentWorldPos + Vector3_new(math.cos(aA) * R, 0, math.sin(aA) * R)
+            local wB = currentWorldPos + Vector3_new(math.cos(aB) * R, 0, math.sin(aB) * R)
+            local sA, vA = cam:WorldToViewportPoint(wA)
+            local sB, vB = cam:WorldToViewportPoint(wB)
+            local line = ct.lines[i]
+            if vA or vB then
+                line.From, line.To, line.Color, line.Visible = Vector2_new(sA.X, sA.Y), Vector2_new(sB.X, sB.Y), esp.TargetIndicator.Color, true
+            else line.Visible = false end
+        end
+    else
+        for _, l in ipairs(ct.lines) do l.Visible = false end
+        for _, l in ipairs(ct.trailLines) do l.Visible = false end
+        for _, l in ipairs(ct.neonGlowLines) do l.Visible = false end
+    end
+end
+
+local BulletImpactV1Part = Instance.new("Part")
+BulletImpactV1Part.Name = "CubeChecker_Physical"
+BulletImpactV1Part.Size = Vector3_new(1.5, 1.5, 0.01)
+BulletImpactV1Part.Anchored = true
+BulletImpactV1Part.CanCollide = false
+BulletImpactV1Part.CanQuery = false
+BulletImpactV1Part.CanTouch = false
+BulletImpactV1Part.Material = Enum.Material.Neon
+BulletImpactV1Part.Transparency = 0.98
+BulletImpactV1Part.Parent = workspace
+
+local selectionBox = Instance.new("SelectionBox")
+selectionBox.Adornee = BulletImpactV1Part
+selectionBox.Color3 = Color3.fromRGB(255, 0, 0)
+selectionBox.LineThickness = 0.04
+selectionBox.Transparency = 0.2
+selectionBox.Parent = BulletImpactV1Part
+
+local impactRayParams = RaycastParams.new()
+impactRayParams.FilterType = Enum.RaycastFilterType.Exclude
+impactRayParams.IgnoreWater = true
+
+local function updateCubeChecker(dt)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local cfg = Config.Combat.Memesense
+    local enabled = cfg.Enabled and cfg.CubeChecker
+    BulletImpactV1Part.Parent = enabled and workspace or nil
+
+    if enabled then
+        local sizeVal = cfg.CubeSize or 1.5
+        local maxDist = cfg.MaxRayDist or 20
+        BulletImpactV1Part.Size = Vector3_new(sizeVal, sizeVal, 0.01)
+
+        local userColor = cfg.CubeColor or Color3.fromRGB(255, 0, 0)
+        if cfg.CubeRainbow then
+            userColor = Color3.fromHSV((tick() % 5) / 5, 1, 1)
+        end
+
+        local origin = cam.CFrame.Position
+        local direction = cam.CFrame.LookVector * maxDist
+        impactRayParams.FilterDescendantsInstances = {Core.Local.Player.Character, BulletImpactV1Part}
+        local result = workspace:Raycast(origin, direction, impactRayParams)
+        if result then
+            BulletImpactV1Part.CFrame = CFrame.new(result.Position, result.Position + result.Normal)
+        else
+            BulletImpactV1Part.CFrame = CFrame.new(origin + direction)
+        end
+        selectionBox.Color3 = userColor
+    end
+end
+
+-- [ SHOW TARGET SYSTEM ]
+local ShowTargetHitMarkerLines = {}
+for i = 1, 4 do
+    ShowTargetHitMarkerLines[i] = createDrawing("Line", {Thickness = 2, Transparency = 1, Visible = false})
+end
+
+local ShowTargetConnectorLine = createDrawing("Line", {Thickness = 1.5, Transparency = 1, Visible = false})
+
+local function updateShowTarget(dt)
+    local cam = workspace.CurrentCamera
+    local cfg = Config.Combat.Memesense
+    local showTargetEnabled = cfg.Enabled and cfg.ShowTargetPlayer
+    local targetMode = cfg.TargetDisplayMode or "Crosshair"
+
+    local targetPart = State.MemesenseTarget  -- Используем текущую цель аимбота
+
+    local lineVisible = false
+    local crosshairVisible = false
+
+    if showTargetEnabled and targetPart and targetPart.Parent then
+        local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+        local center = Vector2_new(screenPos.X, screenPos.Y)
+        local currentTick = tick()
+
+        if targetMode == "Crosshair" then
+            local crossCol = cfg.CrosshairColor or Color3.fromRGB(0, 255, 255)
+            local pulseFactor = 1 + 0.3 * math.sin(currentTick * math.pi * 2)
+            local baseSize = 16 * pulseFactor
+            local gap = 5 * pulseFactor
+            local spinAngle = math.rad((currentTick * 180) % 360)
+            local baseAngles = {0, math.pi/2, math.pi, (3*math.pi)/2}
+            for j = 1, 4 do
+                local line = ShowTargetHitMarkerLines[j]
+                line.Color = crossCol
+                local totalAngle = spinAngle + baseAngles[j]
+                local cosA, sinA = math.cos(totalAngle), math.sin(totalAngle)
+                line.From = center + Vector2_new(cosA * gap, sinA * gap)
+                line.To = center + Vector2_new(cosA * (gap + baseSize), sinA * (gap + baseSize))
+                line.Visible = true
+            end
+            crosshairVisible = true
+        elseif targetMode == "Line" then
+            local lineCol = cfg.LineColor or Color3.fromRGB(0, 255, 255)
+            local viewportCenter = cam.ViewportSize / 2
+            ShowTargetConnectorLine.From = viewportCenter
+            ShowTargetConnectorLine.To = center
+            ShowTargetConnectorLine.Color = lineCol
+            ShowTargetConnectorLine.Visible = true
+            lineVisible = true
+        end
+    end
+
+    if not crosshairVisible then for j = 1, 4 do ShowTargetHitMarkerLines[j].Visible = false end end
+    if not lineVisible then ShowTargetConnectorLine.Visible = false end
+end
+
+-- [ ОПТИМИЗАЦИЯ ] общая константа цвета обводки ESP (создаётся один раз
+local ESP_COLOR_OUTLINE_BLACK = Color3.new(0, 0, 0)
+
+-- [ v31 ] DAMAGE LOG / НАПРАВЛЕНИЕ УРОНА / HUD / GAMESTATE
+local DamageLog = { entries = {}, lines = nil, arrow = nil, ah1 = nil, ah2 = nil, dirUntil = 0, lastDir = nil }
+local HudText = {}  -- [ v31 ] тексты HUD (AA + спидометр)
+local WeaponCache = {}  -- [ v31 ] кэш оружия врага для ESP
+local gameStateDumped = false
+
+local WEAPON_NAMES = {
+    "AK-47", "AWP", "SSG 08", "AUG", "FAMAS", "Galil AR", "M4A1-S", "M4A1", "M4A4", "MP5-SD", "MP5",
+    "MP7", "MP9", "MAC-10", "P90", "UMP-45", "Tec-9", "CZ75-Auto", "Desert Eagle", "Dual Berettas",
+    "Five-SeveN", "Glock-18", "P250", "R8 Revolver", "Sawed-Off", "MAG-7", "Nova", "XM1014",
+    "Negev", "M249", "Karambit", "Butterfly Knife", "Skeleton Knife", "Stiletto Knife", "Gut Knife",
+    "HE Grenade", "Smoke Grenade", "Flashbang", "Incendiary Grenade", "Decoy Grenade", "Molotov", "C4", "LightSaber",
+}
+
+-- [ v31 ] Определение оружия врага по модели в его персонаже (кэш 1с)
+function getEnemyWeapon(char)
+    local now = os.clock()
+    local c = WeaponCache[char]
+    if c and now - c.time < 1 then return c.name end
+    local found = nil
+    local ok = pcall(function()
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("Tool") or obj:IsA("Model") or obj:IsA("BasePart") then
+                local nm = obj.Name
+                for _, w in ipairs(WEAPON_NAMES) do
+                    if nm:find(w, 1, true) then found = w break end
+                end
+                if found then break end
+            end
+        end
+    end)
+    WeaponCache[char] = { name = (ok and found) or nil, time = now }
+    return (ok and found) or nil
+end
+
+local function ensureDamageDrawings()
+    if DamageLog.lines then return end
+    DamageLog.lines = {}
+    local maxLines = math.clamp(Config.Visuals.DamageLog.MaxLines or 5, 3, 10)
+    for i = 1, maxLines do
+        DamageLog.lines[i] = createDrawing("Text", { Visible = false, Center = false, Outline = true, Size = 14, Font = 2 })
+    end
+    DamageLog.arrow = createDrawing("Line", { Visible = false, Thickness = 2 })
+    DamageLog.ah1   = createDrawing("Line", { Visible = false, Thickness = 2 })
+    DamageLog.ah2   = createDrawing("Line", { Visible = false, Thickness = 2 })
+end
+
+local function addDamageEntry(text, color)
+    table.insert(DamageLog.entries, 1, { text = text, color = color, time = os.clock() })
+    local maxLines = math.clamp(Config.Visuals.DamageLog.MaxLines or 5, 3, 10)
+    while #DamageLog.entries > maxLines do table.remove(DamageLog.entries) end
+end
+
+local function updateDamageLog()
+    local cfg = Config.Visuals.DamageLog
+    ensureDamageDrawings()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local vp = cam.ViewportSize
+    local now = os.clock()
+    local dur = cfg.Duration or 6
+
+    -- чистка устаревших записей
+    while #DamageLog.entries > 0 and now - DamageLog.entries[#DamageLog.entries].time > dur do
+        table.remove(DamageLog.entries)
+    end
+
+    local show = (cfg.Enabled ~= false) and not State.Unloading
+    local used = 0
+    if show then
+        for i = 1, #DamageLog.entries do
+            local e = DamageLog.entries[i]
+            used = used + 1
+            local ln = DamageLog.lines[used]
+            if not ln then break end
+            local fade = math.clamp((now - e.time) / dur, 0, 1)
+            ln.Position     = Vector2.new(20, vp.Y - 130 - (used * 17))
+            ln.Color        = e.color
+            ln.Transparency = 0.1 + fade * 0.7
+            ln.Text         = e.text
+            ln.Visible      = true
+        end
+    end
+    for i = used + 1, #DamageLog.lines do DamageLog.lines[i].Visible = false end
+
+    -- стрелка «откуда прилетело» (CS-style)
+    local arrowOn = show and cfg.ShowDirection and now < (DamageLog.dirUntil or 0) and DamageLog.lastDir
+    if arrowOn and typeof(DamageLog.lastDir) == "Vector3" and DamageLog.lastDir.Magnitude > 0.01 then
+        local center = vp / 2
+        local sp = cam:WorldToViewportPoint(cam.CFrame.Position + DamageLog.lastDir.Unit * 20)
+        local d = Vector2.new(sp.X - center.X, sp.Y - center.Y)
+        if d.Magnitude < 3 then d = Vector2.new(0, -1) end
+        d = d.Unit
+        local tip = center + d * 74
+        local head = Color3.fromRGB(255, 110, 110)
+        DamageLog.arrow.From, DamageLog.arrow.To = center + d * 48, tip
+        DamageLog.arrow.Color, DamageLog.arrow.Transparency = head, 0.15
+        DamageLog.arrow.Visible = true
+        local perp = Vector2.new(-d.Y, d.X)
+        DamageLog.ah1.From, DamageLog.ah1.To = tip, tip - d * 13 + perp * 9
+        DamageLog.ah2.From, DamageLog.ah2.To = tip, tip - d * 13 - perp * 9
+        DamageLog.ah1.Color, DamageLog.ah2.Color = head, head
+        DamageLog.ah1.Transparency, DamageLog.ah2.Transparency = 0.15, 0.15
+        DamageLog.ah1.Visible, DamageLog.ah2.Visible = true, true
+    else
+        if DamageLog.arrow then DamageLog.arrow.Visible = false end
+        if DamageLog.ah1 then DamageLog.ah1.Visible = false end
+        if DamageLog.ah2 then DamageLog.ah2.Visible = false end
+    end
+end
+
+-- [ v31 ] HUD
+local function updateHud()
+    local cfgHud = Config.Visuals.Hud
+    if not HudText.aa then
+        HudText.aa    = createDrawing("Text", { Size = 14, Center = false, Outline = true, Font = 2 })
+        HudText.speed = createDrawing("Text", { Size = 14, Center = false, Outline = true, Font = 2 })
+    end
+    local cam = workspace.CurrentCamera
+
+    if cfgHud.AntiAim and cam then
+        local st = AntiAimState
+        local look = cam.CFrame.LookVector
+        local realYaw = math.atan2(-look.X, -look.Z)
+        HudText.aa.Position = Vector2.new(16, 56)
+        HudText.aa.Color = st.SpoofActive and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(150, 150, 160)
+        HudText.aa.Text = string.format(
+            "AA %s | lookSpoof %s | pitchSpoof %s | cmds %d/%d | fake %.0f\194\176 real %.0f\194\176 | %s",
+            tostring(st.CurrentMethod or "?"),
+            st.YawSpoofOk and "OK" or "NO",
+            (st.PitchSpoofActive and st.PitchSpoofOk) and "OK" or "NO",
+            st.SpoofCount or 0, st.PitchSpoofCount or 0,
+            math.deg(st.DesiredYawRad or 0), math.deg(realYaw),
+            tostring(st.CurrentCondition or "-"))
+        HudText.aa.Visible = true
+    else
+        HudText.aa.Visible = false
+    end
+
+    local info = State.BhopSpeedInfo
+    if cfgHud.Speed and info and Config.Cheat.AutoBhop.Enabled then
+        local cap = info.cap or 24.5
+        local pct = math.clamp((info.speed or 0) / math.max(cap, 0.1), 0, 2)
+        HudText.speed.Position = Vector2.new(16, 74)
+        HudText.speed.Color = (info.speed or 0) >= (info.threshold or 19)
+            and Color3.fromRGB(160, 255, 160) or Color3.fromRGB(255, 170, 80)
+        HudText.speed.Text = string.format("SPEED %.1f / cap %.1f (%d%%) | penalty<%s | %s",
+            info.speed or 0, cap, math.floor(pct * 100), tostring(info.threshold or 19), tostring(info.source or "dump"))
+        HudText.speed.Visible = true
+    else
+        HudText.speed.Visible = false
+    end
+end
+
+-- [ v31 ] Разовый дамп GameState
+local function maybeDumpGameState()
+    if not Config.Cheat.GameStateDump then gameStateDumped = false return end
+    if gameStateDumped then return end
+    gameStateDumped = true
+    local ok, gs = pcall(function()
+        return require(game:GetService("ReplicatedStorage").Database.Components.GameState)
+    end)
+    if not ok or type(gs) ~= "table" then
+        print("[GameState] unavailable: " .. tostring(gs))
+        return
+    end
+    local function dump(t, prefix, depth)
+        if depth > 2 then return end
+        local count = 0
+        for k, v in pairs(t) do
+            count = count + 1
+            if count > 40 then print(prefix .. "...") break end
+            if type(v) == "table" then
+                print(prefix .. tostring(k) .. " = table")
+                pcall(dump, v, prefix .. "  ", depth + 1)
+            else
+                print(prefix .. tostring(k) .. " = " .. tostring(v))
+            end
+        end
+    end
+    print("===== [GameState DUMP] =====")
+    pcall(dump, gs, "", 0)
+    print("===== [GameState END] =====")
+end
+
+-- [ v32 ] ФИКС «ESP ЖИВЁТ ПОСЛЕ СМЕРТИ» (наблюдатели как в CS)
+-- [ v34 ФИКС «ESP вообще не работает» ] Убираем ДОГАДОЧНЫЕ признаки смерти
+local function getLocalDeathReason()
+    local plr = Core.Local.Player
+    if not plr then return "no-player" end
+    local char = plr.Character
+    if not char or not char.Parent then return "no-character" end
+    if char:GetAttribute("Dead") == true then return "Dead(char)" end
+    if plr:GetAttribute("Dead") == true then return "Dead(player)" end
+    if plr:GetAttribute("IsDead") == true then return "IsDead(player)" end
+    local parent = char.Parent
+    if parent then
+        local n = parent.Name
+        if n == "Spectate" or n == "Spectators" then return "parent:" .. n end
+    end
+    return nil
+end
+
+local function isLocalPlayerDead()
+    return getLocalDeathReason() ~= nil
+end
+
+-- [ v34 ] Мёртвый/оставленный шелл у ЧУЖОГО игрока
+local function isEntityDeadOrShell(entity, player)
+    if entity:GetAttribute("Dead") == true then return true end
+    if player then
+        if player:GetAttribute("Dead") == true or player:GetAttribute("IsDead") == true then return true end
+    end
+    local p = entity.Parent
+    if p then
+        local n = p.Name
+        if n == "Spectate" or n == "Spectators" or n == "Debris" then return true end
+    end
+    return false
+end
+
+-- [ v32 ] Диагностика (только Debug Mode)
+local function dumpSpectatorState()
+    local folder = workspace:FindFirstChild("Characters")
+    if not folder then print("[ESP-dump] workspace.Characters not found") return end
+    local me = Core.Local.Player
+    local myChar = me and me.Character
+    print(string.format("[ESP-dump] myChar=%s parent=%s",
+        myChar and myChar.Name or "nil", myChar and myChar.Parent and myChar.Parent.Name or "nil"))
+    local n = 0
+    for _, ch in ipairs(folder:GetChildren()) do
+        n = n + 1
+        if n > 12 then print("[ESP-dump] ...") break end
+        local owner = Core.Services.Players:GetPlayerFromCharacter(ch)
+        print(string.format("[ESP-dump] %s parent=%s owner=%s Dead=%s IsDead=%s Spawned=%s HP=%s HpObj=%s root=%s head=%s torso=%s",
+            ch.Name, ch.Parent and ch.Parent.Name or "nil", owner and owner.Name or "nil",
+            tostring(ch:GetAttribute("Dead")), tostring(ch:GetAttribute("IsDead")), tostring(ch:GetAttribute("Spawned")),
+            tostring(ch:GetAttribute("Health") or ch:GetAttribute("HP")),
+            tostring(ch:FindFirstChild("Health") or ch:FindFirstChild("HP")),
+            tostring(ch:FindFirstChild("HumanoidRootPart") ~= nil),
+            tostring(ch:FindFirstChild("Head") ~= nil),
+            tostring((ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso")) ~= nil)))
+    end
+end
+
+-- [ v31 ] Подписка на НАСТОЯЩИЕ события урона игры
+task.spawn(function()
+    local ok, remotes = pcall(function()
+        return require(game:GetService("ReplicatedStorage"):WaitForChild("Database"):WaitForChild("Security"):WaitForChild("Remotes"))
+    end)
+    if not ok or type(remotes) ~= "table" then
+        if Config.DebugMode then print("[DMG] Remotes module unavailable: " .. tostring(remotes)) end
+        return
+    end
+    local ev
+    local okEv = pcall(function() ev = remotes.Character.CharacterDamaged end)
+    if not okEv or not ev or type(ev.Listen) ~= "function" then
+        if Config.DebugMode then print("[DMG] CharacterDamaged.Listen not found") end
+        return
+    end
+    local okListen = pcall(function()
+        ev.Listen(function(p1)
+            if type(p1) ~= "table" or State.Unloading then return end
+            local myId = Core.Local.Player and Core.Local.Player.UserId
+            local headshot = (p1.Headshot == true)
+            local melee = (p1.Melee == true)
+            if p1.VictimUserId == myId then
+                -- урон ПО НАМ
+                DamageLog.dirUntil = os.clock() + 1.2
+                DamageLog.lastDir = p1.Direction
+                AntiAimState.TriggerUntil = os.clock() + (Config.Combat.AntiAim.TriggerTime or 0.25)
+                addDamageEntry("[IN] " .. (melee and "melee" or (headshot and "HEAD" or "body")), Color3.fromRGB(255, 90, 90))
+                if Config.Visuals.DamageLog.Sound then
+                    pcall(function() Internal.CelestialPlaySound("toggle") end)
+                end
+            else
+                local victim = Core.Services.Players:GetPlayerByUserId(p1.VictimUserId)
+                local nm = victim and victim.Name or ("user " .. tostring(p1.VictimUserId))
+                addDamageEntry("[HIT] " .. nm .. (headshot and "  HEADSHOT" or "") .. (melee and " (melee)" or ""),
+                    headshot and Color3.fromRGB(255, 235, 120) or Color3.fromRGB(160, 255, 160))
+                if Config.Visuals.DamageLog.FlashChams and victim and victim.Character then
+                    ChamsDamageFlash[victim.Character] = { until_ = os.clock() + 0.25, head = headshot }
+                end
+            end
+        end)
+    end)
+    DamageLog.connected = okListen
+    if Config.DebugMode then print("[DMG] CharacterDamaged subscription: " .. tostring(okListen)) end
+end)
+
+State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(function(dt)
+    if State.Unloading or not IsCurrentInstance() then return end
+    -- ДИНАМИЧЕСКИЙ ПОИСК АКТИВНОЙ КАМЕРЫ (ФИКС НАБЛЮДАТЕЛЯ)
+    local cam = workspace.CurrentCamera
+    -- [ ОПТИМИЗАЦИЯ ] константы кадра вынесены
+    local COLOR_OUTLINE_BLACK = ESP_COLOR_OUTLINE_BLACK
+
+    -- [ ОПТИМИЗАЦИЯ ФПС ] Тяжелый скан Workspace и зачистка фантомов
+    State._specScanAccum = (State._specScanAccum or 0) + dt
+    if State._specScanAccum >= 0.5 then
+        State._specScanAccum = 0
+
+        -- Проверяем
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child:IsA("Camera") and child.Name ~= "CurrentCamera" then
+                -- Если у камеры валидная CFrame и она не застряла в нулевых координатах
+                if child.CFrame.Position.Magnitude > 1 then
+                    cam = child
+                    break
+                end
+            end
+        end
+
+        -- Обновляем глобальную ссылку в Core
+        Core.Local.Camera = cam
+
+        -- Жесткая зачистка нативных BillboardGui фантомов для спектратора
+        for _, child in ipairs(ScreenGui:GetChildren()) do
+            if child:IsA("BillboardGui") and (child.Name == "OvermindVisuals" or child.Name == "DroneESP" or child.Name == "BarrelESP") then
+                if not child.Adornee or not child.Adornee.Parent or not child.Adornee:IsDescendantOf(workspace) then
+                    child:Destroy()
+                end
+            end
+        end
+
+        State.frameCounter = (State.frameCounter or 0) + 1  -- [ ОПТИМИЗАЦИЯ ] без дубля
+    end
+
+    if not cam then return end
+
+    -- [ v68 ] здесь создавалась таблица activeEntities, которая нигде не использовалась
+    -- (живой набор живёт ниже, в блоке ESP) — убрана, это была аллокация каждый кадр
+    State._rotAngle = (State._rotAngle + dt * (Config.Visuals.ESP.Box.RotationSpeed or 2)) % (math.pi * 2)
+
+    State.FrameCount = (State.FrameCount + 1) % 1000
+    State.frameCounter = (State.frameCounter or 0) + 1
+
+    updateWeaponChams()
+
+    -- Player Chams Loop (Direct Memesense Engine)
+    if Config.Visuals.Chams.Enabled then
+        local charactersFolder = workspace:FindFirstChild("Characters")
+        -- [ v68 ] набор переиспользуется, а не создаётся каждый кадр: меньше аллокаций и работы для GC.
+        -- Тот же приём уже применён к State.AimWarnSet ниже.
+        local activeSet = State.ChamsActiveSet
+        if not activeSet then
+            activeSet = {}
+            State.ChamsActiveSet = activeSet
+        else
+            table.clear(activeSet)
+        end
+
+        -- Aim Warning check setup
+        local aimCfg = Config.Visuals.AimWarn
+        local aimOn = aimCfg.Enabled == true
+        State.AimWarnSet = State.AimWarnSet or {}
+        if aimOn then table.clear(State.AimWarnSet) end
+        local myCharAim = Core.Local.Player and Core.Local.Player.Character
+        local myRootAim = myCharAim and (myCharAim:FindFirstChild("HumanoidRootPart") or myCharAim:FindFirstChild("Head"))
+
+        local function checkCharForChams(ch)
+            if not ch or ch == Core.Local.Player.Character then return end
+            if ch:GetAttribute("Dead") == true then
+                removeChams(ch)
+                return
+            end
+            if Config.Visuals.Chams.TeamCheck and isCharacterAlly(ch) then
+                removeChams(ch)
+                return
+            end
+
+            activeSet[ch] = true
+
+            -- Aim Warning check
+            if aimOn and myRootAim then
+                local root = ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("Head")
+                if root then
+                    local toMe = myRootAim.Position - root.Position
+                    if toMe.Magnitude > 1 and toMe.Magnitude <= (aimCfg.Distance or 220) then
+                        local dot = math.clamp(root.CFrame.LookVector:Dot(toMe.Unit), -1, 1)
+                        if math.deg(math.acos(dot)) <= (aimCfg.Angle or 25) then
+                            State.AimWarnSet[ch] = true
+                            if aimCfg.Sound and (os.clock() - (State.AimWarnSoundAt or 0)) > 1 then
+                                State.AimWarnSoundAt = os.clock()
+                                pcall(function() Internal.CelestialPlaySound("open") end)
+                            end
+                        end
+                    end
+                end
+            end
+
+            updateChams(ch)
+        end
+
+        for _, player in ipairs(Core.Services.Players:GetPlayers()) do
+            if player ~= Core.Local.Player and player.Character then
+                checkCharForChams(player.Character)
+            end
+        end
+
+        -- [ v68 ] полный обход папки Characters дорогой, а персонажи не переставляются местами каждый кадр:
+        -- список моделей обновляем 4 раза в секунду, а по кадрам идём по готовому массиву.
+        -- Набор персонажей и их проверка остаются те же, меняется только частота пересборки списка.
+        State._chamsScanAccum = (State._chamsScanAccum or 1) + dt
+        if charactersFolder and State._chamsScanAccum >= 0.25 then
+            State._chamsScanAccum = 0
+            local list = State.ChamsList
+            if not list then
+                list = {}
+                State.ChamsList = list
+            end
+            table.clear(list)
+            for _, obj in ipairs(charactersFolder:GetDescendants()) do
+                if obj:IsA("Model") and obj:FindFirstChild("HumanoidRootPart") then
+                    list[#list + 1] = obj
+                end
+            end
+        end
+        local charsList = State.ChamsList
+        if charsList then
+            for i = 1, #charsList do
+                local obj = charsList[i]
+                if obj.Parent then checkCharForChams(obj) end
+            end
+        end
+
+        -- Clean up Highlights for characters that are no longer active
+        for char in pairs(HighlightsCache) do
+            if not activeSet[char] or not char.Parent then
+                removeChams(char)
+            end
+        end
+    else
+        for char in pairs(HighlightsCache) do
+            removeChams(char)
+        end
+    end
+
+    -- Universal Visuals Loop
+    if Config.Visuals.UniversalESP.Enabled or Config.Visuals.UniversalChams.Enabled then
+        for char in pairs(UniversalHighlightsCache) do
+            if not char or not char.Parent or not char:IsDescendantOf(workspace) then
+                removeUniversalChams(char)
+            end
+        end
+        for _, player in ipairs(Core.Services.Players:GetPlayers()) do
+            updateUniversalESP(player)
+            updateUniversalChams(player)
+        end
+    end
+
+    updateViewmodelOffset()
+    updateCubeChecker(dt)
+    updateShowTarget(dt)
+    UpdateGrenadePrediction()
+    updateDamageLog()  -- [ v31 ] лог урона + стрелка направления
+    updateHud()  -- [ v31 ] HUD
+    maybeDumpGameState()  -- [ v31 ] разовый дамп GameState по тогглу (Misc)
+
+    -- Target Finding (Optimization
+    local aimbotActive = Config.Combat.Memesense.Enabled
+    if aimbotActive or State.frameCounter % 2 == 0 then
+        FindAllTargets()
+    end
+
+    -- Camera Pull (Aimbot logic)
+    local targetToPull = aimbotActive and State.MemesenseTarget or nil
+    if targetToPull and targetToPull.Parent then
+        pcall(function()
+            cam.CFrame = CFrame.new(cam.CFrame.Position, targetToPull.Position)
+        end)
+    end
+
+    -- FOV Update
+    local memesenseActive = Config.Combat.Memesense.Enabled  -- [ ФИКС ] была nil (локаль другой функции) -> падение LegitFOV каждый кадр
+    local mouseLoc = cam.ViewportSize / 2  -- Центрируем круги строго по центру экрана для Сайлента/Рейджа
+    if State.LegitFOV then
+        State.LegitFOV.Visible = memesenseActive and Config.Combat.Memesense.AimbotEnabled
+        State.LegitFOV.Radius = 100
+        State.LegitFOV.Position = Core.Services.UserInputService:GetMouseLocation()
+    end
+    if State.SilentFOV then
+        State.SilentFOV.Visible = Config.Combat.SilentAim.Enabled and (Config.Combat.SilentAim.ShowFOV == true)
+        State.SilentFOV.Radius = Config.Combat.SilentAim.FieldOfView
+        State.SilentFOV.Position = mouseLoc
+        State.SilentFOV.Color = Config.Combat.SilentAim.FOVColor
+    end
+    if State.RageFOV then
+        State.RageFOV.Visible = Config.Combat.Ragebot.Enabled and (Config.Combat.Ragebot.ShowFOV == true)
+        State.RageFOV.Radius = Config.Combat.Ragebot.FieldOfView
+        State.RageFOV.Position = mouseLoc
+        State.RageFOV.Color = Config.Combat.Ragebot.FOVColor
+    end
+
+    if State.PenText then
+        if Config.Combat.Memesense.Enabled and Config.Combat.Memesense.ShowPenetration then
+            State.PenText.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2 - 70)
+            local stats = GetPenetrationStats(cam.CFrame.Position, cam.CFrame.LookVector, 4)
+            if stats.Success then
+                State.PenText.Visible = true
+                State.PenText.Text = string.format("WALLBANG: YES\n(%.1f studs)", stats.TotalThickness or 0)
+                State.PenText.Color = Color3.fromRGB(0, 255, 0)
+            else
+                State.PenText.Visible = true
+                State.PenText.Text = "WALLBANG: NO"
+                State.PenText.Color = Color3.fromRGB(255, 0, 0)
+            end
+        else
+            State.PenText.Visible = false
+        end
+    end
+
+    -- Cube Checker Update
+    pcall(function()
+        local cfg = Config.Combat.Memesense
+        local p = State.CubePart
+        if not p then return end
+        if cfg.Enabled and cfg.CubeChecker then
+            local size = cfg.CubeSize
+            p.Size = Vector3.new(size, size, 0.01)
+            local col = cfg.CubeColor
+            if cfg.CubeRainbow then col = Color3.fromHSV((tick() % 5) / 5, 1, 1) end
+            if State.MemesenseTarget and cfg.AimbotEnabled then col = Color3.fromRGB(0, 255, 0) end
+            p:FindFirstChildOfClass("SurfaceGui").Frame.BackgroundColor3 = col
+
+            -- [ ОПТИМИЗАЦИЯ ] RaycastParams создаётся один раз
+            if not State.CubeRayParams then
+                State.CubeRayParams = RaycastParams.new()
+                State.CubeRayParams.FilterType = Enum.RaycastFilterType.Exclude
+            end
+            local params = State.CubeRayParams
+            params.FilterDescendantsInstances = {Core.Local.Player.Character, p}
+            local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * cfg.MaxRayDist, params)
+            if res then
+                p.Parent = workspace
+                p.CFrame = CFrame.lookAt(res.Position + (res.Normal * 0.01), res.Position + res.Normal)
+            else p.Parent = nil end
+        else p.Parent = nil end
+    end)
+
+    -- Lighting & Atmosphere Update
+    pcall(function()
+        local lighting = Core.Services.Lighting
+        local world = Config.Visuals.World
+        local atm = Config.Visuals.Atmosphere
+
+        if world.Enabled then
+            -- 1. Clock Time
+            if world.Time.Enabled then
+                lighting.ClockTime = world.Time.Value
+            else
+                lighting.ClockTime = OriginalState.Lighting.ClockTime
+            end
+
+            -- 2. Brightness
+            if world.Brightness.Enabled then
+                lighting.Brightness = world.Brightness.Value
+            else
+                lighting.Brightness = OriginalState.Lighting.Brightness
+            end
+
+            -- 3. Colors (Ambient & Outdoor)
+            if world.Colors.Enabled then
+                lighting.Ambient = world.Colors.Ambient
+                lighting.OutdoorAmbient = world.Colors.Outdoor
+            else
+                lighting.Ambient = OriginalState.Lighting.Ambient
+                lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
+            end
+
+            -- 4. Night Mode
+            if world.NightMode.Enabled then
+                lighting.ColorShift_Bottom = world.NightMode.ColorA
+                lighting.ColorShift_Top = world.NightMode.ColorB
+            else
+                lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
+                lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
+            end
+
+            -- 5. World Color
+            if world.WorldColor.Enabled then
+                local c = world.WorldColor.Color
+                lighting.Ambient = c
+                lighting.OutdoorAmbient = c
+                lighting.ColorShift_Bottom = c
+                lighting.ColorShift_Top = c
+                lighting.FogColor = c
+            else
+                -- We only reset if none of the other color settings are overriding
+                if not world.Colors.Enabled and not world.NightMode.Enabled then
+                    lighting.Ambient = OriginalState.Lighting.Ambient
+                    lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
+                    lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
+                    lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
+                end
+                lighting.FogColor = OriginalState.Lighting.FogColor
+            end
+
+            -- 6. Sky Color & Atmosphere
+            if world.SkyColor.Enabled then
+                local sc = world.SkyColor.Color
+                lighting.FogColor = sc
+                local o_atm = lighting:FindFirstChild("Overmind_SkyAtmosphere") or Instance.new("Atmosphere", lighting)
+                o_atm.Name = "Overmind_SkyAtmosphere"
+                o_atm.Color = sc
+                o_atm.Decay = sc
+            else
+                local o_atm = lighting:FindFirstChild("Overmind_SkyAtmosphere")
+                if o_atm then o_atm:Destroy() end
+                if not world.WorldColor.Enabled then
+                    lighting.FogColor = OriginalState.Lighting.FogColor
+                end
+            end
+
+            -- 7. Skybox Enforcement (Fix for round resets)
+            if world.Skybox.Enabled then
+                local currentSky = lighting:FindFirstChild("Overmind_Sky")
+                if not currentSky then
+                    UpdateSkybox(world.Skybox.Preset)
+                end
+            end
+
+            -- 8. Weather Enforcement
+            if world.Weather ~= "None" then
+                if not WeatherObjects.Part or not WeatherObjects.Part.Parent then
+                    UpdateWeather(world.Weather)
+                end
+            end
+        end
+
+        if atm.Enabled then
+            -- 9. Atmosphere
+            local lighting_atm = lighting:FindFirstChildOfClass("Atmosphere")
+            if lighting_atm and lighting_atm.Name ~= "Overmind_SkyAtmosphere" then
+                lighting_atm.Density, lighting_atm.Haze, lighting_atm.Glare = atm.Density, atm.Haze, atm.Glare
+            end
+
+            -- 10. Color Correction
+            if atm.ColorCorrection.Enabled then
+                local cc = lighting:FindFirstChild("Overmind_CC") or Instance.new("ColorCorrectionEffect", lighting)
+                cc.Name = "Overmind_CC"
+                cc.Saturation = atm.ColorCorrection.Saturation
+                cc.Contrast = atm.ColorCorrection.Contrast
+                cc.TintColor = atm.ColorCorrection.TintColor or Color3.new(1,1,1)
+            else
+                local cc = lighting:FindFirstChild("Overmind_CC")
+                if cc then cc:Destroy() end
+            end
+        end
+    end)
+
+    -- [ HARD GC (Garbage Collector) & ESP RENDER LOOP ]
+    -- [ v32 ] Подавление ESP в наблюдателях
+    local espMain = Config.Visuals.ESP
+    local suppressEsp = isLocalPlayerDead() and (espMain.SpectatorESP ~= true)
+    if suppressEsp ~= (State.EspSuppressed == true) then
+        State.EspSuppressed = suppressEsp
+        if suppressEsp then
+            for _, data in pairs(State.VisualRegistry.Entities) do
+                hide_all_vis(data)
+            end
+            if Config.DebugMode then
+                print("[ESP] suppressed: dead/spectating | reason=" .. tostring(getLocalDeathReason())
+                    .. " | Spectator ESP = " .. tostring(espMain.SpectatorESP == true))
+                pcall(dumpSpectatorState)
+            end
+        elseif Config.DebugMode then
+            print("[ESP] resumed: alive again")
+        end
+    end
+    -- [ v34 ] САМОЛЕЧЕНИЕ РЕЕСТРА ESP
+    State._espRescanAccum = (State._espRescanAccum or 0) + dt
+    if State._espRescanAccum >= 1.5 then
+        State._espRescanAccum = 0
+        local folderES = workspace:FindFirstChild("Characters")
+        if folderES then
+            local function rescanES(container)
+                for _, ch in ipairs(container:GetChildren()) do
+                    if ch:IsA("Model") then
+                        if not State.VisualRegistry.Entities[ch]
+                            and ch:FindFirstChild("HumanoidRootPart")
+                            and ch ~= Core.Local.Player.Character
+                            and ch:GetAttribute("Dead") ~= true then
+                            getEntityVisuals(ch)
+                        end
+                        rescanES(ch)
+                    end
+                end
+            end
+            pcall(rescanES, folderES)
+        end
+    end
+
+    local activeEntities = {}
+    for entity, data in pairs(State.VisualRegistry.Entities) do
+        -- 1. Жесткая валидация сущности и хитбоксов (Фикс летающих боксов и утечек)
+        local root = entity:FindFirstChild("HumanoidRootPart") or entity:FindFirstChild("Head")
+
+        -- Проверка на фантомных игроков (если у игрока сменился персонаж или он вышел)
+        local player = Core.Services.Players:GetPlayerFromCharacter(entity)
+        local isGhost = player and player.Character ~= entity
+
+        -- В Blox Strike в спектаторе локальный игрок привязывается к камере наблюдателя
+        local camSubject = cam.CameraSubject
+        local spectatedChar = camSubject and (camSubject:IsA("Model") and camSubject or camSubject:FindFirstAncestorOfClass("Model"))
+
+        -- Условия немедленного удаления из памяти для предотвращения утечек
+        local inCharacters = entity.Parent and (entity.Parent.Name == "Characters" or entity.Parent:IsA("Model"))
+        local isSpectatingEntity = (cam.CameraSubject and (cam.CameraSubject == entity or cam.CameraSubject:IsDescendantOf(entity)))
+
+        local isGarbage = (not entity.Parent)
+            or (not inCharacters)
+            or (not root)
+            or (entity == Core.Local.Player.Character)
+            or (entity.Name == Core.Local.Player.Name)
+            or isGhost
+            or isSpectatingEntity
+            or State.Unloading
+
+        if isGarbage then
+            hide_all_vis(data)
+            cleanup_instance(entity, data)
+            State.VisualRegistry.Entities[entity] = nil
+            continue
+        end
+
+        -- 2. Проверка наблюдателя (Фикс фантомов при спектре)
+        local healthAttr = entity:GetAttribute("Health")
+        local isDead = (healthAttr and healthAttr <= 0) or entity:GetAttribute("Dead")
+        -- [ v32 ] ФИКС фантомного ESP
+        if not isDead and isEntityDeadOrShell(entity, player) then isDead = true end
+
+        if (isDead and not (Config.Visuals.ESP.ShowDead or false)) then
+            -- [ v34 ] Раньше здесь был cleanup_instance (уничтожал Drawing-объекты)
+            hide_all_vis(data)
+            activeEntities[entity] = true
+            continue
+        end
+
+        -- 3. Тим-чек и фильтрация союзников
+        local esp = Config.Visuals.ESP
+        if esp.Enabled and esp.TeamCheck and isCharacterAlly(entity) and not esp.ShowTeammates then
+            hide_all_vis(data)
+            activeEntities[entity] = true
+            continue
+        end
+
+        activeEntities[entity] = true
+        -- [ v32 ] Я мёртв/в наблюдателях -> ESP подавлен (см
+        if suppressEsp then continue end
+
+        local hrp = root
+
+        if esp.Enabled then
+            -- [ MEMESENSE STYLE PRECISION AABB CALCULATION ]
+            local parts = get_character_parts(entity)
+            local min2, max2, onscreen = nil, nil, false
+            local c3d, on3d = nil, false
+
+            -- ОПТИМИЗАЦИЯ
+            local aabbKey = "AABB_" .. entity.Name
+            local cachedAABB = State[aabbKey]
+
+            if not cachedAABB or (State.frameCounter % 2 == 0) then
+                local x0, y0, z0, x1, y1, z1 = compute_world_aabb(parts)
+                if x0 then
+                    cachedAABB = {x0, y0, z0, x1, y1, z1}
+                    State[aabbKey] = cachedAABB
+                end
+            end
+
+            if cachedAABB then
+                min2, max2, onscreen = project_fixed_box(cachedAABB[1], cachedAABB[2], cachedAABB[3], cachedAABB[4], cachedAABB[5], cachedAABB[6])
+                if esp.Box.Enabled and esp.Box.Type == "3D Box" then
+                    c3d, on3d = project_aabb_corners_3d(cam, cachedAABB[1], cachedAABB[2], cachedAABB[3], cachedAABB[4], cachedAABB[5], cachedAABB[6])
+                end
+            end
+
+            -- Принудительное скрытие элементов при уходе игрока с экрана камеры наблюдателя
+            if not onscreen or not min2 or not max2 then
+                hide_all_vis(data)
+                continue
+            end
+
+                pcall(function()
+                    -- ── BOX ──────────────────────────────────────────
+                    if esp.Box.Enabled and onscreen and min2 and max2 then
+                            local x, y = min2.X, min2.Y
+                            local w, h = max2.X - min2.X, max2.Y - min2.Y
+                            local cA, cB = esp.Box.ColorA, esp.Box.ColorB
+
+                            if esp.Box.Type == "2D Box" then
+                                for _,l in ipairs(data.box.corner_fill) do l.Visible=false end
+                                for _,l in ipairs(data.box.corner_outline) do l.Visible=false end
+                                for _,l in ipairs(data.box.box_3d_lines) do l.Visible=false end
+                                if esp.Box.FillGradient then
+                                    drawFillGradient360(data.box.fill_grad_lines, x, y, w, h, esp.Box.FillColorA, esp.Box.FillColorB, State._rotAngle)
+                                else for _,l in ipairs(data.box.fill_grad_lines) do l.Visible=false end end
+                                drawBoxOutlineGradient(data.box.grad_lines, x, y, w, h, cA, cB, State._rotAngle / (math.pi * 2))
+                            elseif esp.Box.Type == "Corner" then
+                                for _,l in ipairs(data.box.grad_lines) do l.Visible=false end
+                                for _,l in ipairs(data.box.box_3d_lines) do l.Visible=false end
+                                if esp.Box.FillGradient then
+                                    drawFillGradient360(data.box.fill_grad_lines, x, y, w, h, esp.Box.FillColorA, esp.Box.FillColorB, State._rotAngle)
+                                else for _,l in ipairs(data.box.fill_grad_lines) do l.Visible=false end end
+                                local len = math.min(w,h) * 0.25
+                                local corners = {
+                                    {Vector2_new(x,y),Vector2_new(x+len,y)}, {Vector2_new(x,y),Vector2_new(x,y+len)},
+                                    {Vector2_new(x+w-len,y),Vector2_new(x+w,y)}, {Vector2_new(x+w,y),Vector2_new(x+w,y+len)},
+                                    {Vector2_new(x,y+h),Vector2_new(x+len,y+h)}, {Vector2_new(x,y+h-len),Vector2_new(x,y+h)},
+                                    {Vector2_new(x+w-len,y+h),Vector2_new(x+w,y+h)}, {Vector2_new(x+w,y+h-len),Vector2_new(x+w,y+h)}
+                                }
+                                for i=1,8 do
+                                    local col = cA:Lerp(cB, (i-1)/8)
+                                    data.box.corner_outline[i].From, data.box.corner_outline[i].To, data.box.corner_outline[i].Color, data.box.corner_outline[i].Visible = corners[i][1], corners[i][2], COLOR_OUTLINE_BLACK, true
+                                    data.box.corner_fill[i].From, data.box.corner_fill[i].To, data.box.corner_fill[i].Color, data.box.corner_fill[i].Visible = corners[i][1], corners[i][2], col, true
+                                end
+                            elseif esp.Box.Type == "3D Box" then
+                                for _,l in ipairs(data.box.grad_lines) do l.Visible=false end
+                                for _,l in ipairs(data.box.fill_grad_lines) do l.Visible=false end
+                                for _,l in ipairs(data.box.corner_fill) do l.Visible=false end
+                                for _,l in ipairs(data.box.corner_outline) do l.Visible=false end
+                                if c3d and #c3d == 8 then
+                                    for i=1,12 do
+                                        local e = BOX_3D_EDGES[i]
+                                        data.box.box_3d_lines[i].From, data.box.box_3d_lines[i].To, data.box.box_3d_lines[i].Color, data.box.box_3d_lines[i].Visible = c3d[e[1]], c3d[e[2]], cA:Lerp(cB, (i-1)/12), on3d
+                                    end
+                                else for _,l in ipairs(data.box.box_3d_lines) do l.Visible = false end end
+                            end
+                        else hideBox(data.box) end
+
+                        -- ── HEALTH BAR ──────────────────────────────────
+                        if esp.HealthBar.Enabled and onscreen and min2 and max2 and healthAttr then
+                            local x, y, w, h = min2.X - 6, min2.Y, 3, max2.Y - min2.Y
+                            local maxHp = (entity:GetAttribute("MaxHealth") or 100)
+                            local hpFrac = math.clamp(healthAttr / maxHp, 0, 1)
+                            data.healthbar.background.Position, data.healthbar.background.Size, data.healthbar.background.Visible = Vector2_new(x-1, y-1), Vector2_new(w+2, h+2), true
+                            local barH = h * hpFrac
+                            local startY = y + (h - barH)
+                            local activeSegs = math.clamp(math.floor(MAX_HP_SEGMENTS * hpFrac), 1, MAX_HP_SEGMENTS)
+                            local segH = barH / activeSegs
+                            for i=1, MAX_HP_SEGMENTS do
+                                local seg = data.healthbar.segments[i]
+                                if i <= activeSegs then
+                                    seg.Color = esp.HealthBar.BottomColor:Lerp(esp.HealthBar.TopColor, (i-0.5)/MAX_HP_SEGMENTS)
+                                    seg.From, seg.To, seg.Thickness, seg.Visible = Vector2_new(x + w*0.5, startY + (i-1)*segH), Vector2_new(x + w*0.5, startY + i*segH), w, true
+                                else seg.Visible = false end
+                            end
+                        else
+                            data.healthbar.background.Visible = false
+                            for _,s in ipairs(data.healthbar.segments) do s.Visible = false end
+                        end
+
+                        -- ── TEXTS (NAME
+                        if esp.Names.Enabled and onscreen and min2 and max2 then
+                            data.name.Text, data.name.Color, data.name.Position, data.name.Visible = entity.Name:upper(), esp.Names.Color, Vector2_new((min2.X+max2.X)*0.5, min2.Y-15), true
+                        else data.name.Visible = false end
+
+                        if esp.HealthText.Enabled and onscreen and min2 and max2 and healthAttr then
+                            local maxHp = (entity:GetAttribute("MaxHealth") or 100)
+                            data.healthtext.Text, data.healthtext.Color, data.healthtext.Position, data.healthtext.Visible = tostring(math.floor(healthAttr + 0.5)), esp.HealthText.Color, Vector2_new(max2.X + 4, min2.Y + (max2.Y-min2.Y)*(1-(healthAttr/maxHp)) - 4), true
+                        else data.healthtext.Visible = false end
+
+                        if esp.Distance.Enabled and onscreen and min2 and max2 then
+                            local d = math.floor((hrp.Position - cam.CFrame.Position).Magnitude)
+                            data.distance.Text, data.distance.Color, data.distance.Position, data.distance.Visible = tostring(d).."m", esp.Distance.Color, Vector2_new((min2.X+max2.X)*0.5, max2.Y+2), true
+                        else data.distance.Visible = false end
+
+                        if esp.Weapon.Enabled and onscreen and min2 and max2 then
+                            local p = Core.Services.Players:GetPlayerFromCharacter(entity)
+                            data.weapon.Text, data.weapon.Color, data.weapon.Position, data.weapon.Visible = "["..GetWeaponName(p).."]", esp.Weapon.Color, Vector2_new((min2.X+max2.X)*0.5, max2.Y+15), true
+                        else data.weapon.Visible = false end
+
+                        -- ── SKELETON ─────────────────────────────────────
+                        if esp.Skeleton.Enabled then
+                            local sc = data.skeleton.screenCache
+                            for k in next,sc do sc[k]=nil end
+                            local any = false
+                            for i=1, #data.skeleton.bone_parts do
+                                local pA, pB = data.skeleton.bone_parts[i][1], data.skeleton.bone_parts[i][2]
+                                local line = data.skeleton.lines[i]
+                                if pA and pB and pA.Parent and pB.Parent then
+                                    local posA, vA = get_cached_screen_pos(sc, pA); local posB, vB = get_cached_screen_pos(sc, pB)
+                                    if vA or vB then
+                                        line.From, line.To, line.Color, line.Visible = posA, posB, esp.Skeleton.ColorA:Lerp(esp.Skeleton.ColorB, (i-1)/#data.skeleton.bone_parts), true
+                                        any = true
+                                    else line.Visible = false end
+                                else line.Visible = false end
+                            end
+                        else for _,l in ipairs(data.skeleton.lines) do l.Visible = false end end
+
+                        -- ── TRACERS ──────────────────────────────────────
+                        if esp.Tracers.Enabled and onscreen and min2 and max2 then
+                            local from
+                            if esp.Tracers.Origin == "Mouse" then from = Core.Services.UserInputService:GetMouseLocation()
+                            elseif esp.Tracers.Origin == "Top" then from = Vector2_new(cam.ViewportSize.X/2, 0)
+                            elseif esp.Tracers.Origin == "Center" then from = cam.ViewportSize/2
+                            else from = Vector2_new(cam.ViewportSize.X/2, cam.ViewportSize.Y) end
+                            local to = (min2 + max2) / 2
+                            local col = esp.Tracers.ColorA:Lerp(esp.Tracers.ColorB, math.clamp((hrp.Position - cam.CFrame.Position).Magnitude/200, 0, 1))
+                            data.tracer.outline.From, data.tracer.outline.To, data.tracer.outline.Color, data.tracer.outline.Visible = from, to, COLOR_OUTLINE_BLACK, true
+                            data.tracer.fill.From, data.tracer.fill.To, data.tracer.fill.Color, data.tracer.fill.Visible = from, to, col, true
+                        else data.tracer.outline.Visible, data.tracer.fill.Visible = false, false end
+
+                        -- ── TARGET INDICATOR ─────────────────────────────
+                        drawAdvancedTargetIndicator(Core.Services.Players:GetPlayerFromCharacter(entity), entity, hrp, data, esp, cam, dt)
+                    end)
+                end
+            end
+
+    -- Cleanup inactive entities
+    for ent, v in pairs(State.VisualRegistry.Entities) do
+        if not activeEntities[ent] or State.Unloading then
+            hide_all_vis(v)
+            cleanup_instance(ent, v)
+            State.VisualRegistry.Entities[ent] = nil
+        end
+    end
+
+    -- Зоны гранат (Scan)
+    if Config.Visuals.Projectiles.GrenadeESP.Enabled then
+        for _, obj in workspace:GetChildren() do
+            local n = obj.Name:lower()
+            if n:find("molotov") or n:find("fire") then updateZone(obj, true)
+            elseif n:find("smoke") then updateZone(obj, false) end
+        end
+    end
+
+    -- Custom Camera & Scope
+    pcall(function()
+        local camCfg = Config.Visuals.CustomCamera
+        if camCfg.Enabled and camCfg.FOV.Enabled then
+            cam.FieldOfView = camCfg.FOV.Value
+        end
+
+        local playerGui = Core.Local.Player:FindFirstChild("PlayerGui")
+        if playerGui then
+            local scopeCfg = Config.Visuals.CustomScope
+            local s, scope = pcall(function() return playerGui.MainGui.Gameplay.Middle.SniperScope end)
+            -- [ БАГ-ФИКС ] ShowScopeSniper форсит scope.Visible = true каждую итерацию
+            local isScoped = (s and scope and scope.Visible and not scopeCfg.ShowScopeSniper) or false
+
+            if scopeCfg.Enabled then
+                if s and scope then
+                    -- 1. Скрытие/Удаление стандартного scope (через Size по логике memesens)
+                    if scopeCfg.RemoveScope then
+                        if isScoped then
+                            scope.Size = UDim2.new(0, 0, 0, 0)
+                        else
+                            if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                        end
+                    elseif scopeCfg.ShowScopeSniper then
+                        -- Если включен Show Scope Sniper
+                        if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                        scope.Visible = true
+
+                        -- Фикс: Если игра прячет элементы Middle/Gameplay при зуме в сторонних режимах
+                        if scope.Parent then scope.Parent.Visible = true end
+                        if scope.Parent and scope.Parent.Parent then scope.Parent.Parent.Visible = true end
+                    else
+                        if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                    end
+
+                    -- 3. Модификация FOV прицела
+                    if scopeCfg.FOV.Enabled and isScoped then
+                        cam.FieldOfView = scopeCfg.FOV.Value
+                    end
+                end
+
+                -- 2. Отрисовка Кастомного Crosshair
+                local crosshairCfg = scopeCfg.Crosshair
+                local hipfireSniper = (not isScoped) and isHoldingSniper(cam)
+                local crosshairEnabled = (crosshairCfg and crosshairCfg.Enabled and (isScoped or hipfireSniper)) or false
+                if scContainer then
+                    if scopeCrosshairGui then scopeCrosshairGui.IgnoreGuiInset = true end
+                    scContainer.Visible = crosshairEnabled
+                    if crosshairEnabled then
+                        leftLine.BackgroundColor3 = crosshairCfg.Color
+                        rightLine.BackgroundColor3 = crosshairCfg.Color
+                        topLine.BackgroundColor3 = crosshairCfg.Color
+                        bottomLine.BackgroundColor3 = crosshairCfg.Color
+
+                        -- CS-стиль
+                        local t = crosshairCfg.Thickness or 2
+                        -- [ ВАЖНО ] без фолбэка на legacy LengthLR (150)
+                        local len = crosshairCfg.Length or 9
+                        local gap = crosshairCfg.Gap or 4
+                        local styleKey = t .. "|" .. len .. "|" .. gap .. "|" .. tostring(crosshairCfg.Color)
+                        if Internal._lastXhairStyle ~= styleKey then
+                            Internal._lastXhairStyle = styleKey
+                            leftLine.Size = UDim2.new(0, len, 0, t)
+                            leftLine.Position = UDim2.new(0, -gap, 0, 0)
+                            rightLine.Size = UDim2.new(0, len, 0, t)
+                            rightLine.Position = UDim2.new(0, gap, 0, 0)
+                            topLine.Size = UDim2.new(0, t, 0, len)
+                            topLine.Position = UDim2.new(0, 0, 0, -gap)
+                            bottomLine.Size = UDim2.new(0, t, 0, len)
+                            bottomLine.Position = UDim2.new(0, 0, 0, gap)
+                        end
+                    end
+                end
+                -- [ DEBUG ] диагностическое сообщение
+                if Config.DebugMode then
+                    local src = _lastSniperSource or (isScoped and "scoped" or "none")
+                    if src ~= Internal._lastSniperDebug then
+                        Internal._lastSniperDebug = src
+                        print("[Overmind] Sniper detect: " .. tostring(src) .. " | hipfire crosshair: " .. tostring(hipfireSniper))
+                    end
+                end
+            else
+                if scContainer then scContainer.Visible = false end
+                if s and scope and scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+            end
+        end
+
+        -- 4. Реализация Third Person Camera (из референса memesens)
+        local tpCfg = Config.Visuals.CustomCamera
+        if tpCfg.Enabled and tpCfg.ThirdPerson.Enabled then
+            local dist = math.clamp(tpCfg.ThirdPerson.Distance or 10, 5, 50)
+            Core.Local.Player.CameraMode = Enum.CameraMode.Classic
+            Core.Local.Player.CameraMaxZoomDistance = dist
+            Core.Local.Player.CameraMinZoomDistance = dist
+
+            -- Фикс: Чтобы видеть свои руки и оружие от третьего лица в Blox Strike
+            for _, child in ipairs(cam:GetChildren()) do
+                if child:IsA("Model") and not child.Name:lower():find("light") then
+                    for _, part in ipairs(child:GetDescendants()) do
+                        if part:IsA("BasePart") and part.LocalTransparencyModifier > 0 then
+                            part.LocalTransparencyModifier = 0
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end)
+
+-- ОПРЕДЕЛЕНИЕ МОДУЛЕЙ С ПОЛНЫМИ НАСТРОЙКАМИ
+
+-- [ ULTIMATE MODULE DEFINITIONS ]
+
+-- COMBAT MODULES
+createModule("Aimbot", "Cube Smart Aimbot & Pull logic", "Legit", Config.Combat.Memesense.Enabled, function(v)
+    Config.Combat.Memesense.Enabled = v
+end, function(p)
+    local cfg = Config.Combat.Memesense
+    local sub = Internal.createSubCard(p)
+
+    Internal.createKeybind(sub, "Aimbot Key", cfg.Keybind, function(k) cfg.Keybind = k end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Smart Aimbot"), cfg.AimbotEnabled, function(v) cfg.AimbotEnabled = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Visible Check"), cfg.VisibleCheck, function(v) cfg.VisibleCheck = v end, nil, nil, true)
+    Internal.createSelector(sub, "Target Hit Selection", {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso"}, cfg.Hitbox, function(v) cfg.Hitbox = v end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Triggerbot"), cfg.Triggerbot, function(v) cfg.Triggerbot = v end, nil, nil, true)
+    Internal.createSlider(sub, "Triggerbot Delay", 0, 100, cfg.TriggerbotDelay * 100, function(v) cfg.TriggerbotDelay = v / 100 end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Cube Triggerbot"), cfg.CubeTriggerbot or false, function(v) cfg.CubeTriggerbot = v end, nil, nil, true)
+    Internal.createSlider(sub, "Cube Trigger Delay", 0, 100, (cfg.CubeTriggerbotDelay or 0.01) * 100, function(v) cfg.CubeTriggerbotDelay = v / 100 end)
+
+    Internal.createLabel(sub, "Cube Visuals")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Cube Checker"), cfg.CubeChecker, function(v) cfg.CubeChecker = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Cube Color", cfg.CubeColor, function(color) cfg.CubeColor = color end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Rainbow Mode"), cfg.CubeRainbow, function(v) cfg.CubeRainbow = v end, nil, nil, true)
+    Internal.createSlider(sub, "Impact Size", 5, 40, cfg.CubeSize * 10, function(v) cfg.CubeSize = v / 10 end)
+    Internal.createSlider(sub, "Max Ray Distance", 1, 50, cfg.MaxRayDist, function(v) cfg.MaxRayDist = v end)
+
+    Internal.createLabel(sub, "Target Display")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show Target Player"), cfg.ShowTargetPlayer, function(v) cfg.ShowTargetPlayer = v end, nil, nil, true)
+    Internal.createSelector(sub, "Target Display Mode", {"Crosshair", "Line"}, cfg.TargetDisplayMode, function(v) cfg.TargetDisplayMode = v end)
+    Internal.addColorSetting(sub, "Line Color", cfg.LineColor, function(color) cfg.LineColor = color end)
+    Internal.addColorSetting(sub, "Crosshair Color", cfg.CrosshairColor, function(color) cfg.CrosshairColor = color end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show Penetration"), cfg.ShowPenetration, function(v) cfg.ShowPenetration = v end, nil, nil, true)
+end)
+
+-- Silent Aim (Moved to Rage)
+createModule("Silent Aim", "Bullet redirection (Blatant)", "Rage", Config.Combat.SilentAim.Enabled, function(v)
+    Config.Combat.SilentAim.Enabled = v
+end, function(p)
+    local cfg = Config.Combat.SilentAim
+    local sub = Internal.createSubCard(p)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Wallbang"), cfg.Wallbang, function(v) cfg.Wallbang = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createSelector(sub, "Hit Selection", {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso", "LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm", "LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg", "LeftFoot", "RightFoot"}, cfg.Hitbox, function(v) cfg.Hitbox = v end)
+
+    Internal.createLabel(sub, "FOV Settings")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Use FOV Limitation"), cfg.UseFOV, function(v) cfg.UseFOV = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show FOV Circle"), cfg.ShowFOV, function(v) cfg.ShowFOV = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "FOV Color", cfg.FOVColor, function(color) cfg.FOVColor = color; if State.SilentFOV then State.SilentFOV.Color = color end end)
+    Internal.createSlider(sub, "FOV Radius", 0, 1000, cfg.FieldOfView, function(v) cfg.FieldOfView = v; if State.SilentFOV then State.SilentFOV.Radius = v end end)
+end)
+
+-- Ragebot
+createModule("Ragebot", "Blatant auto-shooting", "Rage", Config.Combat.Ragebot.Enabled, function(v)
+    Config.Combat.Ragebot.Enabled = v
+end, function(p)
+    local cfg = Config.Combat.Ragebot
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Delay", 0, 100, cfg.Delay * 100, function(v) cfg.Delay = v / 100 end)
+    Internal.createSelector(sub, "Head / Hit Selection", {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso"}, cfg.Hitbox, function(v) cfg.Hitbox = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Visible Check"), cfg.VisibleCheck, function(v) cfg.VisibleCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Wall Check"), cfg.WallCheck, function(v) cfg.WallCheck = v end, nil, nil, true)
+
+    -- [ v34 ] AUTO FIRE
+    Internal.createLabel(sub, "=== AUTO FIRE (v34) ===")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Auto Fire (shoot)"), cfg.AutoShoot, function(v) cfg.AutoShoot = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Require Visible"), cfg.AutoVisible ~= false, function(v) cfg.AutoVisible = v end, nil, nil, true)
+    Internal.createSlider(sub, "Min Damage", 1, 150, cfg.MinDamage or 25, function(v) cfg.MinDamage = v end)
+    Internal.createSlider(sub, "Hitchance %", 0, 100, cfg.Hitchance or 50, function(v) cfg.Hitchance = v end)
+    Internal.createSlider(sub, "Hitchance Samples", 1, 9, cfg.HitSamples or 9, function(v) cfg.HitSamples = v end)
+    Internal.createLabel(sub, "Weapon Damage (if the game did not read it)")
+    Internal.createSlider(sub, "Base Damage", 1, 200, cfg.Damage or 30, function(v) cfg.Damage = v end)
+    Internal.createSlider(sub, "Head Damage x", 1, 10, cfg.HeadMult or 4, function(v) cfg.HeadMult = v end, 0.1)
+    Internal.createSlider(sub, "Body Damage %", 10, 300, math.floor((cfg.BodyMult or 1) * 100), function(v) cfg.BodyMult = v / 100 end, function(v) return tostring(v) .. "%" end)
+    Internal.createSlider(sub, "Limb Damage %", 10, 300, math.floor((cfg.LimbMult or 0.75) * 100), function(v) cfg.LimbMult = v / 100 end, function(v) return tostring(v) .. "%" end)
+
+    Internal.createLabel(sub, "Priority Target")
+    local players = {"[ AUTO ]"}
+    local selector = Internal.createSelector(sub, "Current Player:", players, cfg.PriorityTarget, function(v)
+        cfg.PriorityTarget = v
+    end)
+
+    local function refreshPriorityList()
+        local list = {"[ AUTO ]"}
+        for _, p in Core.Services.Players:GetPlayers() do
+            if p ~= Core.Local.Player then table.insert(list, p.Name) end
+        end
+        selector.Update(list)
+    end
+
+    local refBtn = Instance.new("TextButton")
+    refBtn.Size = UDim2.new(1, 0, 0, 30)
+    refBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65); refBtn.Text = "Refresh Player List"; refBtn.TextColor3 = Theme.Text; refBtn.Font = Theme.FontMedium; refBtn.TextSize = 12; refBtn.Parent = sub
+    Instance.new("UICorner", refBtn).CornerRadius = UDim.new(0, 6)
+    refBtn.MouseButton1Click:Connect(refreshPriorityList)
+
+    refreshPriorityList()
+end)
+
+-- Anti-Aim (Full HvH Angles
+createModule("Anti-Aim", "HvH Pitch, Yaw, Jitter, Spin, Desync & Manuals", "Rage", Config.Combat.AntiAim.Enabled, function(v)
+    Config.Combat.AntiAim.Enabled = v
+end, function(p)
+    local cfg = Config.Combat.AntiAim
+    local sub = Internal.createSubCard(p)
+
+    Internal.createLabel(sub, "=== ENGINE (v30/v31) ===")
+    Internal.createSelector(sub, "AA Method", {"Auto", "Look Spoof", "Camera Spoof", "Local Only"}, cfg.Method or "Auto", function(v) cfg.Method = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Pitch Spoof (commands)"), cfg.PitchSpoof ~= false, function(v) cfg.PitchSpoof = v end, nil, nil, true)
+    -- [ v33 ] держит ходьбу честной при спуфе YAW (Move разворачивается вместе с фейковым углом)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Move Compensation"), cfg.MoveComp ~= false, function(v) cfg.MoveComp = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Flip AA On Damage"), cfg.TriggerOnDamage == true, function(v) cfg.TriggerOnDamage = v end, nil, nil, true)
+    -- [ v70 ] длительность и амплитуда — это величина, а не счётчик: шаг 0.1 даёт подпись с десятой
+    -- (267.4 ms = 0.2674 c, 120.5°), без него точность упиралась в целые
+    Internal.createSlider(sub, "Flip Duration ms", 50, 600, math.floor((cfg.TriggerTime or 0.25) * 1000), function(v) cfg.TriggerTime = v / 1000 end, { Step = 0.1, Unit = "ms" })
+    Internal.createSlider(sub, "Flip Amplitude (deg)", 30, 180, cfg.TriggerSpin or 120, function(v) cfg.TriggerSpin = v end, { Step = 0.1, Unit = "deg" })
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Pause While Shooting"), cfg.PauseWhileShooting ~= false, function(v) cfg.PauseWhileShooting = v end, nil, nil, true)
+    Internal.createSelector(sub, "Hold To Disable", {"None", "CapsLock", "LeftAlt", "T", "V"}, (cfg.DisableKey and cfg.DisableKey.Name) or "None", function(v)
+        -- [ v68 ] было `(v == "None") and nil or Enum.KeyCode[v]`: первая ветка nil,
+        -- поэтому выражение ВСЕГДА давало вторую — "None" сохранялся как Enum.KeyCode.None
+        if v == "None" then
+            cfg.DisableKey = nil
+        else
+            cfg.DisableKey = Enum.KeyCode[v]
+        end
+    end)
+    Internal.createLabel(sub, "[AA] log in F9 (Debug Mode): method, lookSpoof, moveComp, spoofed count")
+
+    Internal.createLabel(sub, "=== BASE ANGLES ===")
+    Internal.createSelector(sub, "Yaw Base", {"Local View", "At Targets"}, cfg.YawBase, function(v) cfg.YawBase = v end)
+    Internal.createSelector(sub, "Pitch (Vertical)", {"Down", "Up", "Zero", "Jitter", "Random"}, cfg.Pitch, function(v) cfg.Pitch = v end)
+    Internal.createSelector(sub, "Yaw Mode (Horizontal)", {"Backward", "Left", "Right", "Spinbot", "Jitter"}, cfg.YawMode, function(v) cfg.YawMode = v end)
+    Internal.createSlider(sub, "Yaw Offset Angle", -180, 180, cfg.YawOffset, function(v) cfg.YawOffset = v end)
+
+    Internal.createLabel(sub, "=== JITTER & SPIN ===")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Jitter"), cfg.JitterEnabled, function(v) cfg.JitterEnabled = v end, nil, nil, true)
+    Internal.createSelector(sub, "Jitter Mode", {"Offset", "Center", "Random"}, cfg.JitterMode, function(v) cfg.JitterMode = v end)
+    Internal.createSlider(sub, "Jitter Angle Range", 0, 180, cfg.JitterRange, function(v) cfg.JitterRange = v end)
+    Internal.createSlider(sub, "Spin Speed (deg/s)", 30, 1080, cfg.SpinSpeed, function(v) cfg.SpinSpeed = v end)
+
+    Internal.createLabel(sub, "=== DESYNC & FAKE ===")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Desync"), cfg.Desync.Enabled, function(v) cfg.Desync.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "Desync Amount", 0, 60, cfg.Desync.Amount, function(v) cfg.Desync.Amount = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Invert Desync"), cfg.Desync.Invert, function(v) cfg.Desync.Invert = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "LBO (Lower Body Yaw)"), cfg.Desync.LBO, function(v) cfg.Desync.LBO = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Freestanding (Auto Wall Cover)"), cfg.Desync.Freestanding, function(v) cfg.Desync.Freestanding = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "=== MANUAL YAW HOTKEYS ===")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Manuals"), cfg.Manuals.Enabled, function(v) cfg.Manuals.Enabled = v end, nil, nil, true)
+    Internal.createLabel(sub, "[Z] Left (90°) | [C] Right (-90°) | [X] Back (180°) | [V] Reset")
+
+    Internal.createLabel(sub, "=== CONDITIONS & PRESETS ===")
+    Internal.createSelector(sub, "Preset Condition", {"Standing", "Moving", "Air", "Crouching", "SlowWalk"}, cfg.Condition, function(v) cfg.Condition = v end)
+end)
+
+
+-- SKIN CHANGER DATA (Robust Asset Loader)
+    local function GetLocalAsset(name, folderOverride)
+    if not isfile or not getcustomasset then return nil end
+
+    local extensions = {".png", ".jpg", ".jpeg", ".bmp"}
+    -- [ НОВОЕ ] folderOverride
+    local baseFolder = folderOverride or "Overmind/Skins/"
+
+    -- Create variants of the name to try
+    local lowName = name:lower()
+    local slug = lowName:gsub(" ", "-"):gsub("_", "-"):gsub("|", ""):gsub("%-%-", "-"):gsub("^%-", ""):gsub("%-$", "")
+
+    local variants = {
+        name,  -- Original (e.g
+        name:gsub(" %- ", "-"),  -- "A - B" -> "A-B"
+        name:gsub("%-", " - "),  -- "A-B" -> "A
+        lowName,  -- Full lowercase
+        name:gsub("Knife", "knife"),  -- Fix for "Gut knife"
+        name:gsub("knife", "Knife"),
+        slug,  -- Full slug
+        slug:gsub("pattern%-", "phase"),
+        slug:gsub("nebula%-pattern%-", "nebula-phase"),
+        slug:gsub("^hand%-wraps", "handwraps"),
+        slug:gsub("%-", "")
+    }
+
+    for _, variant in ipairs(variants) do
+        for _, ext in ipairs(extensions) do
+            local path = baseFolder .. variant .. ext
+            if isfile(path) then
+                local success, asset = pcall(function() return getcustomasset(path) end)
+                if success then return asset end
+            end
+        end
+    end
+
+    return nil
+end
+-- [ ЭКСПОРТ ] хитмаркеру (и другим системам) нужен доступ во время игры
+Internal.GetLocalAsset = GetLocalAsset
+
+local function isPatternSkin(name)
+    if not name then return false end
+    local n = name:upper()
+    -- Hide Patterns
+    local patterns = {"PATTERN", "PHASE", "STOCK", "RUBY", "SAPPHIRE", "EMERALD", "BLACK PEARL", "MARBLE FADE", "CASE HARDENED"}
+    for _, p in ipairs(patterns) do
+        if n:find(p) then return true end
+    end
+    return false
+end
+
+local SD = {SkinsRoot = nil, SkinSelections = {}, GloveSelections = {}, GloveFolders = {}}
+pcall(function()
+    SD.SkinsRoot = game:GetService("ReplicatedStorage"):FindFirstChild("Assets") and game:GetService("ReplicatedStorage").Assets:FindFirstChild("Skins")
+end)
+
+if SD.SkinsRoot then
+    if isfolder and not isfolder("Overmind/Skins") then makefolder("Overmind/Skins") end
+
+    pcall(function()
+        local count = 0
+        local AllowedCustomSkins = {
+            ["Butterfly Knife"] = {
+                Nebula = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+                Viridian = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+            },
+            ["Karambit"] = {
+                Nebula = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+                Viridian = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+            },
+            ["M9 Bayonet"] = {
+                Nebula = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+                Viridian = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+            },
+            ["Gut Knife"] = {
+                Nebula = {1, 2, 4, 5, 6, 7, 8, 9, 10},
+                Viridian = {1, 2, 3, 4, 5, 6, 8, 9}
+            }
+        }
+
+        for _, wf in ipairs(SD.SkinsRoot:GetChildren()) do
+            count = count + 1
+            if count % 5 == 0 then task.wait() end
+
+            local skins = {}
+            for _, sf in ipairs(wf:GetChildren()) do
+                local icon = sf:FindFirstChild("Icon") or sf:FindFirstChild("Thumbnail")
+                local img = icon and (icon:IsA("Decal") and icon.Texture or icon:IsA("ImageLabel") and icon.Image)
+
+                -- ПРИОРИТЕТ 1
+                local localImg = GetLocalAsset(wf.Name .. "-" .. sf.Name) or GetLocalAsset(sf.Name)
+                if localImg then
+                    img = localImg
+                elseif not img then
+                    local cf = sf:FindFirstChild("Camera")
+                    local fn = cf and cf:FindFirstChild("Factory New")
+                    local sa = fn and fn:FindFirstChildWhichIsA("SurfaceAppearance")
+                    if sa and sa.ColorMap then
+                        img = sa.ColorMap
+                    end
+                end
+
+                if not isPatternSkin(sf.Name) then
+                    table.insert(skins, { Name = sf.Name, Image = img })
+                end
+            end
+            table.sort(skins, function(a, b) return a.Name < b.Name end)
+            SD.SkinSelections[wf.Name] = skins
+        end
+
+        -- Inject Custom Patterns (Strict filtering according to user list)
+        for kName, data in pairs(AllowedCustomSkins) do
+            if SD.SkinSelections[kName] then
+                -- Nebula injection
+                for _, i in ipairs(data.Nebula) do
+                    local sName = "Nebula " .. i
+                    local asset = GetLocalAsset(kName .. " - " .. sName)
+                    table.insert(SD.SkinSelections[kName], { Name = sName, Image = asset })
+                end
+                -- Viridian injection
+                for _, i in ipairs(data.Viridian) do
+                    local sName = "Viridian " .. i
+                    local asset = GetLocalAsset(kName .. " - " .. sName)
+                    table.insert(SD.SkinSelections[kName], { Name = sName, Image = asset })
+                end
+                table.sort(SD.SkinSelections[kName], function(a, b) return a.Name < b.Name end)
+            end
+        end
+
+        for _, folder in ipairs(SD.SkinsRoot:GetChildren()) do
+            if (folder.Name:match("Glove") or folder.Name:match("Gloves") or folder.Name == "Hand Wraps")
+               and not (folder.Name:match("T Glove") or folder.Name:match("CT Glove") or folder.Name:match("T Gloves") or folder.Name:match("CT Gloves")) then
+                SD.GloveFolders[#SD.GloveFolders + 1] = folder
+            end
+        end
+
+        for i, gf in ipairs(SD.GloveFolders) do
+            if i % 5 == 0 then task.wait() end
+            local defaultImg = GetWeaponIcon(gf.Name)
+            if gf.Name == "Hand Wraps" then
+                defaultImg = GetLocalAsset("handwraps-taped") or defaultImg
+            end
+            local skins = {{ Name = "Default", Image = defaultImg }}
+            for _, sf in ipairs(gf:GetChildren()) do
+                local icon = sf:FindFirstChild("Icon") or sf:FindFirstChild("Thumbnail")
+                local img = icon and (icon:IsA("Decal") and icon.Texture or icon:IsA("ImageLabel") and icon.Image)
+
+                -- ПРИОРИТЕТ 1
+                local localImg = GetLocalAsset(gf.Name .. "-" .. sf.Name) or GetLocalAsset(sf.Name)
+                if localImg then
+                    img = localImg
+                elseif not img then
+                    -- ПРИОРИТЕТ 2
+                    local cf = sf:FindFirstChild("Camera")
+                    local fn = cf and cf:FindFirstChild("Factory New")
+                    local sa = fn and fn:FindFirstChildWhichIsA("SurfaceAppearance")
+                    img = sa and sa.ColorMap
+                end
+
+                if not isPatternSkin(sf.Name) then
+                    table.insert(skins, { Name = sf.Name, Image = img })
+                end
+            end
+            SD.GloveSelections[gf.Name] = skins
+        end
+    end)
+end
+
+-- Initialize Skin Config
+pcall(function()
+    if not Config.Inventory.SkinsMenu then
+        Config.Inventory.SkinsMenu = { CurrentSection = "weapons", CurrentModel = nil }
+    end
+    for w, s in pairs(SD.SkinSelections) do
+        if w == "Skeleton Knife" then
+            Config.Inventory.SkinChanger.Skins[w] = "Vanilla"
+        else
+            Config.Inventory.SkinChanger.Skins[w] = "Default"
+        end
+    end
+    for _, gf in ipairs(SD.GloveFolders) do
+        Config.Inventory.GloveChanger.Gloves[gf.Name] = "Default"
+    end
+end)
+
+-- [ UNIVERSAL SKIN GRID PATTERN ]
+Internal.createSkinGrid = function(parent, items, currentSelected, onClickCallback)
+    local GridFrame = Instance.new("ScrollingFrame")
+    GridFrame.Size = UDim2.new(1, 0, 1, -10)  -- [ ФИКС ] было 300px
+    GridFrame.BackgroundTransparency = 1
+    GridFrame.BorderSizePixel = 0
+    GridFrame.ScrollBarThickness = 2
+    GridFrame.ScrollBarImageColor3 = Config.Theme.Accent
+    GridFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    GridFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    GridFrame.Parent = parent
+
+    local Grid = Instance.new("UIGridLayout")
+    Grid.CellSize = UDim2.new(0, 108, 0, 120)
+    Grid.CellPadding = UDim2.new(0, 6, 0, 10)
+    Grid.SortOrder = Enum.SortOrder.LayoutOrder
+    Grid.Parent = GridFrame
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop, padding.PaddingBottom, padding.PaddingLeft, padding.PaddingRight = UDim.new(0, 4), UDim.new(0, 4), UDim.new(0, 4), UDim.new(0, 4)
+    padding.Parent = GridFrame
+
+    for idx, item in ipairs(items) do
+        local isSelected = (item.Name == currentSelected)
+
+        local Card = Instance.new("TextButton")
+        Card.Size = UDim2.new(0, 100, 0, 100)
+        Card.BackgroundColor3 = Color3.fromRGB(18, 19, 28)
+        Card.Text = ""
+        Card.AutoButtonColor = true
+        Card.LayoutOrder = idx
+        Card.Parent = GridFrame
+
+        local corner = Instance.new("UICorner", Card)
+        corner.CornerRadius = UDim.new(0, 8)
+
+        local stroke = Instance.new("UIStroke", Card)
+        stroke.Thickness = isSelected and 2 or 1
+        stroke.Color = isSelected and Config.Theme.Accent or Color3.fromRGB(35, 36, 50)
+        if isSelected then table.insert(Internal.UIObjects.Accents, stroke) end
+
+        -- Gradient Overlay
+        local bgGrad = Instance.new("UIGradient", Card)
+        bgGrad.Rotation = 90
+        bgGrad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 31, 45)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 16, 23))
+        })
+
+        -- Preview Image
+        local PreviewImage = Instance.new("ImageLabel")
+        PreviewImage.Size = UDim2.new(1, -20, 1, -40)
+        PreviewImage.Position = UDim2.new(0.5, 0, 0.4, 0)
+        PreviewImage.AnchorPoint = Vector2.new(0.5, 0.5)
+        PreviewImage.BackgroundTransparency = 1
+        PreviewImage.ScaleType = Enum.ScaleType.Fit
+
+        local isDef = (item.Name == "Default")
+        PreviewImage.Image = item.Image or "rbxassetid://12195031581"
+        PreviewImage.ImageColor3 = isDef and Color3.fromRGB(180, 180, 200) or Color3.new(1, 1, 1)
+        PreviewImage.ImageTransparency = isDef and 0.4 or 0
+        PreviewImage.Parent = Card
+
+        -- Bottom Info Bar
+        local InfoBar = Instance.new("Frame")
+        InfoBar.Size = UDim2.new(1, 0, 0, 24)
+        InfoBar.Position = UDim2.new(0, 0, 1, -24)
+        InfoBar.BackgroundColor3 = Color3.fromRGB(10, 11, 18)
+        InfoBar.BackgroundTransparency = 0.2
+        InfoBar.BorderSizePixel = 0
+        InfoBar.Parent = Card
+        Instance.new("UICorner", InfoBar).CornerRadius = UDim.new(0, 6)
+
+        local Label = Instance.new("TextLabel")
+        Label.Size = UDim2.new(1, -8, 1, 0)
+        Label.Position = UDim2.new(0, 4, 0, 0)
+        Label.BackgroundTransparency = 1
+        Label.Text = item.Name
+        Label.TextColor3 = isSelected and Color3.new(1, 1, 1) or Color3.fromRGB(160, 160, 175)
+        Label.Font = Enum.Font.GothamMedium
+        Label.TextSize = 9
+        Label.TextTruncate = Enum.TextTruncate.AtEnd
+        Label.Parent = InfoBar
+
+        Card.MouseButton1Click:Connect(function() onClickCallback(item.Name) end)
+    end
+end
+
+-- [ SKIN CHANGER CUSTOM UI (FULL PANE) ]
+_G.initSkinChangerUI = function(p)
+    -- Remove redundant refresh block to allow immediate toggle updates
+    for _, v in ipairs(p:GetChildren()) do
+        if not v:IsA("UIListLayout") and not v:IsA("UIPadding") then v:Destroy() end
+    end
+
+    local menuState = Config.Inventory.SkinsMenu
+    if not menuState.CurrentSection then menuState.CurrentSection = "weapons" end
+
+    -- 1. HEADER WITH MASTER TOGGLE
+    local Header = Instance.new("Frame")
+    Header.Size = UDim2.new(1, 0, 0, 50)
+    Header.BackgroundTransparency = 1
+    Header.LayoutOrder = 1
+    Header.Parent = p
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(0, 200, 1, 0)
+    Title.BackgroundTransparency = 1
+    Title.Text = "SKIN CHANGER"
+    Title.TextColor3 = CelestialPalette.Text
+    Title.FontFace = CelestialFonts.Bold
+    Title.TextSize = 16
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Parent = Header
+    -- [ НОВОЕ ] Лёгкое переливание заголовка (шимер по прозрачности текста)
+    Title:SetAttribute("ShimmerSpeed", 0.8)
+    Title:SetAttribute("ShimmerProp", "TextTransparency")
+    table.insert(Internal.Celestial.ShimmerPool, Title)
+
+    local ToggleRow = Instance.new("Frame")
+    ToggleRow.Size = UDim2.new(0, 240, 0, 30)
+    ToggleRow.Position = UDim2.new(1, -240, 0.5, -15)
+    ToggleRow.BackgroundTransparency = 1
+    ToggleRow.Parent = Header
+
+    local ToggleLabel = Instance.new("TextLabel")
+    ToggleLabel.Size = UDim2.new(1, -50, 1, 0)
+    ToggleLabel.BackgroundTransparency = 1
+    ToggleLabel.Text = "Enable SkinChanger"
+    ToggleLabel.TextColor3 = CelestialPalette.SubText
+    ToggleLabel.Font = Enum.Font.GothamBold
+    ToggleLabel.TextSize = 11
+    ToggleLabel.TextXAlignment = Enum.TextXAlignment.Right
+    ToggleLabel.Parent = ToggleRow
+
+    Internal.createiOSSwitch(ToggleRow, Config.Inventory.SkinChanger.Enabled, function(v)
+        Config.Inventory.SkinChanger.Enabled = v
+        Config.Inventory.KnifeChanger.Enabled = v
+        Config.Inventory.GloveChanger.Enabled = v
+        -- [ НОВОЕ ] Анимированный переход
+        task.delay(0.25, function() _G.initSkinChangerUI(p) end)
+        task.spawn(function()
+            task.wait(0.28)
+            local idx = 0
+            for _, ch in ipairs(p:GetDescendants()) do
+                if (ch:IsA("TextButton") or ch:IsA("ImageButton")) and ch.Name ~= "iOS_Switch" then
+                    idx += 1
+                    local targetT = ch.BackgroundTransparency
+                    ch.BackgroundTransparency = 1
+                    pcall(function()
+                        Core.TweenService:Create(ch, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {BackgroundTransparency = targetT}):Play()
+                    end)
+                    task.wait(0.015)
+                end
+            end
+        end)
+    end, nil, nil, true)
+
+    if not Config.Inventory.SkinChanger.Enabled then
+        local DisabledMsg = Instance.new("TextLabel")
+        DisabledMsg.Size = UDim2.new(1, 0, 0, 100)
+        DisabledMsg.BackgroundTransparency = 1
+        DisabledMsg.Text = "SKIN CHANGER IS CURRENTLY DISABLED\nACTIVATE THE SWITCH TO CONFIGURE SKINS"
+        DisabledMsg.TextColor3 = Color3.fromRGB(80, 80, 100)
+        DisabledMsg.Font = Enum.Font.GothamMedium
+        DisabledMsg.TextSize = 14
+        DisabledMsg.LayoutOrder = 2
+        DisabledMsg.Parent = p
+        return
+    end
+
+    -- 2. NAVIGATION TABS
+    local NavContainer = Instance.new("Frame")
+    NavContainer.Size = UDim2.new(1, 0, 0, 45)
+    NavContainer.BackgroundTransparency = 1
+    NavContainer.LayoutOrder = 2
+    NavContainer.Parent = p
+
+    local NavLayout = Instance.new("UIListLayout")
+    NavLayout.FillDirection = Enum.FillDirection.Horizontal
+    NavLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    NavLayout.Padding = UDim.new(0, 12)
+    NavLayout.Parent = NavContainer
+
+    -- [ НОВОЕ ] Счётчик моделей для бейджей навигации
+    local function countModels(sectionId)
+        local KM = {"Karambit", "Butterfly Knife", "Flip Knife", "Gut Knife", "M9 Bayonet", "Skeleton Knife", "Stiletto Knife"}
+        local n = 0
+        if sectionId == "gloves" then
+            for _ in pairs(SD.GloveSelections or {}) do n = n + 1 end
+        elseif sectionId == "knife" then
+            local set = {}
+            for _, k in ipairs(KM) do set[k] = true end
+            for name in pairs(SD.SkinSelections or {}) do
+                if set[name] then n = n + 1 end
+            end
+        else
+            local set = {}
+            for _, k in ipairs(KM) do set[k] = true end
+            for name in pairs(SD.SkinSelections or {}) do
+                if not set[name] then n = n + 1 end
+            end
+        end
+        return n
+    end
+
+    local function createNavBtn(id, text, icon)
+        local isSelected = (menuState.CurrentSection == id)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 110, 0, 36)
+        btn.BackgroundColor3 = isSelected and Color3.fromRGB(28, 29, 40) or CelestialPalette.CardBg
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.Parent = NavContainer
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+
+        local s = Instance.new("UIStroke", btn)
+        s.Color = isSelected and Color3.fromHex(CurrentCelestialTheme.Colors[1]) or CelestialPalette.CardBorder
+        s.Transparency = isSelected and 0.2 or 0.6
+        s.Thickness = isSelected and 1.5 or 1
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -46, 1, 0)
+        lbl.Position = UDim2.fromOffset(14, 0)
+        lbl.Text = text
+        lbl.TextColor3 = isSelected and CelestialPalette.Text or CelestialPalette.SubText
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 10
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.BackgroundTransparency = 1
+        lbl.Parent = btn
+
+        local count = countModels(id)
+        if count > 0 then
+            local badge = Instance.new("TextLabel")
+            badge.Size = UDim2.fromOffset(26, 16)
+            badge.AnchorPoint = Vector2.new(1, 0.5)
+            badge.Position = UDim2.new(1, -8, 0.5, 0)
+            badge.BackgroundColor3 = Color3.fromRGB(38, 39, 52)
+            badge.Text = tostring(count)
+            badge.TextColor3 = CelestialPalette.SubText
+            badge.Font = Enum.Font.GothamBold
+            badge.TextSize = 10
+            badge.Parent = btn
+            Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 8)
+        end
+
+        btn.MouseButton1Click:Connect(function()
+            if menuState.CurrentSection ~= id then
+                menuState.CurrentSection = id
+                menuState.CurrentModel = nil
+                _G.initSkinChangerUI(p)
+            end
+        end)
+        if Internal.CelestialAddPressAnimation then Internal.CelestialAddPressAnimation(btn) end
+    end
+
+    createNavBtn("knife", "KNIVES")
+    createNavBtn("weapons", "WEAPONS")
+    createNavBtn("gloves", "GLOVES")
+
+    -- 3. MODEL GRID OR SKIN SELECTION
+    if menuState.CurrentModel then
+        -- SKIN SELECTION VIEW
+        local modelName = menuState.CurrentModel
+        local BackBtn = Instance.new("TextButton")
+        BackBtn.Size = UDim2.new(0, 180, 0, 32)
+        BackBtn.BackgroundColor3 = Color3.fromRGB(35, 36, 50)
+        BackBtn.Text = "← BACK TO MODELS"
+        BackBtn.TextColor3 = Color3.new(1, 1, 1)
+        BackBtn.Font = Enum.Font.GothamBold
+        BackBtn.TextSize = 10
+        BackBtn.LayoutOrder = 3
+        BackBtn.Parent = p
+        Instance.new("UICorner", BackBtn).CornerRadius = UDim.new(0, 8)
+        BackBtn.MouseButton1Click:Connect(function() menuState.CurrentModel = nil _G.initSkinChangerUI(p) end)
+
+        local skinsList = {}
+        local defaultImg = GetLocalAsset("icon-" .. modelName) or GetWeaponIcon(modelName)
+        table.insert(skinsList, { Name = "Default", Image = defaultImg })
+
+        local rawSkins = (menuState.CurrentSection == "gloves") and SD.GloveSelections[modelName] or SD.SkinSelections[modelName]
+
+        if rawSkins then
+            for _, s in ipairs(rawSkins) do
+                if s.Name ~= "Default" and not isPatternSkin(s.Name) then
+                    table.insert(skinsList, s)
+                end
+            end
+        end
+
+        local currentSkin = (menuState.CurrentSection == "gloves") and Config.Inventory.GloveChanger.Gloves[modelName] or Config.Inventory.SkinChanger.Skins[modelName]
+
+        -- [ ФИКС СКРОЛЛА ] createSubCard с AutomaticSize.Y растягивался под весь канвас вложенного
+        local GridSub = Internal.createSubCard(p)
+        GridSub.AutomaticSize = Enum.AutomaticSize.None
+        GridSub.Size = UDim2.new(1, 0, 1, -150)
+        GridSub.LayoutOrder = 4
+        Internal.createSkinGrid(GridSub, skinsList, currentSkin, function(skinName)
+            if menuState.CurrentSection == "gloves" then
+                -- Exclusive selection for gloves
+                for k in pairs(Config.Inventory.GloveChanger.Gloves) do
+                    Config.Inventory.GloveChanger.Gloves[k] = "Default"
+                end
+                Config.Inventory.GloveChanger.Model = modelName
+                Config.Inventory.GloveChanger.Gloves[modelName] = skinName
+            elseif menuState.CurrentSection == "knife" then
+                -- Exclusive selection for knives
+                local KM = {"Karambit", "Butterfly Knife", "Flip Knife", "Gut Knife", "M9 Bayonet", "Skeleton Knife", "Stiletto Knife"}
+                for _, k in ipairs(KM) do
+                    Config.Inventory.SkinChanger.Skins[k] = (k == "Skeleton Knife" and "Vanilla" or "Default")
+                end
+                Config.Inventory.KnifeChanger.Model = modelName
+                Config.Inventory.SkinChanger.Skins[modelName] = skinName
+            else
+                Config.Inventory.SkinChanger.Skins[modelName] = skinName
+            end
+            _G.initSkinChangerUI(p)
+        end)
+    else
+        -- MODEL GRID VIEW
+        local GridContainer = Instance.new("ScrollingFrame")
+        GridContainer.Size = UDim2.new(1, 0, 1, -150)
+        GridContainer.BackgroundTransparency = 1
+        GridContainer.BorderSizePixel = 0
+        GridContainer.ScrollBarThickness = 2
+        GridContainer.ScrollBarImageColor3 = Config.Theme.Accent
+        GridContainer.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        GridContainer.LayoutOrder = 3
+        GridContainer.Parent = p
+        table.insert(Internal.UIObjects.Accents, GridContainer)
+
+        local Grid = Instance.new("UIGridLayout")
+        Grid.CellSize = UDim2.new(0, 125, 0, 140)
+        Grid.CellPadding = UDim2.new(0, 10, 0, 15)
+        Grid.Parent = GridContainer
+
+        local function addModelCard(name, currentSkin)
+            local nU = name:upper():gsub(" ", "")
+            local blacklist = {
+                ["CTKNIFE"] = true, ["TKNIFE"] = true, ["C4"] = true, ["DECOY"] = true,
+                ["HEGRENADE"] = true, ["INCENDIARYGRENADE"] = true, ["FLASHBANG"] = true,
+                ["MOLOTOV"] = true, ["SMOKEGRENADE"] = true, ["LIGHTSABER"] = true,
+                ["KNIFE"] = true
+            }
+            if blacklist[nU] or nU:find("GRENADE") then return end
+
+            local Card = Instance.new("TextButton")
+            Card.BackgroundColor3 = Color3.fromRGB(22, 23, 33)
+            Card.Text = ""
+            Card.Parent = GridContainer
+            Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 12)
+            local s = Instance.new("UIStroke", Card); s.Color = Color3.fromRGB(45, 46, 65); s.Thickness = 1.2
+            -- [ НОВОЕ ] Каскадное появление карточек моделей
+            do
+                local n = GridContainer:GetChildren() and #GridContainer:GetChildren() or 0
+                Card.BackgroundTransparency = 1
+                task.delay(math.min(n * 0.02, 0.4), function()
+                    if Card and Card.Parent then
+                        Core.TweenService:Create(Card, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {BackgroundTransparency = 0}):Play()
+                    end
+                end)
+            end
+
+            local img = Instance.new("ImageLabel")
+            img.Size = UDim2.new(1, -24, 1, -50)
+            img.Position = UDim2.new(0.5, 0, 0.4, 0)
+            img.AnchorPoint = Vector2.new(0.5, 0.5)
+            img.BackgroundTransparency = 1
+            img.ScaleType = Enum.ScaleType.Fit
+
+            -- DYNAMIC IMAGE
+            local skinImg = nil
+            if currentSkin and currentSkin ~= "Default" then
+                local data = (menuState.CurrentSection == "gloves") and SD.GloveSelections[name] or SD.SkinSelections[name]
+                if data then
+                    for _, sk in ipairs(data) do
+                        if sk.Name == currentSkin then
+                            skinImg = sk.Image
+                            break
+                        end
+                    end
+                end
+            end
+            img.Image = skinImg or GetLocalAsset("icon-" .. name) or GetWeaponIcon(name)
+            img.Parent = Card
+
+            local bar = Instance.new("Frame")
+            bar.Size = UDim2.new(1, 0, 0, 40)
+            bar.Position = UDim2.new(0, 0, 1, -40)
+            bar.BackgroundColor3 = Color3.fromRGB(13, 14, 21)
+            bar.BackgroundTransparency = 0.3
+            bar.Parent = Card
+            Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 12)
+
+            local title = Instance.new("TextLabel")
+            title.Size = UDim2.new(1, -12, 0, 18)
+            title.Position = UDim2.new(0, 6, 0, 4)
+            title.BackgroundTransparency = 1
+            title.Text = name:upper()
+            title.TextColor3 = Color3.new(1, 1, 1)
+            title.Font = Enum.Font.GothamBold
+            title.TextSize = 9
+            title.Parent = bar
+
+            local st = Instance.new("TextLabel")
+            st.Size = UDim2.new(1, -12, 0, 14)
+            st.Position = UDim2.new(0, 6, 0, 20)
+            st.BackgroundTransparency = 1
+            st.Text = currentSkin or "DEFAULT"
+            st.TextColor3 = Config.Theme.Accent
+            st.Font = Enum.Font.GothamMedium
+            st.TextSize = 8
+            st.Parent = bar
+
+            Card.MouseButton1Click:Connect(function() menuState.CurrentModel = name _G.initSkinChangerUI(p) end)
+        end
+
+        if menuState.CurrentSection == "knife" then
+            local KM = {"Karambit", "Butterfly Knife", "Flip Knife", "Gut Knife", "M9 Bayonet", "Skeleton Knife", "Stiletto Knife"}
+            for _, k in ipairs(KM) do addModelCard(k, Config.Inventory.SkinChanger.Skins[k]) end
+        elseif menuState.CurrentSection == "gloves" then
+            local GM = {} for k in pairs(SD.GloveSelections) do table.insert(GM, k) end table.sort(GM)
+            for _, g in ipairs(GM) do addModelCard(g, Config.Inventory.GloveChanger.Gloves[g]) end
+        else
+            local items = {}
+            local KM = {"Karambit", "Butterfly Knife", "Flip Knife", "Gut Knife", "M9 Bayonet", "Skeleton Knife", "Stiletto Knife"}
+            for w in pairs(SD.SkinSelections) do
+                local uW = w:upper()
+                local isKnife = false
+                for _, k in ipairs(KM) do if k == w then isKnife = true break end end
+
+                if not isKnife and not uW:find("KNIFE") and not uW:find("GLOVE") and not uW:find("HAND WRAPS") then
+                    table.insert(items, w)
+                end
+            end
+            table.sort(items)
+            for _, w in ipairs(items) do addModelCard(w, Config.Inventory.SkinChanger.Skins[w]) end
+        end
+    end
+end
+
+-- Единый модуль управления скинами (REMOVED
+
+-- EXPLOITS (Blox Strike)
+local RELOAD_SPEED = 100  -- Constant for instant reload
+local RELOAD_ANIMS = {["reload"] = true, ["reload_empty"] = true, ["Reload"] = true}
+
+createModule("No Recoil", "Remove weapon kickback (Blox Strike)", "Exploit", Config.Combat.WeaponMods.NoRecoil, function(v)
+    Config.Combat.WeaponMods.NoRecoil = v
+end)
+
+createModule("No Spread", "Remove bullet spread (Blox Strike)", "Exploit", Config.Combat.WeaponMods.NoSpread, function(v)
+    Config.Combat.WeaponMods.NoSpread = v
+end)
+
+createModule("Instant Reload", "Fast magazine replacement (Blox Strike)", "Exploit", Config.Combat.WeaponMods.InstantReload, function(v)
+    Config.Combat.WeaponMods.InstantReload = v
+end)
+
+createModule("Infinite Ammo", "Never run out of bullets", "Exploit", Config.Combat.WeaponMods.InfAmmo, function(v)
+    Config.Combat.WeaponMods.InfAmmo = v
+end)
+
+createModule("Rapid Fire", "Increased rate of fire (Blox Strike)", "Exploit", Config.Combat.WeaponMods.RapidFire, function(v)
+    Config.Combat.WeaponMods.RapidFire = v
+end, function(p)
+    Internal.createSlider(p, "Fire Rate Multiplier", 1, 10, Config.Combat.WeaponMods.FireRateMultiplier, function(v)
+        Config.Combat.WeaponMods.FireRateMultiplier = v
+    end, 0.1)
+    -- [ НОВОЕ ] Зажми ЛКМ
+    local holdRow = Internal.createSettingRow(p, "Hold LMB to Auto Fire")
+    Internal.createiOSSwitch(holdRow, Config.Combat.WeaponMods.HoldToFire, function(v)
+        Config.Combat.WeaponMods.HoldToFire = v
+        if Internal.ShowIslandNotification then
+            Internal.ShowIslandNotification(v and "Hold-to-Fire on" or "Hold-to-Fire off", Config.Theme.Accent)
+        end
+    end)
+    Internal.createSlider(p, "Auto Fire Delay", 10, 300, (Config.Combat.WeaponMods.HoldFireDelay or 0.05) * 1000, function(v)
+        Config.Combat.WeaponMods.HoldFireDelay = v / 1000
+    end)
+end)
+
+createModule("No Flash", "Remove flashbang effect", "Exploit", Config.Combat.WeaponMods.NoFlash, function(v)
+    Config.Combat.WeaponMods.NoFlash = v
+end)
+
+createModule("No Smoke", "Remove smoke grenade effect", "Exploit", Config.Combat.WeaponMods.NoSmoke, function(v)
+    Config.Combat.WeaponMods.NoSmoke = v
+end)
+
+-- WEAPON MODS ENGINE (Logic from Memesens)
+task.spawn(function()
+    local reloadHooked = {}
+    local originalFireRates = {}
+    local firerateObjs = {}
+    local hookedRecoil = {}
+    local hookedSpread = {}
+    local SendFunc = nil
+    local oldSend = nil
+
+-- [ CUBE CHECKER ]
+
+
+    local function createTracerBean(startPos, endPos)
+        local cfg = Config.Visuals.Projectiles.BulletTracers
+        if not cfg.Enabled then return end
+        if not startPos or not endPos then return end
+
+        local tracerColor = cfg.Rainbow and Color3.fromHSV(tick() % 5 / 5, 1, 1) or cfg.Color
+        local duration = cfg.Time
+
+        if cfg.Style == "Cylinder (Obelius)" then
+            local beamPart = Instance.new("Part")
+            beamPart.Name = "Overmind_Tracer"
+            beamPart.Shape = Enum.PartType.Cylinder
+            beamPart.Size = Vector3.new((startPos - endPos).Magnitude, 0.12, 0.12)
+            beamPart.CFrame = CFrame.new(startPos, endPos) * CFrame.new(0, 0, -beamPart.Size.X / 2) * CFrame.Angles(0, math.rad(90), 0)
+            beamPart.Anchored = true; beamPart.CanCollide = false; beamPart.CanQuery = false; beamPart.CastShadow = false
+            beamPart.Material = Enum.Material.Neon; beamPart.Color = tracerColor; beamPart.Transparency = 0
+            beamPart.Parent = workspace
+            task.spawn(function()
+                local startTime = tick()
+                while tick() - startTime < duration do
+                    beamPart.Transparency = (tick() - startTime) / duration
+                    if cfg.Rainbow then beamPart.Color = Color3.fromHSV(tick() % 5 / 5, 1, 1) end
+                    task.wait()
+                end
+                beamPart:Destroy()
+            end)
+        elseif cfg.Style == "Beam" or cfg.Style == "Line" then
+            local beamPart = Instance.new("Part")
+            beamPart.Name = "Overmind_Tracer"
+            beamPart.Size = Vector3.new(0.1, 0.1, (startPos - endPos).Magnitude)
+            beamPart.CFrame = CFrame.new(startPos, endPos) * CFrame.new(0, 0, -beamPart.Size.Z / 2)
+            beamPart.Anchored = true; beamPart.CanCollide = false; beamPart.CanQuery = false; beamPart.CastShadow = false
+            beamPart.Material = Enum.Material.Neon; beamPart.Color = tracerColor; beamPart.Transparency = 0
+            beamPart.Parent = workspace
+            task.spawn(function()
+                local startTime = tick()
+                while tick() - startTime < duration do
+                    beamPart.Transparency = (tick() - startTime) / duration
+                    if cfg.Rainbow then beamPart.Color = Color3.fromHSV(tick() % 5 / 5, 1, 1) end
+                    task.wait()
+                end
+                beamPart:Destroy()
+            end)
+        elseif cfg.Style == "Block" then
+            local block = Instance.new("Part")
+            block.Size = Vector3.new(0.5, 0.5, 0.5)
+            block.Position = startPos
+            block.Anchored = true; block.CanCollide = false; block.Color = tracerColor; block.Material = Enum.Material.Neon
+            block.Parent = workspace
+            local tween = Core.Services.TweenService:Create(block, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Position = endPos, Transparency = 1})
+            tween:Play()
+            tween.Completed:Connect(function() block:Destroy() end)
+        end
+    end
+
+    local function createBulletImpact(hitPos)
+        if not Config.Visuals.Projectiles.BulletImpacts.Enabled then return end
+        if not hitPos then return end
+        local impactPart = Instance.new("Part")
+        impactPart.Name = "Overmind_Impact"
+        impactPart.Size = Vector3.new(0.6, 0.6, 0.6)
+        impactPart.Shape = Enum.PartType.Block
+        impactPart.Position = hitPos
+        impactPart.Anchored = true
+        impactPart.CanCollide = false
+        impactPart.Material = Enum.Material.Neon
+        impactPart.Color = Config.Visuals.Projectiles.BulletImpacts.Color
+        impactPart.Transparency = 0
+        impactPart.Parent = workspace
+        task.spawn(function()
+            local startTime = tick()
+            local duration = 3
+            while tick() - startTime < duration do
+                local alpha = (tick() - startTime) / duration
+                impactPart.Transparency = alpha
+                task.wait()
+            end
+            impactPart:Destroy()
+        end)
+    end
+
+    local function GetWeaponModel()
+        local cam = workspace.CurrentCamera
+        if not cam then return nil end
+        for _, ch in cam:GetChildren() do
+            if ch:IsA("Model") and ch.Name ~= "Arms" and ch.Name ~= "Arms1" and ch.Name ~= "Arms2" and ch.Name ~= "Viewmodel" then
+                return ch
+            end
+        end
+        return nil
+    end
+
+    local Checkifbaseknife = {"CT Knife", "T Knife", "Knife"}
+    local function Checkknife(w)
+        if not w then return false end
+        for _, k in Checkifbaseknife do if w == k then return true end end
+        return false
+    end
+
+    local function SafeRequire(module)
+        if not module then return nil end
+        local success, result = pcall(function() return require(module) end)
+        if success and result and type(result) == "table" then return result end
+        return nil
+    end
+
+    local function InitKnifeChanger()
+        pcall(function()
+            local RS = game:GetService("ReplicatedStorage")
+            local SM = RS:FindFirstChild("Database") and RS.Database:FindFirstChild("Components") and
+                RS.Database.Components:FindFirstChild("Libraries") and
+                RS.Database.Components.Libraries:FindFirstChild("Skins")
+            local VM = RS:FindFirstChild("Classes") and RS.Classes:FindFirstChild("WeaponComponent") and
+                RS.Classes.WeaponComponent:FindFirstChild("Classes") and
+                RS.Classes.WeaponComponent.Classes:FindFirstChild("Viewmodel")
+            if not SM or not VM then return end
+
+            local Sk = SafeRequire(SM)
+            local Vm = SafeRequire(VM)
+            if not Sk or not Vm then return end
+
+            local oGCM = Sk.GetCameraModel
+            Sk.GetCameraModel = function(w, sk, ...)
+                if Config.Inventory.KnifeChanger.Enabled and w and Checkknife(w) then
+                    local newKnife = Config.Inventory.KnifeChanger.Model
+                    local sel = Config.Inventory.SkinChanger.Skins[newKnife] or "Vanilla"
+
+                    -- [FIX] Map display name to internal pattern name for the game engine
+                    local internalSkin = sel
+                    if sel:find("Nebula ") then
+                        internalSkin = sel:gsub("Nebula ", "Nebula_PATTERN_")
+                    elseif sel:find("Viridian ") then
+                        internalSkin = sel:gsub("Viridian ", "Viridian_PATTERN_")
+                    end
+
+                    local success, result = pcall(oGCM, newKnife, internalSkin, ...)
+                    if success and result then return result end
+                end
+                local success, result = pcall(oGCM, w, sk, ...)
+                if success then return result end
+                return nil
+            end
+
+            local oGChM = Sk.GetCharacterModel
+            Sk.GetCharacterModel = function(w, sk, ...)
+                if Config.Inventory.KnifeChanger.Enabled and w and Checkknife(w) then
+                    local newKnife = Config.Inventory.KnifeChanger.Model
+                    local sel = Config.Inventory.SkinChanger.Skins[newKnife] or "Vanilla"
+
+                    local internalSkin = sel
+                    if sel:find("Nebula ") then
+                        internalSkin = sel:gsub("Nebula ", "Nebula_PATTERN_")
+                    elseif sel:find("Viridian ") then
+                        internalSkin = sel:gsub("Viridian ", "Viridian_PATTERN_")
+                    end
+
+                    local success, result = pcall(oGChM, newKnife, internalSkin, ...)
+                    if success and result then return result end
+                end
+                local success, result = pcall(oGChM, w, sk, ...)
+                if success then return result end
+                return nil
+            end
+
+            local oVN = Vm.new
+            Vm.new = function(vc, w, sk, ...)
+                if Config.Inventory.KnifeChanger.Enabled and w and Checkknife(w) then
+                    local newKnife = Config.Inventory.KnifeChanger.Model
+                    local sel = Config.Inventory.SkinChanger.Skins[newKnife] or "Vanilla"
+
+                    local internalSkin = sel
+                    if sel:find("Nebula ") then
+                        internalSkin = sel:gsub("Nebula ", "Nebula_PATTERN_")
+                    elseif sel:find("Viridian ") then
+                        internalSkin = sel:gsub("Viridian ", "Viridian_PATTERN_")
+                    end
+
+                    local success, result = pcall(oVN, vc, newKnife, internalSkin, ...)
+                    if success and result then return result end
+                end
+                local success, result = pcall(oVN, vc, w, sk, ...)
+                if success then return result end
+                return nil
+            end
+
+            if Sk.GetGloves then
+                local oGG = Sk.GetGloves
+                Sk.GetGloves = function(g, sk)
+                    if Config.Inventory.GloveChanger.Enabled and Config.Inventory.GloveChanger.Model then
+                        local gModel = Config.Inventory.GloveChanger.Model
+                        local ts = Config.Inventory.GloveChanger.Gloves[gModel] or "Default"
+                        local success, result = pcall(oGG, gModel, ts)
+                        if success and result then return result end
+                    end
+                    local success, result = pcall(oGG, g, sk)
+                    if success then return result end
+                    return nil
+                end
+            end
+        end)
+    end
+
+    local function UpdateInventoryNames()
+        local LP = game:GetService("Players").LocalPlayer
+        local invGui = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("MainGui")
+        if not invGui then return end
+        local gameplay = invGui:FindFirstChild("Gameplay")
+        if not gameplay then return end
+        local bottom = gameplay:FindFirstChild("Bottom")
+        if not bottom then return end
+        local inv = bottom:FindFirstChild("Inventory")
+        if not inv then return end
+        local meleeSlot = inv:FindFirstChild("Melee")
+        if meleeSlot and Config.Inventory.KnifeChanger.Enabled then
+            local weapon = meleeSlot:FindFirstChild("Weapon")
+            if weapon then
+                local weaponName = weapon:FindFirstChild("WeaponName")
+                if weaponName and weaponName:IsA("TextLabel") then
+                    local knifeModel = Config.Inventory.KnifeChanger.Model
+                    local sel = Config.Inventory.SkinChanger.Skins[knifeModel]
+                    local star = utf8.char(9733)
+                    if sel and sel ~= "Default" then
+                        weaponName.Text = star .. " " .. knifeModel .. " | " .. sel
+                    else
+                        weaponName.Text = star .. " " .. knifeModel
+                    end
+                end
+            end
+        end
+    end
+
+    InitKnifeChanger()
+
+    local function ApplySkin()
+        if not SD.SkinsRoot then return end
+        local wm = GetWeaponModel()
+        if not wm then return end
+        local own = wm.Name
+        local ewn = own
+        local ca = false
+        if Checkknife(own) then
+            if Config.Inventory.KnifeChanger.Enabled then ewn = Config.Inventory.KnifeChanger.Model ca = true end
+        else
+            if Config.Inventory.SkinChanger.Enabled then ca = true end
+        end
+        if not ca then return end
+        local sel = Config.Inventory.SkinChanger.Skins[ewn]
+        if not sel or sel == "Default" then return end
+
+        -- [FIX] Mapping for Nebula/Viridian patterns BEFORE asset lookup
+        local folderName = sel
+        if sel:find("Nebula ") then
+            folderName = sel:gsub("Nebula ", "Nebula_PATTERN_")
+        elseif sel:find("Viridian ") then
+            folderName = sel:gsub("Viridian ", "Viridian_PATTERN_")
+        end
+
+        local localAsset
+        -- Try dynamic loading with both original and mapped name
+        localAsset = GetLocalAsset(ewn .. " - " .. sel) or GetLocalAsset(sel) or GetLocalAsset(folderName) or GetLocalAsset(ewn .. "-" .. folderName)
+
+        -- Fallback to pre-cached SD data if dynamic load failed
+        if not localAsset and SD.SkinSelections[ewn] then
+            for _, s in ipairs(SD.SkinSelections[ewn]) do
+                if s.Name == sel or s.Name == folderName then
+                    if s.Image and (tostring(s.Image):find("rbxasset") or tostring(s.Image):find("custom")) then
+                        localAsset = s.Image
+                    end
+                    break
+                end
+            end
+        end
+
+        local wsf = SD.SkinsRoot:FindFirstChild(ewn)
+        if not wsf then return end
+
+        -- Try to find folder with both cases (PATTERN and pattern)
+        local sf = wsf:FindFirstChild(folderName) or wsf:FindFirstChild(folderName:gsub("PATTERN", "pattern"))
+
+        -- FALLBACK SYSTEM
+        local templateFolder = sf
+        local hasCamera = sf and sf:FindFirstChild("Camera")
+
+        if not templateFolder or (not hasCamera and not localAsset) then
+            templateFolder = wsf:FindFirstChild("Default") or wsf:FindFirstChild("Vanilla") or wsf:FindFirstChild("Standard")
+        end
+
+        if not templateFolder then return end
+
+        -- If we have a local asset but no Camera folder in the pattern
+        if templateFolder == sf and not hasCamera then
+            templateFolder = wsf:FindFirstChild("Default") or wsf:FindFirstChild("Vanilla") or wsf:FindFirstChild("Standard")
+        end
+
+        local cf = templateFolder:FindFirstChild("Camera")
+        if not cf then return end
+        local fn = cf:FindFirstChild("Factory New")
+        if not fn then return end
+        for _, sa in fn:GetChildren() do
+            if sa:IsA("SurfaceAppearance") then
+                local pt = wm:FindFirstChild(sa.Name, true)
+                if pt and (pt:IsA("BasePart") or pt:IsA("MeshPart")) then
+                    -- Prevent re-applying the same asset to reduce flickering
+                    local currentSA = pt:FindFirstChildOfClass("SurfaceAppearance")
+                    if currentSA and localAsset and currentSA.ColorMap == localAsset then
+                        continue
+                    end
+
+                    for _, old in pt:GetChildren() do
+                        if old:IsA("SurfaceAppearance") then old:Destroy() end
+                    end
+                    local newSA = sa:Clone()
+                    if localAsset then newSA.ColorMap = localAsset end
+                    newSA.Parent = pt
+                end
+            end
+        end
+    end
+
+    local function ApplyGloves()
+        if not Config.Inventory.GloveChanger.Enabled then return end
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local am
+        for _, ch in cam:GetChildren() do
+            if ch:IsA("Model") and (ch.Name:match("Arms") or ch:FindFirstChild("Right Arm")) then
+                am = ch
+                break
+            end
+        end
+        if not am then return end
+        local la = am:FindFirstChild("Left Arm")
+        local ra = am:FindFirstChild("Right Arm")
+        if not la or not ra then return end
+        local lg = la:FindFirstChild("Glove")
+        local rg = ra:FindFirstChild("Glove")
+        if not lg or not rg then return end
+
+        local selectedModel = Config.Inventory.GloveChanger.Model
+        if not selectedModel then return end
+        local sel = Config.Inventory.GloveChanger.Gloves[selectedModel]
+        if not sel or sel == "Default" then return end
+
+        local localAsset
+        -- Try dynamic loading first (fixes first-inject issue)
+        localAsset = GetLocalAsset(selectedModel .. "-" .. sel) or GetLocalAsset(sel)
+
+        if not localAsset and SD.GloveSelections[selectedModel] then
+            for _, s in ipairs(SD.GloveSelections[selectedModel]) do
+                if s.Name == sel then
+                    if s.Image and (tostring(s.Image):find("rbxasset") or tostring(s.Image):find("custom")) then
+                        localAsset = s.Image
+                    end
+                    break
+                end
+            end
+        end
+
+        for _, old in lg:GetChildren() do if old:IsA("SurfaceAppearance") then old:Destroy() end end
+        for _, old in rg:GetChildren() do if old:IsA("SurfaceAppearance") then old:Destroy() end end
+
+        if not SD.SkinsRoot then return end
+        local gloveSkinFolder = SD.SkinsRoot:FindFirstChild(selectedModel)
+        if not gloveSkinFolder then return end
+        local skinVariant = gloveSkinFolder:FindFirstChild(sel)
+        if not skinVariant then return end
+        local cameraFolder = skinVariant:FindFirstChild("Camera")
+        if not cameraFolder then return end
+        local factoryNew = cameraFolder:FindFirstChild("Factory New")
+        if not factoryNew then return end
+        for _, sa in factoryNew:GetChildren() do
+            if sa:IsA("SurfaceAppearance") then
+                local nlg = sa:Clone()
+                local nrg = sa:Clone()
+                if localAsset then
+                    nlg.ColorMap = localAsset
+                    nrg.ColorMap = localAsset
+                end
+                nlg.Parent = lg
+                nrg.Parent = rg
+            end
+        end
+    end
+
+    local function getWeaponObjectSafe()
+        local ok, IC = pcall(function()
+            return require(game:GetService("ReplicatedStorage").Controllers.InventoryController)
+        end)
+        if not ok or not IC then return nil end
+        return IC.peekCurrentEquippedForMovement and IC.peekCurrentEquippedForMovement() or nil
+    end
+
+    local function hookAnimationReload(animModule)
+        if not animModule or reloadHooked[animModule] then return end
+        reloadHooked[animModule] = true
+        pcall(function()
+            local origPlay = animModule.play
+            animModule.play = function(self_anim, animName, ...)
+                local track = origPlay(self_anim, animName, ...)
+                if track and RELOAD_ANIMS[animName] and Config.Combat.WeaponMods.InstantReload then
+                    task.defer(function()
+                        pcall(function() track:AdjustSpeed(RELOAD_SPEED) end)
+                    end)
+                end
+                return track
+            end
+        end)
+    end
+
+    -- [ MOVED OUTSIDE FOR SCOPE ]
+    HIT_SOUNDS = {}
+    function RefreshHitSounds()
+        table.clear(HIT_SOUNDS)
+        if listfiles and getcustomasset then
+            local folder = AssetManager.HitsoundsFolder
+            if isfolder(folder) then
+                local files = listfiles(folder)
+                for _, file in ipairs(files) do
+                    if file:lower():find("%.wav") or file:lower():find("%.mp3") then
+                        local name = file:match("([^/\\]+)$")
+                        name = name:gsub("%.wav$", ""):gsub("%.mp3$", "")
+                        -- [ ФИЛЬТР ] enable/disable
+                        if not name:lower():match("^enable%d*$") and not name:lower():match("^disable%d*$") then
+                            pcall(function()
+                                HIT_SOUNDS[name] = getcustomasset(file)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    RefreshHitSounds()
+
+    local lastHitSoundTime = 0
+    _G.playHitSoundGlobal = function(hitboxName)
+        local cfg = Config.Inventory.HitSound
+        if not cfg.Enabled then return end
+        if os.clock() - lastHitSoundTime < 0.03 then return end
+
+        if hitboxName then
+            local n = hitboxName:lower()
+            local targetGroup = "Torso"  -- Дефолтное значение
+
+            if n:find("head") then
+                targetGroup = "Head"
+            elseif n:find("arm") or n:find("hand") or n:find("shoulder") or n:find("forearm") then
+                targetGroup = "Arms"
+            elseif n:find("leg") or n:find("foot") or n:find("thigh") or n:find("calf") then
+                targetGroup = "Legs"
+            elseif n:find("torso") or n:find("chest") or n:find("stomach") or n:find("root") or n:find("body") then
+                targetGroup = "Torso"
+            end
+
+            if cfg.Hitboxes and cfg.Hitboxes[targetGroup] == false then
+                return
+            end
+        end
+
+        lastHitSoundTime = os.clock()
+        local id = HIT_SOUNDS[cfg.Preset]
+        if id and id ~= "" then
+            local s = Instance.new("Sound", Core.Services.SoundService)
+            s.SoundId = id; s.Volume = cfg.Volume; s:Play()
+            s.Ended:Connect(function() s:Destroy() end)
+        end
+    end
+
+    local function playHitSound(hitboxName)
+        if _G.playHitSoundGlobal then _G.playHitSoundGlobal(hitboxName) end
+    end
+
+    -- [ KILL DETECTION ] следим за врагами
+    local KILL_SAY_COOLDOWN = 1.0
+    local lastKillSayTime = 0
+    local lastKillSoundTime = 0
+
+    function _G.OnEnemyKilled(victimChar)
+        if State.Unloading or not IsCurrentInstance() then return end
+        local now = os.clock()
+
+        -- KILL SOUND
+        local ksCfg = Config.Inventory.KillSound
+        if ksCfg and ksCfg.Enabled and now - lastKillSoundTime > 0.1 then
+            lastKillSoundTime = now
+            local id = HIT_SOUNDS[ksCfg.Preset]
+            if id and id ~= "" then
+                task.spawn(function()
+                    pcall(function()
+                        local s = Instance.new("Sound")
+                        s.SoundId = id
+                        s.Volume = ksCfg.Volume or 1
+                        s.Parent = Core.Services.SoundService
+                        s:Play()
+                        s.Ended:Connect(function() s:Destroy() end)
+                        task.delay(6, function() if s.Parent then s:Destroy() end end)
+                    end)
+                end)
+            end
+        end
+
+        -- KILL SAY (чат)
+        local sayCfg = Config.Inventory.KillSay
+        if sayCfg and sayCfg.Enabled and now - lastKillSayTime > KILL_SAY_COOLDOWN then
+            lastKillSayTime = now
+            task.delay(sayCfg.Delay or 0.15, function()
+                if State.Unloading or not IsCurrentInstance() then return end
+                pcall(function()
+                    local msgs = {}
+                    for m in string.gmatch(sayCfg.Messages or "ez", "[^,]+") do
+                        m = m:match("^%s*(.-)%s*$")
+                        if m ~= "" then table.insert(msgs, m) end
+                    end
+                    if #msgs == 0 then return end
+                    local msg = msgs[math.random(1, #msgs)]
+                    local chatEvt = Core.Services.Players:FindFirstChild("SayMessageRequest")
+                        or Core.Services.ReplicatedStorage:FindFirstChild("SayMessageRequest", true)
+                        or Core.Services.ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents", true)
+                        and Core.Services.ReplicatedStorage.DefaultChatSystemChatEvents:FindFirstChild("SayMessageRequest", true)
+                    if chatEvt and chatEvt:IsA("RemoteEvent") then
+                        chatEvt:FireServer(msg, "All")
+                    end
+                end)
+            end)
+        end
+    end
+
+    -- Hooking weapon parameters (Robust logic from Memesens)
+    local function applyHooks(fullScan)
+        local objects = {}
+        if fullScan then
+            pcall(function()
+                local reg = getreg()
+                for i = 1, #reg do
+                    table.insert(objects, reg[i])
+                    if i % 2000 == 0 then task.wait() end  -- Yield every 2k objects
+                end
+            end)
+        else
+            pcall(function()
+                local reg = getreg()
+                local count = 0
+                for i = 1, #reg do
+                    table.insert(objects, reg[i])
+                    count = count + 1
+                    if count >= 1500 then
+                        count = 0
+                        task.wait()
+                    end
+                    if State and State.Unloading then break end
+                end
+            end)
+        end
+
+        local iterCount = 0
+        for _, obj in objects do
+            iterCount = iterCount + 1
+            if iterCount % 1000 == 0 then task.wait() end  -- Safety yield
+            if State and State.Unloading then break end
+
+            if type(obj) == "table" then
+                if rawget(obj, "FireRate") and not table.find(firerateObjs, obj) then
+                    table.insert(originalFireRates, {obj = obj, val = obj.FireRate})
+                    table.insert(firerateObjs, obj)
+                end
+
+                -- Detect SendFunc (Bullet Hook)
+                if not SendFunc and rawget(obj, "shoot") and type(obj.shoot) == "function" then
+                    pcall(function()
+                        for _, uv in debug.getupvalues(obj.shoot) do
+                            if type(uv) == "table" and rawget(uv, "Inventory") and rawget(uv.Inventory, "ShootWeapon") then
+                                SendFunc = uv.Inventory.ShootWeapon.Send
+                                if SendFunc then
+                                    oldSend = hookfunction(SendFunc, function(...)
+                                        local args = {...}
+                                        if args[1] and type(args[1].Bullets) == "table" then
+                                            for _, bullet in args[1].Bullets do
+                                                if type(bullet.Hits) == "table" then
+                                                    for _, hitData in bullet.Hits do
+                                                        local target = nil
+                                                        if Config.Combat.Ragebot.Enabled and State.RageTarget then
+                                                            target = State.RageTarget
+                                                        elseif Config.Combat.Memesense.Enabled and Config.Combat.Memesense.AimbotEnabled and State.MemesenseTarget then
+                                                            target = State.MemesenseTarget
+                                                        elseif Config.Combat.SilentAim.Enabled and State.SilentTarget then
+                                                            target = State.SilentTarget
+                                                        end
+
+                                                        if target then
+                                                            hitData.Instance = target
+                                                            hitData.Position = target.Position
+                                                            pcall(function() TriggerHitMarkerEvent(target.Position) end)
+                                                        end
+
+                                                        pcall(function()
+                                                            local cam = workspace.CurrentCamera
+                                                            if cam and hitData.Position then
+                                                                if Config.Visuals.Projectiles.Enabled then
+                                                                    createTracerBean(cam.CFrame.Position, hitData.Position)
+                                                                    createBulletImpact(hitData.Position)
+                                                                end
+
+                                                                if hitData.Instance then
+                                                                    local char = hitData.Instance:FindFirstAncestorOfClass("Model")
+                                                                    if char and char:FindFirstChild("Humanoid") and not isCharacterAlly(char) then
+                                                                        playHitSound(hitData.Instance.Name)
+                                                                        TriggerHitMarkerEvent(hitData.Position)
+                                                                    end
+                                                                end
+                                                            end
+                                                        end)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                        return oldSend(...)
+                                    end)
+                                end
+                                break
+                            end
+                        end
+                    end)
+                end
+
+                -- No Recoil Hooks
+                if rawget(obj, "setWeaponRecoil") and not hookedRecoil[obj] then
+                    hookedRecoil[obj] = true
+                    pcall(function()
+                        local old; old = hookfunction(obj.setWeaponRecoil, function(...)
+                            if Config.Combat.WeaponMods.NoRecoil then return end
+                            return old(...)
+                        end)
+                    end)
+                end
+
+                if rawget(obj, "weaponKick") and not hookedRecoil[obj.weaponKick] then
+                    hookedRecoil[obj.weaponKick] = true
+                    pcall(function()
+                        local old; old = hookfunction(obj.weaponKick, function(p1, p2)
+                            if Config.Combat.WeaponMods.NoRecoil then return end
+                            return old(p1, p2)
+                        end)
+                    end)
+                end
+
+                if rawget(obj, "getTrueSpread") and not hookedSpread[obj] then
+                    hookedSpread[obj] = true
+                    pcall(function()
+                        local old; old = hookfunction(obj.getTrueSpread, function(p1)
+                            if Config.Combat.WeaponMods.NoSpread then return 0 end
+                            return old(p1)
+                        end)
+                    end)
+                end
+            elseif type(obj) == "function" then
+                local success, info = pcall(debug.getinfo, obj)
+                if success and info then
+                    if info.name == "calculateRecoilOffset" and not hookedRecoil[obj] then
+                        hookedRecoil[obj] = true
+                        pcall(function()
+                            local old; old = hookfunction(obj, function(...)
+                                if Config.Combat.WeaponMods.NoRecoil then return UDim2.new() end
+                                return old(...)
+                            end)
+                        end)
+                    elseif info.name == "Flash" then
+                        pcall(function()
+                            local old; old = hookfunction(obj, function(...)
+                                if Config.Combat.WeaponMods.NoFlash then return end
+                                return old(...)
+                            end)
+                        end)
+                    elseif info.name == "CreateVoxel" and debug.getupvalue(obj, 1) and tostring(debug.getupvalue(obj, 1)) == "Smoke" then
+                        pcall(function()
+                            local old; old = hookfunction(obj, function(...)
+                                if Config.Combat.WeaponMods.NoSmoke then return end
+                                return old(...)
+                            end)
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    local lastWeapon = nil
+    applyHooks(true)  -- Initial heavy scan once
+
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        task.wait(0.5)  -- Fast update for Weapon Mods
+        applyHooks(false)  -- Registry-only scan is cheap
+        local weapon = getWeaponObjectSafe()
+        if weapon then
+            if weapon ~= lastWeapon then
+                lastWeapon = weapon
+                if weapon.Viewmodel and weapon.Viewmodel.Animation then hookAnimationReload(weapon.Viewmodel.Animation) end
+                if weapon.CharacterAnimator then hookAnimationReload(weapon.CharacterAnimator) end
+            end
+
+            -- Fire Rate Logic
+            for _, data in originalFireRates do
+                local targetVal = data.val
+                if Config.Combat.WeaponMods.RapidFire then
+                    targetVal = data.val / Config.Combat.WeaponMods.FireRateMultiplier
+                end
+
+                local success = pcall(function() data.obj.FireRate = targetVal end)
+                if not success and setreadonly then
+                    local locked = false
+                    pcall(function() setreadonly(data.obj, false) locked = true end)
+                    data.obj.FireRate = targetVal
+                    if locked then pcall(function() setreadonly(data.obj, true) end) end
+                elseif not success and rawset then
+                    rawset(data.obj, "FireRate", targetVal)
+                end
+            end
+
+            -- Inf Ammo Logic (Blox Strike specific check)
+            if Config.Combat.WeaponMods.InfAmmo and weapon.Rounds then
+                local success = pcall(function() weapon.Rounds = 999 end)
+                if not success and setreadonly then
+                    local locked = false
+                    pcall(function() setreadonly(weapon, false) locked = true end)
+                    weapon.Rounds = 999
+                    if locked then pcall(function() setreadonly(weapon, true) end) end
+                elseif not success and rawset then
+                    rawset(weapon, "Rounds", 999)
+                end
+            end
+
+            -- Skin Changer Logic
+            pcall(function()
+                if Config.Inventory.SkinChanger.Enabled or Config.Inventory.KnifeChanger.Enabled then
+                    ApplySkin()
+                    UpdateInventoryNames()
+                end
+                if Config.Inventory.GloveChanger.Enabled then ApplyGloves() end
+            end)
+        end
+    end
+end)
+
+-- INVENTORY & WORLD
+createModule("World", "Environment and weather control", "Visuals", Config.Visuals.World.Enabled, function(v)
+    Config.Visuals.World.Enabled = v
+    if not v then
+        local lighting = game:GetService("Lighting")
+        lighting.ClockTime = OriginalState.Lighting.ClockTime
+        lighting.Brightness = OriginalState.Lighting.Brightness
+        lighting.Ambient = OriginalState.Lighting.Ambient
+        lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
+        lighting.FogColor = OriginalState.Lighting.FogColor
+        lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
+        lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
+        local over_sky = lighting:FindFirstChild("Overmind_Sky")
+        if over_sky then over_sky:Destroy() end
+        if WeatherObjects.Part then WeatherObjects.Part:Destroy() WeatherObjects.Part = nil end
+    end
+end, function(p)
+    local cfg = Config.Visuals.World
+    local sub = Internal.createSubCard(p)
+
+    local skyToggle = Internal.createSettingRow(sub, "Enable Skybox")
+    Internal.createiOSSwitch(skyToggle, cfg.Skybox.Enabled, function(v)
+        cfg.Skybox.Enabled = v
+        if v then UpdateSkybox(cfg.Skybox.Preset) end
+    end, skyToggle:FindFirstChild("TextLabel"), nil, true)
+
+    Internal.createSelector(sub, "Skybox Preset", {"Night", "Ocean Sunset", "My Summer Car", "Standard", "Minecraft", "Spongebob", "Deep Space", "Clouded Sky", "Retro", "City", "Purple Nebula", "Pink Sky"}, cfg.Skybox.Preset, function(v)
+        cfg.Skybox.Preset = v
+        if cfg.Skybox.Enabled then UpdateSkybox(v) end
+    end)
+
+    Internal.createSelector(sub, "Weather", {"None", "Rain", "Snow", "Hell Fire"}, cfg.Weather, function(v)
+        cfg.Weather = v
+        UpdateWeather(v)
+    end)
+
+    local timeToggle = Internal.createSettingRow(sub, "Enable Time")
+    Internal.createiOSSwitch(timeToggle, cfg.Time.Enabled, function(v) cfg.Time.Enabled = v end, timeToggle:FindFirstChild("TextLabel"), nil, true)
+    Internal.createSlider(sub, "Clock Time", 0, 24, cfg.Time.Value, function(v) cfg.Time.Value = v end)
+
+    local brightToggle = Internal.createSettingRow(sub, "Enable Brightness")
+    Internal.createiOSSwitch(brightToggle, cfg.Brightness.Enabled, function(v) cfg.Brightness.Enabled = v end, brightToggle:FindFirstChild("TextLabel"), nil, true)
+    Internal.createSlider(sub, "Brightness", 0, 100, cfg.Brightness.Value * 10, function(v) cfg.Brightness.Value = v / 10 end)
+
+    local colorToggle = Internal.createSettingRow(sub, "Enable Colors")
+    Internal.createiOSSwitch(colorToggle, cfg.Colors.Enabled, function(v) cfg.Colors.Enabled = v end, colorToggle:FindFirstChild("TextLabel"), nil, true)
+    Internal.addColorSetting(sub, "Ambient Color", cfg.Colors.Ambient, function(c) cfg.Colors.Ambient = c end)
+    Internal.addColorSetting(sub, "Outdoor Color", cfg.Colors.Outdoor, function(c) cfg.Colors.Outdoor = c end)
+
+    local worldColorToggle = Internal.createSettingRow(sub, "World Color")
+    Internal.createiOSSwitch(worldColorToggle, cfg.WorldColor.Enabled, function(v) cfg.WorldColor.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Select World Color", cfg.WorldColor.Color, function(c) cfg.WorldColor.Color = c end)
+
+    local skyColorToggle = Internal.createSettingRow(sub, "Second Color")
+    Internal.createiOSSwitch(skyColorToggle, cfg.SkyColor.Enabled, function(v) cfg.SkyColor.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Select Sky Color", cfg.SkyColor.Color, function(c) cfg.SkyColor.Color = c end)
+
+    local nightToggle = Internal.createSettingRow(sub, "Night Mode")
+    Internal.createiOSSwitch(nightToggle, cfg.NightMode.Enabled, function(v) cfg.NightMode.Enabled = v end, nightToggle:FindFirstChild("TextLabel"), nil, true)
+    Internal.addColorSetting(sub, "World Color", cfg.NightMode.ColorA, function(c) cfg.NightMode.ColorA = c end)
+    Internal.addColorSetting(sub, "Second Color", cfg.NightMode.ColorB, function(c) cfg.NightMode.ColorB = c end)
+end)
+
+createModule("Atmosphere", "Atmospheric shaders and color correction", "Visuals", Config.Visuals.Atmosphere.Enabled, function(v)
+    Config.Visuals.Atmosphere.Enabled = v
+    if not v then
+        local lighting = game:GetService("Lighting")
+        local lighting_atm = lighting:FindFirstChildOfClass("Atmosphere")
+        if lighting_atm and lighting_atm.Name ~= "Overmind_SkyAtmosphere" then
+            lighting_atm.Density = OriginalState.Atmosphere.Density
+            lighting_atm.Haze = OriginalState.Atmosphere.Haze
+            lighting_atm.Glare = OriginalState.Atmosphere.Glare
+        end
+        local cc = lighting:FindFirstChild("Overmind_CC")
+        if cc then cc:Destroy() end
+    end
+end, function(p)
+    local cfg = Config.Visuals.Atmosphere
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Atmosphere Density", 0, 10, cfg.Density * 10, function(v) cfg.Density = v / 10 end, 0.1)
+    Internal.createSlider(sub, "Atmosphere Haze", 0, 100, cfg.Haze * 10, function(v) cfg.Haze = v / 10 end)
+    Internal.createSlider(sub, "Atmosphere Glare", 0, 100, cfg.Glare * 10, function(v) cfg.Glare = v / 10 end)
+
+    local ccToggle = Internal.createSettingRow(sub, "Enable Color Correction")
+    Internal.createiOSSwitch(ccToggle, cfg.ColorCorrection.Enabled, function(v) cfg.ColorCorrection.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "Saturation", -10, 10, cfg.ColorCorrection.Saturation * 10, function(v) cfg.ColorCorrection.Saturation = v / 10 end)
+    Internal.createSlider(sub, "Contrast", -10, 10, cfg.ColorCorrection.Contrast * 10, function(v) cfg.ColorCorrection.Contrast = v / 10 end)
+end)
+
+createModule("Projectiles", "Bullet and grenade visualization", "Visuals", Config.Visuals.Projectiles.Enabled, function(v)
+    Config.Visuals.Projectiles.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.Projectiles
+    local sub = Internal.createSubCard(p)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Bullet Tracers"), cfg.BulletTracers.Enabled, function(v) cfg.BulletTracers.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Tracer Color", cfg.BulletTracers.Color, function(c) cfg.BulletTracers.Color = c end)
+    Internal.createSelector(sub, "Tracer Style", {"Line", "Block", "Beam", "Cylinder (Obelius)"}, cfg.BulletTracers.Style, function(v) cfg.BulletTracers.Style = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Rainbow Mode"), cfg.BulletTracers.Rainbow, function(v) cfg.BulletTracers.Rainbow = v end, nil, nil, true)
+    Internal.createSlider(sub, "Tracer Time", 1, 100, cfg.BulletTracers.Time * 10, function(v) cfg.BulletTracers.Time = v / 10 end, function(v) return tostring(v / 10) .. "s" end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Bullet Impacts"), cfg.BulletImpacts.Enabled, function(v) cfg.BulletImpacts.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Impact Color", cfg.BulletImpacts.Color, function(c) cfg.BulletImpacts.Color = c end)
+
+    Internal.createLabel(sub, "Grenade ESP")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "ESP Enabled"), cfg.GrenadeESP.Enabled, function(v) cfg.GrenadeESP.Enabled = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Tracers Enabled"), cfg.GrenadeESP.Tracers, function(v) cfg.GrenadeESP.Tracers = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Tracer Color", cfg.GrenadeESP.TracerColor, function(c) cfg.GrenadeESP.TracerColor = c end)
+
+    -- [ v30 ] Предсказание броска
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Throw Prediction"), cfg.GrenadeESP.Prediction ~= false, function(v) cfg.GrenadeESP.Prediction = v end, nil, nil, true)
+    Internal.createSelector(sub, "Prediction Style", {"Arc + Dots", "Arc", "Dots"}, cfg.GrenadeESP.Style or "Arc + Dots", function(v) cfg.GrenadeESP.Style = v end)
+    Internal.addColorSetting(sub, "Arc End Color", cfg.GrenadeESP.TracerColor2 or Color3.fromRGB(255, 60, 0), function(c) cfg.GrenadeESP.TracerColor2 = c end)
+    Internal.createSlider(sub, "Throw Speed", 20, 200, cfg.GrenadeESP.ThrowSpeed or 90, function(v) cfg.GrenadeESP.ThrowSpeed = v end)
+    Internal.createSlider(sub, "Gravity Scale", 5, 15, (cfg.GrenadeESP.GravityScale or 1) * 10, function(v) cfg.GrenadeESP.GravityScale = v / 10 end, 0.1)
+    Internal.createSlider(sub, "Impact Ring Size", 3, 14, cfg.GrenadeESP.ImpactRadius or 7, function(v) cfg.GrenadeESP.ImpactRadius = v end)
+    Internal.createSlider(sub, "Drop Line Height", 0, 20, cfg.GrenadeESP.DropLineHeight or 9, function(v) cfg.GrenadeESP.DropLineHeight = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show Bounce"), cfg.GrenadeESP.Bounce ~= false, function(v) cfg.GrenadeESP.Bounce = v end, nil, nil, true)
+    -- [ v31 ] авто-калибровка
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Auto-Calibrate Throw Speed"), cfg.GrenadeESP.AutoCalibrate ~= false, function(v) cfg.GrenadeESP.AutoCalibrate = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Molotov Zone ESP"), cfg.GrenadeESP.MolotovZone, function(v) cfg.GrenadeESP.MolotovZone = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Molotov Color", cfg.GrenadeESP.MolotovColor, function(c) cfg.GrenadeESP.MolotovColor = c end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Smoke Zone ESP"), cfg.GrenadeESP.SmokeZone, function(v) cfg.GrenadeESP.SmokeZone = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Smoke Color", cfg.GrenadeESP.SmokeColor, function(c) cfg.GrenadeESP.SmokeColor = c end)
+end)
+
+-- Audio & Feedback Modules
+createModule("Hit Sound", "Combat audio feedback", "Visuals", Config.Inventory.HitSound.Enabled, function(v)
+    Config.Inventory.HitSound.Enabled = v
+end, function(p)
+    local cfg = Config.Inventory.HitSound
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Hit Sound Volume", 1, 50, cfg.Volume * 10, function(v) cfg.Volume = v / 10 end)
+
+    local options = {}
+    for name, _ in pairs(HIT_SOUNDS or {}) do table.insert(options, name) end
+    table.sort(options)
+
+    if #options == 0 then table.insert(options, "Default") end
+
+    local selector = Internal.createSelector(sub, "Hit Sound Preset", options, cfg.Preset, function(v) cfg.Preset = v end)
+
+    if not cfg.Hitboxes then
+        cfg.Hitboxes = { ["Head"] = true, ["Torso"] = true, ["Arms"] = true, ["Legs"] = true }
+    end
+    Internal.createMultiSelector(sub, "Filter Hitboxes", {"Head", "Torso", "Arms", "Legs"}, cfg.Hitboxes, function(hitbox, state) end)
+
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(1, 0, 0, 30)
+    refreshBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65); refreshBtn.Text = "Refresh Hitsounds"; refreshBtn.TextColor3 = Theme.Text; refreshBtn.Font = Theme.FontMedium; refreshBtn.TextSize = 12; refreshBtn.Parent = sub
+    Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+    refreshBtn.MouseButton1Click:Connect(function()
+        if RefreshHitSounds then RefreshHitSounds() end
+        local newOptions = {}
+        for name in pairs(HIT_SOUNDS) do table.insert(newOptions, name) end
+        table.sort(newOptions)
+        selector.Update(newOptions)
+        if Internal.ShowIslandNotification then Internal.ShowIslandNotification("HITSOUNDS REFRESHED", Config.Theme.Accent) end
+    end)
+end)
+
+createModule("Radar", "CS-style minimap with enemies", "Visuals", Config.Visuals.Radar.Enabled, function(v)
+    Config.Visuals.Radar.Enabled = v
+    if v then
+        if Internal.BuildRadar and not (Internal.RadarGui and Internal.RadarGui.Parent) then pcall(Internal.BuildRadar) end
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Radar Range", 50, 500, Config.Visuals.Radar.Range or 150, function(v)
+        Config.Visuals.Radar.Range = v
+    end)
+end)
+
+createModule("Kill Say", "Auto chat message on kill", "Visuals", Config.Inventory.KillSay.Enabled, function(v)
+    Config.Inventory.KillSay.Enabled = v
+end, function(p)
+    local cfg = Config.Inventory.KillSay
+    local sub = Internal.createSubCard(p)
+
+    local inputRow = Internal.createSettingRow(sub, "Messages (comma-sep)")
+    local msgBox = Instance.new("TextBox")
+    msgBox.Size = UDim2.new(1, -10, 0, 28)
+    msgBox.Position = UDim2.new(0, 5, 0, 34)
+    msgBox.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+    msgBox.Text = cfg.Messages or "ez, 1"
+    msgBox.PlaceholderText = "ez, 1, too easy"
+    msgBox.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
+    msgBox.TextColor3 = Color3.fromRGB(230, 230, 240)
+    msgBox.TextSize = 12
+    msgBox.Font = Enum.Font.Gotham
+    msgBox.ClearTextOnFocus = false
+    msgBox.TextWrapped = true
+    msgBox.Parent = inputRow
+    Instance.new("UICorner", msgBox).CornerRadius = UDim.new(0, 6)
+    local mbStroke = Instance.new("UIStroke", msgBox)
+    mbStroke.Color = Color3.fromRGB(60, 60, 80); mbStroke.Thickness = 1
+    msgBox.FocusLost:Connect(function(enter)
+        if enter then
+            cfg.Messages = msgBox.Text
+            if Internal.ShowIslandNotification then pcall(function() Internal.ShowIslandNotification("Kill say saved", Config.Theme.Accent) end) end
+        end
+    end)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck ~= false, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createSlider(sub, "Chat Delay (ms)", 0, 1000, (cfg.Delay or 0.15) * 1000, function(v) cfg.Delay = v / 1000 end)
+end)
+
+createModule("Kill Sound", "Sound on kill (from Hitsounds)", "Visuals", Config.Inventory.KillSound.Enabled, function(v)
+    Config.Inventory.KillSound.Enabled = v
+end, function(p)
+    local cfg = Config.Inventory.KillSound
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Kill Sound Volume", 1, 50, cfg.Volume * 10, function(v) cfg.Volume = v / 10 end)
+
+    local options = {}
+    for name, _ in pairs(HIT_SOUNDS or {}) do table.insert(options, name) end
+    table.sort(options)
+    if #options == 0 then table.insert(options, "Default") end
+    local selector = Internal.createSelector(sub, "Kill Sound Preset", options, cfg.Preset, function(v) cfg.Preset = v end)
+
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(1, 0, 0, 30)
+    refreshBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65); refreshBtn.Text = "Refresh Sounds"; refreshBtn.TextColor3 = Theme.Text; refreshBtn.Font = Theme.FontMedium; refreshBtn.TextSize = 12; refreshBtn.Parent = sub
+    Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+    refreshBtn.MouseButton1Click:Connect(function()
+        if RefreshHitSounds then RefreshHitSounds() end
+        local newOptions = {}
+        for name in pairs(HIT_SOUNDS) do table.insert(newOptions, name) end
+        table.sort(newOptions)
+        selector.Update(newOptions)
+        if Internal.ShowIslandNotification then Internal.ShowIslandNotification("KILL SOUNDS REFRESHED", Config.Theme.Accent) end
+    end)
+end)
+
+createModule("HitMarker", "Visual combat feedback", "Visuals", Config.Visuals.Hitmarker.Enabled, function(v)
+    Config.Visuals.Hitmarker.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.Hitmarker
+    local sub = Internal.createSubCard(p)
+
+    Internal.addColorSetting(sub, "Marker Color", cfg.Color, function(c) cfg.Color = c end)
+    Internal.createSelector(sub, "Hitmarker Style", {"Cross", "Crosshair", "Circle", "Image"}, cfg.Style or "Cross", function(v) cfg.Style = v end)
+    -- Какая картинка используется стилем "Image" (PNG кладётся в корень репо + строка в ...
+    Internal.createSelector(sub, "Hitmarker Image", {"RedHit", "WhiteHit"}, cfg.Image or "RedHit", function(v) cfg.Image = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Rainbow Mode"), cfg.Rainbow, function(v) cfg.Rainbow = v end, nil, nil, true)
+    Internal.createSlider(sub, "Display Duration", 1, 50, cfg.Duration * 10, function(v) cfg.Duration = v / 10 end)
+    Internal.createSlider(sub, "Spin Speed", 0, 1440, cfg.SpinSpeed, function(v) cfg.SpinSpeed = v end)
+    Internal.createSlider(sub, "Size", 5, 50, cfg.Size, function(v) cfg.Size = v end)
+    Internal.createSlider(sub, "Thickness", 1, 6, cfg.Thickness, function(v) cfg.Thickness = v end)
+end)
+
+createModule("Custom Camera", "FOV and Perspective control", "Visuals", Config.Visuals.CustomCamera.Enabled, function(v)
+    Config.Visuals.CustomCamera.Enabled = v
+    if not v then
+        local cam = workspace.CurrentCamera
+        if cam then cam.FieldOfView = OriginalState.Camera.FOV end
+        Core.Local.Player.CameraMode = OriginalState.Camera.Mode
+        Core.Local.Player.CameraMaxZoomDistance = OriginalState.Camera.MaxDist
+        Core.Local.Player.CameraMinZoomDistance = OriginalState.Camera.MinDist
+    end
+end, function(p)
+    local cfg = Config.Visuals.CustomCamera
+    local sub = Internal.createSubCard(p)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Custom FOV"), cfg.FOV.Enabled, function(v) cfg.FOV.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "FOV Amount", 1, 120, cfg.FOV.Value, function(v) cfg.FOV.Value = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Third Person Camera"), cfg.ThirdPerson.Enabled, function(v) cfg.ThirdPerson.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "Third Person Distance", 5, 50, cfg.ThirdPerson.Distance, function(v) cfg.ThirdPerson.Distance = v end)
+end)
+
+createModule("Viewmodel Offset", "Custom hand and weapon position", "Visuals", Config.Visuals.World.Viewmodel.Enabled, function(v)
+    Config.Visuals.World.Viewmodel.Enabled = v
+end, function(p)
+    local cfg = Config.Visuals.World.Viewmodel
+    local sub = Internal.createSubCard(p)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Enable Custom Offset"), cfg.CustomOffsets, function(v) cfg.CustomOffsets = v end, nil, nil, true)
+    Internal.createSlider(sub, "Offset X", -200, 200, cfg.X * 100, function(v) cfg.X = v / 100 end)
+    Internal.createSlider(sub, "Offset Y", -200, 200, cfg.Y * 100, function(v) cfg.Y = v / 100 end)
+    Internal.createSlider(sub, "Offset Z", -200, 200, cfg.Z * 100, function(v) cfg.Z = v / 100 end)
+end)
+
+createModule("Custom Scope", "Dynamic crosshair and scope control", "Visuals", Config.Visuals.CustomScope.Enabled, function(v)
+    Config.Visuals.CustomScope.Enabled = v
+    if not v then
+        local cam = workspace.CurrentCamera
+        if cam then cam.FieldOfView = OriginalState.Camera.FOV end
+        local playerGui = Core.Local.Player:FindFirstChild("PlayerGui")
+        if playerGui then
+            local s, scope = pcall(function() return playerGui.MainGui.Gameplay.Middle.SniperScope end)
+            if s and scope then scope.Size = OriginalState.Scope.Size end
+        end
+        if scContainer then scContainer.Visible = false end
+    end
+end, function(p)
+    local cfg = Config.Visuals.CustomScope
+    local sub = Internal.createSubCard(p)
+
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Custom Scope FOV"), cfg.FOV.Enabled, function(v) cfg.FOV.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "Scope FOV", 1, 100, cfg.FOV.Value, function(v) cfg.FOV.Value = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Remove Scope"), cfg.RemoveScope, function(v) cfg.RemoveScope = v end, nil, nil, true)
+    -- [ ПЕРЕИМЕНОВАНО ] "Show Scope Sniper" читалось как "крестик снайпера"
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Force Vanilla Scope Overlay"), cfg.ShowScopeSniper, function(v) cfg.ShowScopeSniper = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Scope Crosshair"), cfg.Crosshair.Enabled, function(v) cfg.Crosshair.Enabled = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Crosshair Color", cfg.Crosshair.Color, function(c) cfg.Crosshair.Color = c end)
+    Internal.createSlider(sub, "Crosshair Thickness", 1, 10, cfg.Crosshair.Thickness, function(v) cfg.Crosshair.Thickness = v end)
+    Internal.createSlider(sub, "Line Length", 1, 60, cfg.Crosshair.Length or 9, function(v) cfg.Crosshair.Length = v end)
+    Internal.createSlider(sub, "Center Gap", 0, 30, cfg.Crosshair.Gap or 4, function(v) cfg.Crosshair.Gap = v end)
+end)
+
+-- FUN (empty)
+createModule("War Tycoon Farm", "Auto fly to coordinates after rising", "Auto farming", Config.WarTycoonFarm.Enabled, function(v)
+    Config.WarTycoonFarm.Enabled = v
+    if v then Automation.WarTycoonFarmLoop() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createStringInput(sub, "Target CFrame:", Config.WarTycoonFarm.TargetCFrameStr, function(v) Config.WarTycoonFarm.TargetCFrameStr = v end)
+    Internal.createSlider(sub, "Flight Speed", 1, 1000, Config.WarTycoonFarm.Speed, function(v) Config.WarTycoonFarm.Speed = v end, { Step = 0.1, Curve = 2 })
+    local row = Internal.createSettingRow(sub, "Noclip")
+    Internal.createiOSSwitch(row, Config.WarTycoonFarm.Noclip, function(val)
+        Config.WarTycoonFarm.Noclip = val
+    end, row:FindFirstChild("TextLabel"), nil, true)
+end)
+
+createModule("Fly Hack", "Fly freely through the air", "Movement", Config.Cheat.Flying, function(v)
+    Config.Cheat.Flying = v
+    if Config.Cheat.Flying then startFly() else stopFly() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Fly Speed", 1, 5000, Config.Cheat.Speed, function(v) Config.Cheat.Speed = v end, { Step = 0.1, Curve = 2.2 })
+    local function addFlyToggle(text, key)
+        local row = Internal.createSettingRow(sub, text)
+        Internal.createiOSSwitch(row, Config.Cheat[key], function(val)
+            Config.Cheat[key] = val
+        end, row:FindFirstChild("TextLabel"), nil, true)
+    end
+    addFlyToggle("Vertical Fly", "VerticalFly")
+    addFlyToggle("View Lock", "ViewLock")
+    addFlyToggle("Noclip", "FlyNoclip")
+
+    local row = Internal.createSettingRow(sub, "Fly Mode:")
+    local modeBtn = Instance.new("TextButton")
+    modeBtn.Size = UDim2.new(0, 80, 0, 26)
+    modeBtn.Position = UDim2.new(1, -80, 0.5, -13)
+    modeBtn.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    modeBtn.Text = Config.Cheat.FlyMode
+    modeBtn.TextColor3 = Theme.Text
+    modeBtn.TextSize = 12
+    modeBtn.Font = Theme.FontMedium
+    modeBtn.Parent = row
+    Instance.new("UICorner", modeBtn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", modeBtn).Color = Theme.Separator
+
+    modeBtn.MouseButton1Click:Connect(function()
+        Config.Cheat.FlyMode = (Config.Cheat.FlyMode == "Fixed" and "Vanilla" or "Fixed")
+        modeBtn.Text = Config.Cheat.FlyMode
+    end)
+end)
+
+createModule("Path System", "Record and playback custom flight paths", "Movement", false, function(v)
+    if v then startPlayback() else stopPlayback() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+
+    local recBtn = Instance.new("TextButton")
+    recBtn.Size = UDim2.new(1, 0, 0, 30)
+    recBtn.BackgroundColor3 = State.IsRecording and Color3.fromRGB(200, 50, 50) or Color3.fromRGB(45, 46, 65)
+    recBtn.Text = State.IsRecording and "Recording..." or "Start Recording"
+    recBtn.TextColor3 = Theme.Text
+    recBtn.Font = Theme.FontBold
+    recBtn.Parent = sub
+    Instance.new("UICorner", recBtn).CornerRadius = UDim.new(0, 6)
+
+    recBtn.MouseButton1Click:Connect(function()
+        if State.IsRecording then
+            stopRecording()
+            recBtn.Text = "Start Recording"
+            recBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65)
+        else
+            startRecording()
+            recBtn.Text = "Recording..."
+            recBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        end
+    end)
+
+    local playBtn = Instance.new("TextButton")
+    playBtn.Size = UDim2.new(1, 0, 0, 30)
+    playBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65)
+    playBtn.Text = State.IsPlaying and "Stop Playback" or "Play Path"
+    playBtn.TextColor3 = Theme.Text
+    playBtn.Font = Theme.FontBold
+    playBtn.Parent = sub
+    Instance.new("UICorner", playBtn).CornerRadius = UDim.new(0, 6)
+
+    playBtn.MouseButton1Click:Connect(function()
+        if State.IsPlaying then
+            stopPlayback()
+            playBtn.Text = "Play Path"
+        else
+            startPlayback()
+            playBtn.Text = "Stop Playback"
+        end
+    end)
+
+    Internal.createSlider(sub, "Playback Speed", 1, 500, Config.PathSystem.Speed, function(v)
+        Config.PathSystem.Speed = v
+    end)
+
+    local clearBtn = Instance.new("TextButton")
+    clearBtn.Size = UDim2.new(1, 0, 0, 30)
+    clearBtn.BackgroundColor3 = Color3.fromRGB(60, 20, 20)
+    clearBtn.Text = "Clear Path"
+    clearBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    clearBtn.Font = Theme.FontBold
+    clearBtn.Parent = sub
+    Instance.new("UICorner", clearBtn).CornerRadius = UDim.new(0, 6)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        State.RecordedPath = {}
+        _G.Log("Path cleared.", Color3.fromRGB(200, 200, 200))
+    end)
+
+    local copyPathBtn = Instance.new("TextButton")
+    copyPathBtn.Size = UDim2.new(1, 0, 0, 30)
+    copyPathBtn.BackgroundColor3 = Color3.fromRGB(45, 65, 45)
+    copyPathBtn.Text = "Copy Path to Clipboard"
+    copyPathBtn.TextColor3 = Color3.fromRGB(150, 255, 150)
+    copyPathBtn.Font = Theme.FontBold
+    copyPathBtn.Parent = sub
+    Instance.new("UICorner", copyPathBtn).CornerRadius = UDim.new(0, 6)
+
+    copyPathBtn.MouseButton1Click:Connect(function()
+        if #State.RecordedPath == 0 then
+            _G.Log("Nothing to copy!", Color3.fromRGB(255, 0, 0))
+            return
+        end
+
+        local result = "local CustomPath = {\n"
+        for i, v in State.RecordedPath do
+            result = result .. string.format("    Vector3.new(%.3f, %.3f, %.3f)%s\n", v.X, v.Y, v.Z, (i == #State.RecordedPath and "" or ","))
+        end
+        result = result .. "}"
+
+        if setclipboard then
+            setclipboard(result)
+            _G.Log("Path copied to clipboard!", Color3.fromRGB(0, 255, 0))
+        else
+            print(result)
+            _G.Log("Check console for path data", Color3.fromRGB(255, 255, 0))
+        end
+    end)
+end)
+
+createModule("Auto Farm", "Automatically collect gold", "Auto farming", Config.Cheat.AutoFarm, function(v)
+    Automation.DoAutofarm(v)
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Farm Speed", 1, 5000, Config.Cheat.Speed, function(v) Config.Cheat.Speed = v end, { Step = 0.1, Curve = 2.2 })
+    local function addFarmToggle(text, key, callback)
+        local row = Internal.createSettingRow(sub, text)
+        Internal.createiOSSwitch(row, Config.Cheat[key], function(val)
+            Config.Cheat[key] = val
+            if callback then callback(val) end
+        end, row:FindFirstChild("TextLabel"), nil, true)
+    end
+    addFarmToggle("Debug Path", "DebugPath", function(val)
+        if not val then clearPathLines() end
+    end)
+end)
+
+function Automation.GoldFarmTravelTo(hrp, targetCF, speed, rayParams, roadHeight, roadDirection, currentY)
+    while Config.GoldFarm.Enabled and not State.Unloading and IsCurrentInstance() and hrp.Parent and (hrp.Position - targetCF.Position).Magnitude > 5 do
+        local dt = task.wait()
+        local currentPos = hrp.Position
+        local toTarget = (targetCF.Position - currentPos)
+        local moveDir = toTarget.Unit
+
+        -- Obstacle Detection Raycast
+        local rayResult = workspace:Raycast(currentPos, moveDir * 30, rayParams)
+        local targetY = roadHeight
+
+        if rayResult and rayResult.Instance and rayResult.Instance.CanCollide then
+            local hitPart = rayResult.Instance
+            local topY = hitPart.Position.Y + (hitPart.Size.Y / 2)
+            targetY = topY + 10
+        end
+
+        -- Smooth Vertical Glide
+        currentY = currentY + (targetY - currentY) * math.min(dt * 5, 1)
+
+        -- Physics-based step along the road
+        local nextPos = currentPos + (moveDir * (speed * dt))
+        hrp.Velocity = Vector3.zero
+        hrp.CFrame = CFrame.new(Vector3.new(nextPos.X, currentY, nextPos.Z), Vector3.new(nextPos.X, currentY, nextPos.Z) + roadDirection)
+    end
+    return currentY
+end
+
+function Automation.GoldFarmLoop()
+    task.spawn(function()
+        -- Road Constants
+        local RoadStartCF = CFrame.new(6876.276, 17.219, 136.945, -0.992, 0.000, 0.129, 0.000, 1.000, -0.000, -0.129, -0.000, -0.992)
+        local RoadDirection = RoadStartCF.LookVector
+        local RoadHeight = 17.219
+
+        -- Endpoint CFrames
+        local BankCF = CFrame.new(-265.883, 34.769, -283.030, -0.617, -0.000, -0.787, 0.000, 1.000, -0.000, 0.787, -0.000, -0.617)
+        local WashCF = CFrame.new(6809.680, 17.442, -34.493, -0.618, -0.000, 0.786, -0.000, 1.000, 0.000, -0.786, 0.000, -0.618)
+
+        Config.Cheat.Flying = true
+        startFly()
+
+        while Config.GoldFarm.Enabled and not State.Unloading and IsCurrentInstance() do
+            local success, err = pcall(function()
+                local char = Core.LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if not hrp then return end
+
+                local rayParams = RaycastParams.new()
+                rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                rayParams.FilterDescendantsInstances = {char, workspace.CurrentCamera}
+
+                local currentY = hrp.Position.Y
+
+                -- Step 1: Travel to Bank
+                currentY = Automation.GoldFarmTravelTo(hrp, BankCF, Config.GoldFarm.Speed, rayParams, RoadHeight, RoadDirection, currentY)
+
+                if not Config.GoldFarm.Enabled then return end
+
+                -- Step 2: Detect Bank Status
+                _G.Log("Waiting for vault...", Color3.fromRGB(255, 255, 0))
+                local trolleysFolder = workspace:FindFirstChild("Gameplay")
+                    and workspace.Gameplay:FindFirstChild("Bank")
+                    and workspace.Gameplay.Bank:FindFirstChild("Building")
+                    and workspace.Gameplay.Bank.Building:FindFirstChild("BankTrolleys")
+
+                if not trolleysFolder then
+                    _G.Log("BankTrolleys folder not found!", Color3.fromRGB(255, 0, 0))
+                    task.wait(2)
+                    return
+                end
+
+                local exploded = false
+                repeat
+                    for _, trolley in trolleysFolder:GetChildren() do
+                        if trolley.Name == "Trolley" and (trolley:FindFirstChild("Cash") or trolley:FindFirstChild("GoldIngot")) then
+                            exploded = true
+                            break
+                        end
+                    end
+                    if not exploded then task.wait(1) end
+                until exploded or not Config.GoldFarm.Enabled
+
+                if not Config.GoldFarm.Enabled then return end
+
+                -- Step 3: Collecting
+                _G.Log("Safe opened! Collecting...", Color3.fromRGB(255, 255, 0))
+                for _, trolley in trolleysFolder:GetChildren() do
+                    if not Config.GoldFarm.Enabled then break end
+                    if trolley.Name == "Trolley" then
+                        for _, item in trolley:GetChildren() do
+                            if item.Name == "Cash" or item.Name == "GoldIngot" then
+                                local prompt = item:FindFirstChildOfClass("ProximityPrompt")
+                                if prompt then
+                                    fireproximityprompt(prompt)
+                                    task.wait(Config.GoldFarm.CollectDelay)
+                                end
+                            end
+                        end
+                    end
+                end
+
+                if not Config.GoldFarm.Enabled then return end
+
+                -- Step 4: Wash Money
+                Automation.GoldFarmTravelTo(hrp, WashCF, Config.GoldFarm.Speed, rayParams, RoadHeight, RoadDirection, currentY)
+
+                if not Config.GoldFarm.Enabled then return end
+
+                _G.Log("Washing money...", Color3.fromRGB(255, 255, 0))
+                local washPrompt = nil
+                for _, v in workspace:GetDescendants() do
+                    if v:IsA("ProximityPrompt") and (v.Parent:IsA("BasePart") and (v.Parent.Position - WashCF.Position).Magnitude < 20) then
+                        washPrompt = v
+                        break
+                    end
+                end
+
+                if washPrompt then
+                    fireproximityprompt(washPrompt)
+                    task.wait(Config.GoldFarm.WashDelay)
+                end
+            end)
+            if not success then
+                _G.Log("Error: " .. tostring(err), Color3.fromRGB(255, 0, 0))
+                task.wait(1)
+            end
+            task.wait(0.1)
+        end
+
+        stopFly()
+        Config.Cheat.Noclip = false
+        Config.Cheat.Flying = false
+        _G.Log("Gold Farm: Stopped", Color3.fromRGB(255, 50, 50))
+    end)
+end
+
+-- CAR CRUSHERS 2
+
+function Automation.GetMyVehicle()
+    local lp = Core.LocalPlayer
+    local char = lp.Character
+    local lpName = lp.Name:lower()
+
+    -- 1. Ищем во всем Workspace для максимальной точности
+    for _, v in workspace:GetDescendants() do
+        -- Проверяем
+        if v:IsA("Model") and v ~= char and not v:IsDescendantOf(char) then
+            local isVehicle = v:FindFirstChildOfClass("VehicleSeat") or v:FindFirstChild("Chassis") or v:FindFirstChild("Body")
+
+            if isVehicle then
+                -- Проверяем принадлежность
+                local isMine = v.Name:lower():find(lpName)
+                    or (v:FindFirstChild("Owner") and tostring(v.Owner.Value):lower() == lpName)
+
+                if isMine then
+                    return v
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function Automation.UpdateBestOwnedCar()
+    local bestPrice = -1
+    local bestName = ""
+
+    pcall(function()
+        -- Находим RemoteFunction напрямую по классу и имени
+        local rf = RS:FindFirstChild("rF", true)
+        local getOwned = rf and rf:FindFirstChild("GetOwned")
+
+        if getOwned then
+            local owned = getOwned:InvokeServer("Vehicles")
+            local info = RS:FindFirstChild("VehicleInformation", true) or RS:FindFirstChild("Vehicles", true)
+
+            if info then
+                for _, cat in info:GetChildren() do
+                    for _, car in cat:GetChildren() do
+                        if owned[car.Name] then
+                            local p = car:FindFirstChild("Price") and car.Price.Value or 0
+                            if p > bestPrice then
+                                bestPrice = p
+                                bestName = car.Name
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    return bestName ~= "" and bestName or "Camaro"
+end
+
+function Automation.AutoBuyBestCC2()
+    if not Config.CarCrushers.AutoBuy then return end
+    pcall(function()
+        local rf = RS:FindFirstChild("rF", true)
+        local getOwned = rf:FindFirstChild("GetOwned")
+        local buy = rf:FindFirstChild("BuyItem")
+
+        if getOwned and buy then
+            local credits = Core.LocalPlayer.leaderstats:FindFirstChild("Credits") or Core.LocalPlayer.leaderstats:FindFirstChild("Money")
+            local owned = getOwned:InvokeServer("Vehicles")
+            local info = RS:FindFirstChild("VehicleInformation", true)
+
+            if info and credits then
+                for _, cat in info:GetChildren() do
+                    for _, car in cat:GetChildren() do
+                        local p = car:FindFirstChild("Price") and car.Price.Value or 0
+                        if not owned[car.Name] and credits.Value >= p then
+                            buy:InvokeServer(car.Name, "Vehicles")
+                            task.wait(1)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function Automation.CC2FarmLoop()
+    task.spawn(function()
+        print("[CC2] Farm Thread Started")
+        _G.Log("CC2 AutoFarm: Active", Color3.fromRGB(0, 255, 150))
+
+        while Config.CarCrushers.AutoFarm and not State.Unloading and IsCurrentInstance() do
+            local success, err = pcall(function()
+                -- Поиск эвента спавна
+                local spawnRemote = RS:FindFirstChild("RequestVehicleSpawn", true)
+                if not spawnRemote then return end
+
+                Automation.AutoBuyBestCC2()
+                local carName = Automation.UpdateBestOwnedCar()
+                local myCar = Automation.GetMyVehicle()
+
+                -- Если машины нет на карте
+                if not myCar then
+                    print("[CC2] Spawning: " .. tostring(carName))
+                    spawnRemote:FireServer(carName)
+                    -- Ждем 5 секунд
+                    local t = tick()
+                    repeat task.wait(0.5)
+                        myCar = Automation.GetMyVehicle()
+                    until myCar or (tick() - t > 6) or not Config.CarCrushers.AutoFarm
+                end
+
+                -- Если нашли машину
+                if myCar then
+                    print("[CC2] Car Found: " .. myCar.Name .. ". Teleporting...")
+
+                    -- Телепортируем модель целиком
+                    myCar:PivotTo(Config.CarCrushers.TargetCFrame)
+                    task.wait(1)
+
+                    -- Жмем кнопку крашера
+                    local crusher = workspace:FindFirstChild(Config.CarCrushers.CrusherName, true)
+                    if crusher then
+                        local btn = crusher:FindFirstChild("Button", true) or crusher:FindFirstChild("Start", true)
+                        local cd = btn and btn:FindFirstChildOfClass("ClickDetector")
+                        if cd then
+                            fireclickdetector(cd)
+                            print("[CC2] Crusher button clicked!")
+                        end
+                    end
+
+                    -- Ждем, пока машина уничтожится (исчезнет)
+                    local waitStart = tick()
+                    repeat task.wait(1)
+                    until not Automation.GetMyVehicle() or not Config.CarCrushers.AutoFarm or (tick() - waitStart > 40)
+                    print("[CC2] Cycle Complete.")
+                else
+                    warn("[CC2] Could not find spawned car. Retrying...")
+                end
+            end)
+
+            if not success then warn("[CC2] Loop Error: " .. tostring(err)) end
+            task.wait(1)
+        end
+        _G.Log("CC2 AutoFarm: Stopped", Color3.fromRGB(255, 50, 50))
+    end)
+end
+
+-- AUTO FARMING (Originals Integrated)
+createModule("Gold Farm", "Automated San Diego Bank robbery", "Auto farming", Config.GoldFarm.Enabled, function(v)
+    Config.GoldFarm.Enabled = v
+    if v then Automation.GoldFarmLoop() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Flight Speed", 0, 300, Config.GoldFarm.Speed, function(v) Config.GoldFarm.Speed = v end, { Step = 0.1, Curve = 1.8 })
+end)
+
+createModule("Auto Farm CC2", "Farm Pressure Pit & Auto-Buy cars", "Auto farming", Config.CarCrushers.AutoFarm, function(v)
+    Config.CarCrushers.AutoFarm = v
+    if v then Automation.CC2FarmLoop() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createStringInput(sub, "Target Crusher:", Config.CarCrushers.CrusherName, function(v) Config.CarCrushers.CrusherName = v end)
+end)
+
+createModule("Pop for Free Farm", "Automatic Obby & Glass Bridge farm", "Auto farming", Config.PopForFree.Enabled, function(v)
+    Config.PopForFree.Enabled = v
+    if v then Automation.PopForFreeLoop() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Obby Cooldown", 0, 10, Config.PopForFree.Cooldown, function(v) Config.PopForFree.Cooldown = v end, 0.1)
+    Internal.createSlider(sub, "Glass Delay", 0, 200, Config.PopForFree.GlassDelay * 100, function(v) Config.PopForFree.GlassDelay = v / 100 end)
+    Internal.createSlider(sub, "Special Step Wait", 0, 500, Config.PopForFree.SpecialStepWait * 100, function(v) Config.PopForFree.SpecialStepWait = v / 100 end)
+    Internal.createSlider(sub, "Special Tween Time", 0, 200, Config.PopForFree.SpecialTweenTime * 100, function(v) Config.PopForFree.SpecialTweenTime = v / 100 end)
+    Internal.createSlider(sub, "Portal Timeout", 5, 60, Config.PopForFree.SpecialPortalTimeout, function(v) Config.PopForFree.SpecialPortalTimeout = v end)
+    Internal.createSlider(sub, "Level Retries", 1, 10, Config.PopForFree.SpecialLevelRetries, function(v) Config.PopForFree.SpecialLevelRetries = v end)
+    Internal.createSlider(sub, "Post-Clear Wait", 0, 500, Config.PopForFree.SpecialPostClearWait * 100, function(v) Config.PopForFree.SpecialPostClearWait = v / 100 end)
+
+    local afkRow = Internal.createSettingRow(sub, "Anti-AFK Tapping")
+    Internal.createiOSSwitch(afkRow, Config.PopForFree.AntiAfk, function(v) Config.PopForFree.AntiAfk = v end, afkRow:FindFirstChild("TextLabel"), nil, true)
+
+    local glassBtn = Instance.new("TextButton")
+    glassBtn.Size = UDim2.new(1, 0, 0, 30)
+    glassBtn.BackgroundColor3 = Color3.fromRGB(45, 65, 45)
+    glassBtn.Text = "Run Glass Bridge Once"
+    glassBtn.TextColor3 = Color3.fromRGB(150, 255, 150)
+    glassBtn.Font = Theme.FontBold
+    glassBtn.Parent = sub
+    Instance.new("UICorner", glassBtn).CornerRadius = UDim.new(0, 6)
+
+    glassBtn.MouseButton1Click:Connect(function()
+        Automation.RunPopGlass(Config.PopForFree.GlassDelay)
+    end)
+end)
+
+createModule("Highjump", "Custom jump power", "Movement", Config.Cheat.Highjump.Enabled, function(v)
+    Config.Cheat.Highjump.Enabled = v
+    if not v then
+        pcall(function()
+            local char = Core.Local.Player.Character
+            if char and char:FindFirstChildOfClass("Humanoid") then
+                char.Humanoid.JumpPower = 50
+            end
+        end)
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Jump Power", 1, 500, Config.Cheat.Highjump.Value, function(v) Config.Cheat.Highjump.Value = v end)
+end)
+
+createModule("Speed", "Custom walk speed", "Movement", Config.Cheat.SpeedHack.Enabled, function(v)
+    Config.Cheat.SpeedHack.Enabled = v
+    if not v then
+        pcall(function()
+            local char = Core.Local.Player.Character
+            if char and char:FindFirstChildOfClass("Humanoid") then
+                char.Humanoid.WalkSpeed = 16
+            end
+        end)
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Walk Speed", 1, 500, Config.Cheat.SpeedHack.Value, function(v) Config.Cheat.SpeedHack.Value = v end)
+end)
+
+createModule("BunnyHop", "Fast movement + autostrafe", "Movement", Config.Cheat.AutoBhop.Enabled, function(v)
+    Config.Cheat.AutoBhop.Enabled = v
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    -- потолок скорости стрейфа в воздухе
+    Internal.createSlider(sub, "Strafe Max Speed", 5, 300, Config.Cheat.AutoBhop.Speed, function(v)
+        Config.Cheat.AutoBhop.Speed = v
+    end)
+    local row = Internal.createSettingRow(sub, "Auto Strafe")
+    Internal.createiOSSwitch(row, Config.Cheat.AutoBhop.AutoStrafe, function(val)
+        Config.Cheat.AutoBhop.AutoStrafe = val
+    end, row:FindFirstChild("TextLabel"), nil, true)
+    -- [ НОВОЕ ] разгон в момент прыжка
+    local jbRow = Internal.createSettingRow(sub, "Jump Boost (Blox Strike)")
+    Internal.createiOSSwitch(jbRow, Config.Cheat.AutoBhop.JumpBoost ~= false, function(val)
+        Config.Cheat.AutoBhop.JumpBoost = val
+    end, jbRow:FindFirstChild("TextLabel"), nil, true)
+
+    -- [ v31 ] Умный bhop
+    local sjRow = Internal.createSettingRow(sub, "Smart Jump (no penalty)")
+    Internal.createiOSSwitch(sjRow, Config.Cheat.AutoBhop.SmartJump ~= false, function(val)
+        Config.Cheat.AutoBhop.SmartJump = val
+    end, sjRow:FindFirstChild("TextLabel"), nil, true)
+    local spRow = Internal.createSettingRow(sub, "Speed HUD (cap from game)")
+    Internal.createiOSSwitch(spRow, Config.Cheat.AutoBhop.ShowSpeed == true, function(val)
+        Config.Cheat.AutoBhop.ShowSpeed = val
+        Config.Visuals.Hud.Speed = val
+    end, spRow:FindFirstChild("TextLabel"), nil, true)
+end, nil, nil, "Blox Strike")
+
+createModule("No Fall Damage", "Prevents falling damage states", "Movement", Config.Cheat.NoFallDamage, function(v)
+    Config.Cheat.NoFallDamage = v
+end)
+
+createModule("Noclip", "Walk through walls and objects. Collisions are restored when turned off.", "Movement", Config.Cheat.Noclip, function(v)
+    Config.Cheat.Noclip = v
+    if not v then
+        pcall(Automation.RestoreNoclip)
+        _G.Log("Noclip: off (collisions restored)", Color3.fromRGB(255, 150, 150))
+    else
+        _G.Log("Noclip: on", Color3.fromRGB(0, 255, 150))
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    local rowRestore = Internal.createSettingRow(sub, "Restore collisions on disable")
+    Internal.createiOSSwitch(rowRestore, Config.Cheat.NoclipRestore ~= false, function(v) Config.Cheat.NoclipRestore = v end, rowRestore:FindFirstChild("TextLabel"), nil, true)
+    Internal.createLabel(sub, "Fly uses the same routine (Fly Noclip).")
+end)
+
+createModule("Infinite Jump", "Jump again in mid-air. Hold Space to keep jumping.", "Movement", Config.Cheat.InfiniteJump, function(v)
+    Config.Cheat.InfiniteJump = v
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    local rowHold = Internal.createSettingRow(sub, "Hold Space to keep jumping")
+    Internal.createiOSSwitch(rowHold, Config.Cheat.InfiniteJumpHold ~= false, function(v) Config.Cheat.InfiniteJumpHold = v end, rowHold:FindFirstChild("TextLabel"), nil, true)
+end)
+
+-- EXPLOIT
+
+
+
+-- VISUALS
+
+-- MISC
+createModule("Auto Build", "Auto-builds the base (priority: money / house / yard / bunker), collects cash and does rebirth. Teleports slightly ABOVE the pad so the purchase registers.", "Auto farming", Config.WarTycoonBuild.Enabled, function(v)
+    Config.WarTycoonBuild.Enabled = v
+    if v then Automation.WarTycoonAutoBuildLoop() end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSelector(sub, "Priority", {
+        "Money", "House", "Yard", "Bunker", "Cheapest"
+    }, Config.WarTycoonBuild.Priority, function(v) Config.WarTycoonBuild.Priority = v end)
+    Internal.createSlider(sub, "TP height above pad", 5, 60, math.floor((Config.WarTycoonBuild.Hover or 1.5) * 10 + 0.5),
+        function(v) Config.WarTycoonBuild.Hover = v / 10 end,
+        function(v) return string.format("%.1f studs", v / 10) end)
+    Internal.createSlider(sub, "Delay after TP", 1, 10, math.floor((Config.WarTycoonBuild.Delay or 0.35) * 10 + 0.5),
+        function(v) Config.WarTycoonBuild.Delay = v / 10 end,
+        function(v) return string.format("%.1f sec", v / 10) end)
+    local rowCollect = Internal.createSettingRow(sub, "Auto-collect cash (Cash Collector)")
+    Internal.createiOSSwitch(rowCollect, Config.WarTycoonBuild.AutoCollect, function(v) Config.WarTycoonBuild.AutoCollect = v end, rowCollect:FindFirstChild("TextLabel"), nil, true)
+    local rowShort = Internal.createSettingRow(sub, "Collect only when cash is short")
+    Internal.createiOSSwitch(rowShort, Config.WarTycoonBuild.CollectWhenShort ~= false, function(v) Config.WarTycoonBuild.CollectWhenShort = v end, rowShort:FindFirstChild("TextLabel"), nil, true)
+    Internal.createSlider(sub, "Fallback collect interval", 5, 60, Config.WarTycoonBuild.CollectFallback or 15, function(v) Config.WarTycoonBuild.CollectFallback = v end,
+        function(v) return tostring(v) .. " sec" end)
+    local rowReb = Internal.createSettingRow(sub, "Auto Rebirth (base complete)")
+    Internal.createiOSSwitch(rowReb, Config.WarTycoonBuild.AutoRebirth, function(v) Config.WarTycoonBuild.AutoRebirth = v end, rowReb:FindFirstChild("TextLabel"), nil, true)
+    local rowFt = Internal.createSettingRow(sub, "firetouchinterest (touch assist)")
+    Internal.createiOSSwitch(rowFt, Config.WarTycoonBuild.FireTouch, function(v) Config.WarTycoonBuild.FireTouch = v end, rowFt:FindFirstChild("TextLabel"), nil, true)
+    -- [ v54 ] IgnoreShield was read by the scanner but had no switch at all
+    local rowShield = Internal.createSettingRow(sub, "Skip Shield Generator")
+    Internal.createiOSSwitch(rowShield, Config.WarTycoonBuild.IgnoreShield ~= false, function(v) Config.WarTycoonBuild.IgnoreShield = v end, rowShield:FindFirstChild("TextLabel"), nil, true)
+    Internal.createLabel(sub, "Reliability")
+    local rowVerify = Internal.createSettingRow(sub, "Detect TP rollback")
+    Internal.createiOSSwitch(rowVerify, Config.WarTycoonBuild.VerifyTp ~= false, function(v) Config.WarTycoonBuild.VerifyTp = v end, rowVerify:FindFirstChild("TextLabel"), nil, true)
+    local rowWalk = Internal.createSettingRow(sub, "Walk when TP is blocked")
+    Internal.createiOSSwitch(rowWalk, Config.WarTycoonBuild.WalkFallback ~= false, function(v) Config.WarTycoonBuild.WalkFallback = v end, rowWalk:FindFirstChild("TextLabel"), nil, true)
+    Internal.createSlider(sub, "Walk speed (fallback)", 16, 250, Config.WarTycoonBuild.WalkSpeed or 80,
+        function(v) Config.WarTycoonBuild.WalkSpeed = v end,
+        function(v) return tostring(v) .. " studs/s" end)
+    Internal.createLabel(sub, "Limits (0 = unlimited)")
+    local spendPresets = { ["Off"] = 0, ["10K"] = 1e4, ["50K"] = 5e4, ["100K"] = 1e5, ["250K"] = 25e4, ["500K"] = 5e5, ["1M"] = 1e6 }
+    local function spendLabel(v)
+        local best, bestDiff = "Off", math.huge
+        for lbl, num in pairs(spendPresets) do
+            local diff = math.abs((tonumber(v) or 0) - num)
+            if diff < bestDiff then best, bestDiff = lbl, diff end
+        end
+        return best
+    end
+    Internal.createSelector(sub, "Max spend", {"Off", "10K", "50K", "100K", "250K", "500K", "1M"},
+        spendLabel(Config.WarTycoonBuild.MaxSpend),
+        function(v) Config.WarTycoonBuild.MaxSpend = spendPresets[v] or 0 end)
+    local rbPresets = { ["Off"] = 0, ["1"] = 1, ["2"] = 2, ["3"] = 3, ["5"] = 5, ["10"] = 10 }
+    local function rbLabel(v)
+        local n = tonumber(v) or 0
+        if n <= 0 then return "Off" end
+        return tostring(math.floor(n))
+    end
+    Internal.createSelector(sub, "Stop after rebirths", {"Off", "1", "2", "3", "5", "10"},
+        rbLabel(Config.WarTycoonBuild.StopAfterRebirths),
+        function(v) Config.WarTycoonBuild.StopAfterRebirths = rbPresets[v] or 0 end)
+    local rowReport = Internal.createSettingRow(sub, "Save session report to file")
+    Internal.createiOSSwitch(rowReport, Config.WarTycoonBuild.ReportFile ~= false, function(v) Config.WarTycoonBuild.ReportFile = v end, rowReport:FindFirstChild("TextLabel"), nil, true)
+    local rowDump = Internal.createSettingRow(sub, "Dump pads to F9 (diagnostics)")
+    Internal.createiOSSwitch(rowDump, false, function(v) if v then Automation.WarTycoonAutoBuildDump() end end, rowDump:FindFirstChild("TextLabel"), nil, true)
+end, nil, "War Tycoon")
+
+createModule("Vehicles Farm Helper", "Vehicles farm helper (War Tycoon)\nStep 1: teleport to the vehicle spawn.\nAuto-spawn the selected vehicle.", "Auto farming", Config.VehiclesFarm.Enabled, function(v)
+    Config.VehiclesFarm.Enabled = v
+    if v then
+        Automation.VehiclesFarmLoop()
+        if Config.VehiclesFarm.TpAfterSpawn == true then Automation.SpawnTpLoop() end
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+
+    -- Instant Spawn Button
+    local spawnNowBtn = Instance.new("TextButton")
+    spawnNowBtn.Size = UDim2.new(1, 0, 0, 30)
+    spawnNowBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
+    spawnNowBtn.Text = "⚡ Spawn Selected Vehicle Now"
+    spawnNowBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    spawnNowBtn.TextSize = 11
+    spawnNowBtn.Font = Theme.FontBold
+    spawnNowBtn.Parent = sub
+    Instance.new("UICorner", spawnNowBtn).CornerRadius = UDim.new(0, 6)
+
+    spawnNowBtn.MouseButton1Click:Connect(function()
+        _G.Log("Instant Spawn Triggered!", Color3.fromRGB(0, 255, 150))
+        Automation.lastHelperRun = 0
+        Automation.VehiclesFarmHelper()
+    end)
+
+    -- Auto Spawn Toggle
+    local spawnToggleRow = Internal.createSettingRow(sub, "Auto Spawn Engine")
+    Internal.createiOSSwitch(spawnToggleRow, Config.VehiclesFarm.AutoSpawn, function(val)
+        Config.VehiclesFarm.AutoSpawn = val
+    end, spawnToggleRow:FindFirstChild("TextLabel"), nil, true)
+
+    -- [ v47 ] СЕЛЕКТОР ТЕХНИКИ
+    local ALL_TYPES = "All types"
+    local TYPE_LABEL = {
+        Vehicle = "Vehicles", Helicopter = "Helicopters", Plane = "Planes",
+        Boat = "Boats", Ship = "Ships", Hovercraft = "Hovercrafts",
+        Submarine = "Submarines", Tank = "Tanks", Airdrop = "Airdrops",
+        UnmannedDrone = "Drones", Other = "Other",
+    }
+
+    local defaultVehicles = {
+        "MRZR Buggy", "ATV", "Gurkha MPV", "Stryker M-SHORAD", "Speedy Humvee",
+        "JLTV", "Humvee TOW-II", "M1117 Guardian", "Lazar 3 APC", "M142 HIMARS",
+        "Pantsir S1", "HEMTT A3", "Patriot AA", "Type 625E", "BTR-80",
+        "VCAC Mephisto", "Eitan AFV", "LAV-AD", "Boxer CRV", "M35 Gun Truck", "Katyusha"
+    }
+
+    local ownedMounts = {}
+    local typeKeys = {}
+    local selectedType = ALL_TYPES
+    local dataFromGame = false
+
+    local function readGameMounts()
+        local res, types = {}, {}
+        pcall(function()
+            local knitMod = RS:FindFirstChild("Packages") and RS.Packages:FindFirstChild("Knit")
+            if not knitMod then return end
+            local Knit = require(knitMod)
+
+            local MIC = nil
+            pcall(function() MIC = Knit.GetController("MountInfoController") end)
+            if not MIC then return end
+
+            local content = MIC.AllMountContent
+            if type(content) ~= "table" then return end
+
+            local ownedEnum = nil
+            pcall(function() ownedEnum = Knit.Enums.MountOwnershipStatus.Owned end)
+
+            local rev = {}
+            pcall(function()
+                for k, v in pairs(Knit.Enums.MountType) do rev[v] = k end
+            end)
+
+            for name, inst in pairs(content) do
+                if type(name) == "string" and typeof(inst) == "Instance" then
+                    local owns = false
+                    pcall(function() owns = (MIC:PlayerOwnsMount(name) == ownedEnum) end)
+                    if owns then
+                        local t = "Other"
+                        pcall(function() t = rev[MIC:GetMountTypeByName(name)] or "Other" end)
+                        res[#res + 1] = { name = name, type = t }
+                        types[t] = true
+                    end
+                end
+            end
+        end)
+        return res, types
+    end
+
+    local function refreshVehicles()
+        local res, types = readGameMounts()
+        if #res > 0 then
+            dataFromGame = true
+            table.sort(res, function(a, b)
+                if a.type ~= b.type then return a.type < b.type end
+                return a.name < b.name
+            end)
+            ownedMounts = res
+            typeKeys = {}
+            for t in pairs(types) do typeKeys[#typeKeys + 1] = t end
+            table.sort(typeKeys, function(a, b)
+                return (TYPE_LABEL[a] or a) < (TYPE_LABEL[b] or b)
+            end)
+
+            local cur = Config.VehiclesFarm.Vehicle
+            local found = false
+            for _, m in ipairs(ownedMounts) do
+                if m.name == cur then found = true break end
+            end
+            if not found then
+                Config.VehiclesFarm.Vehicle = ownedMounts[1].name
+                _G.Log("Vehicles Farm: '" .. tostring(cur) .. "' is not available -> selected '" .. ownedMounts[1].name .. "'",
+                    Color3.fromRGB(255, 170, 0))
+            end
+        else
+            dataFromGame = false
+            local list = nil
+            pcall(function()
+                local rf = RS:FindFirstChild("rF", true)
+                local getOwned = rf and rf:FindFirstChild("GetOwned")
+                if getOwned then
+                    local owned = getOwned:InvokeServer("Vehicles")
+                    if owned and type(owned) == "table" then
+                        local nl = {}
+                        for name, isOwned in pairs(owned) do
+                            if isOwned == true then nl[#nl + 1] = name end
+                        end
+                        if #nl > 0 then table.sort(nl) list = nl end
+                    end
+                end
+            end)
+            list = list or defaultVehicles
+            ownedMounts = {}
+            for _, n in ipairs(list) do
+                ownedMounts[#ownedMounts + 1] = { name = n, type = "Other" }
+            end
+            typeKeys = {}
+        end
+    end
+
+    local function filteredMounts()
+        local out = {}
+        for _, m in ipairs(ownedMounts) do
+            if selectedType == ALL_TYPES or m.type == selectedType then
+                out[#out + 1] = m
+            end
+        end
+        return out
+    end
+
+    -- строка с раскрывающимся ВНУТРИ неё списком (не перекрывает соседей)
+    local ROW_H = 36
+    local function makeExpandRow(labelText, btnText)
+        local row = Internal.createSettingRow(sub, labelText)
+        local label = row:FindFirstChildOfClass("TextLabel")
+        if label then
+            label.Size = UDim2.new(1, -145, 0, 26)
+            label.Position = UDim2.new(0, 0, 0, 5)
+        end
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 135, 0, 26)
+        btn.Position = UDim2.new(1, -135, 0, 5)
+        btn.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+        btn.Text = btnText
+        btn.TextColor3 = Theme.Text
+        btn.TextSize = 10
+        btn.Font = Theme.FontMedium
+        btn.TextTruncate = Enum.TextTruncate.AtEnd
+        btn.Parent = row
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        Instance.new("UIStroke", btn).Color = Theme.Separator
+
+        local list = Instance.new("ScrollingFrame")
+        list.Position = UDim2.new(0, 0, 0, ROW_H + 2)
+        list.Size = UDim2.new(1, 0, 0, 0)
+        list.BackgroundColor3 = Color3.fromRGB(20, 21, 30)
+        list.BorderSizePixel = 0
+        list.Visible = false
+        list.ScrollBarThickness = 2
+        list.CanvasSize = UDim2.new()
+        list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        list.Parent = row
+        Instance.new("UICorner", list).CornerRadius = UDim.new(0, 6)
+        Instance.new("UIStroke", list).Color = Theme.Accent
+
+        local lay = Instance.new("UIListLayout", list)
+        lay.Padding = UDim.new(0, 1)
+
+        local function collapse()
+            for _, c in ipairs(list:GetChildren()) do
+                if c:IsA("TextButton") then c:Destroy() end
+            end
+            list.Visible = false
+            list.Size = UDim2.new(1, 0, 0, 0)
+            row.Size = UDim2.new(1, 0, 0, ROW_H)
+            btn:SetAttribute("open", nil)
+        end
+
+        local function expand(items, onPick)
+            for _, c in ipairs(list:GetChildren()) do
+                if c:IsA("TextButton") then c:Destroy() end
+            end
+            for _, it in ipairs(items) do
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1, -6, 0, 28)
+                b.BackgroundColor3 = Color3.fromRGB(30, 31, 40)
+                b.BackgroundTransparency = 0.15
+                b.Text = it.text
+                b.TextColor3 = it.color or Theme.Text
+                b.TextSize = 10
+                b.Font = Theme.FontMedium
+                b.TextTruncate = Enum.TextTruncate.AtEnd
+                b.Parent = list
+                Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+                b.MouseButton1Click:Connect(function()
+                    onPick(it)
+                    collapse()
+                end)
+            end
+            local h = math.min(#items * 29 + 6, 220)
+            list.Size = UDim2.new(1, 0, 0, h)
+            list.Visible = true
+            row.Size = UDim2.new(1, 0, 0, ROW_H + 2 + h + 6)
+            btn:SetAttribute("open", true)
+        end
+
+        return btn, collapse, expand
+    end
+
+    local typeBtn, collapseTypes, expandTypes = makeExpandRow("Vehicle type:", ALL_TYPES)
+    local vBtn, collapseVehicles, expandVehicles = makeExpandRow("Vehicle:", tostring(Config.VehiclesFarm.Vehicle))
+
+    vBtn.MouseButton1Click:Connect(function()
+        collapseTypes()
+        if vBtn:GetAttribute("open") then
+            collapseVehicles()
+            return
+        end
+        refreshVehicles()
+        local items = {}
+        for _, m in ipairs(filteredMounts()) do
+            items[#items + 1] = { text = m.name, name = m.name }
+        end
+        if #items == 0 then
+            items[1] = { text = "no vehicles available", color = Color3.fromRGB(255, 120, 130) }
+        end
+        expandVehicles(items, function(it)
+            if not it.name then return end
+            Config.VehiclesFarm.Vehicle = it.name
+            vBtn.Text = it.name
+        end)
+    end)
+
+    typeBtn.MouseButton1Click:Connect(function()
+        collapseVehicles()
+        if typeBtn:GetAttribute("open") then
+            collapseTypes()
+            return
+        end
+        refreshVehicles()
+        local items = { { text = ALL_TYPES .. "  (" .. #ownedMounts .. ")", type = ALL_TYPES } }
+        for _, t in ipairs(typeKeys) do
+            local cnt = 0
+            for _, m in ipairs(ownedMounts) do
+                if m.type == t then cnt = cnt + 1 end
+            end
+            items[#items + 1] = { text = (TYPE_LABEL[t] or t) .. "  (" .. cnt .. ")", type = t }
+        end
+        expandTypes(items, function(it)
+            selectedType = it.type
+            typeBtn.Text = (it.type == ALL_TYPES) and ALL_TYPES or (TYPE_LABEL[it.type] or it.type)
+            local list = filteredMounts()
+            if #list > 0 then
+                local cur = Config.VehiclesFarm.Vehicle
+                local ok = false
+                for _, m in ipairs(list) do
+                    if m.name == cur then ok = true break end
+                end
+                if not ok then
+                    Config.VehiclesFarm.Vehicle = list[1].name
+                end
+            end
+            vBtn.Text = tostring(Config.VehiclesFarm.Vehicle)
+        end)
+    end)
+
+    -- [ v48 ] TP AFTER SPAWN
+    local tpToggleRow = Internal.createSettingRow(sub, "TP After Spawn")
+    Internal.createiOSSwitch(tpToggleRow, Config.VehiclesFarm.TpAfterSpawn == true, function(val)
+        Config.VehiclesFarm.TpAfterSpawn = val
+        if val then
+            if (Config.VehiclesFarm.TpCoords or "") == "" then
+                _G.Log("TP: coordinates are empty - press 'Copy Coordinates' at the spawn point", Color3.fromRGB(255, 170, 0))
+            end
+            if Config.VehiclesFarm.Enabled then Automation.SpawnTpLoop() end
+            _G.Log("TP: spawn -> teleport -> wait for death -> repeat", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("TP After Spawn: OFF", Color3.fromRGB(255, 100, 100))
+        end
+    end, tpToggleRow:FindFirstChild("TextLabel"), nil, true)
+
+    local tpCoordsRow = Internal.createSettingRow(sub, "TP coordinates:")
+    local tpCoordsLabel = tpCoordsRow:FindFirstChildOfClass("TextLabel")
+    if tpCoordsLabel then
+        tpCoordsLabel.Size = UDim2.new(1, -206, 0, 26)
+        tpCoordsLabel.Position = UDim2.new(0, 0, 0, 5)
+        tpCoordsLabel.TextSize = 11
+    end
+
+    local function tpSmallBtn(text, xOff, w, color)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, w, 0, 26)
+        b.Position = UDim2.new(1, xOff, 0, 5)
+        b.BackgroundColor3 = color or Color3.fromRGB(35, 36, 48)
+        b.Text = text
+        b.TextColor3 = Theme.Text
+        b.TextSize = 9
+        b.Font = Theme.FontMedium
+        b.Parent = tpCoordsRow
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        Instance.new("UIStroke", b).Color = Theme.Separator
+        return b
+    end
+
+    local tpNowBtn = tpSmallBtn("Now", -64, 60)
+    local tpClipBtn = tpSmallBtn("Clipboard", -128, 60, Color3.fromRGB(45, 38, 60))
+    local tpTestBtn = tpSmallBtn("Test TP", -196, 64, Color3.fromRGB(28, 92, 72))
+
+    local tpBoxRow = Instance.new("Frame")
+    tpBoxRow.Size = UDim2.new(1, 0, 0, 30)
+    tpBoxRow.BackgroundTransparency = 1
+    tpBoxRow.Parent = sub
+
+    local tpBox = Instance.new("TextBox")
+    tpBox.Size = UDim2.new(1, 0, 1, 0)
+    tpBox.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+    tpBox.Text = tostring(Config.VehiclesFarm.TpCoords or "")
+    tpBox.PlaceholderText = "CFrame.new(...) from Copy Coordinates"
+    tpBox.TextColor3 = Theme.Text
+    tpBox.TextSize = 9
+    tpBox.Font = Theme.FontMedium
+    tpBox.ClearTextOnFocus = false
+    tpBox.TextXAlignment = Enum.TextXAlignment.Left
+    tpBox.Parent = tpBoxRow
+    Instance.new("UICorner", tpBox).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", tpBox).Color = Theme.Separator
+
+    tpBox.FocusLost:Connect(function()
+        Config.VehiclesFarm.TpCoords = tpBox.Text
+        if Automation.ParseCFrameString(tpBox.Text) then
+            _G.Log("TP: coordinates accepted", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("TP: could not parse the coordinates", Color3.fromRGB(255, 80, 80))
+        end
+    end)
+
+    tpNowBtn.MouseButton1Click:Connect(function()
+        local lp2 = game:GetService("Players").LocalPlayer
+        local hrp = lp2 and lp2.Character and lp2.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local s = string.format("CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f)",
+                hrp.CFrame:GetComponents())
+            Config.VehiclesFarm.TpCoords = s
+            tpBox.Text = s
+            _G.Log("TP: captured the current position", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("TP: character not found", Color3.fromRGB(255, 80, 80))
+        end
+    end)
+
+    tpClipBtn.MouseButton1Click:Connect(function()
+        local got = nil
+        pcall(function()
+            if type(getclipboard) == "function" then got = getclipboard() end
+        end)
+        if type(got) ~= "string" or got == "" then
+            pcall(function() got = tostring(clipboard) end)
+        end
+        if type(got) == "string" and got ~= "" and Automation.ParseCFrameString(got) then
+            Config.VehiclesFarm.TpCoords = got
+            tpBox.Text = got
+            _G.Log("TP: coordinates pasted from the clipboard", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("TP: clipboard is empty or unavailable", Color3.fromRGB(255, 80, 80))
+        end
+    end)
+
+    tpTestBtn.MouseButton1Click:Connect(function()
+        if (Config.VehiclesFarm.TpCoords or "") == "" then
+            _G.Log("TP: coordinates are empty - use 'Copy Coordinates' or 'Now' first", Color3.fromRGB(255, 170, 0))
+            return
+        end
+        local ok, err = Automation.TeleportToCoords(Config.VehiclesFarm.TpCoords)
+        if ok then
+            _G.Log("TP: teleport succeeded (details in console)", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("TP: FAILED - " .. tostring(err), Color3.fromRGB(255, 80, 80))
+        end
+    end)
+
+    refreshVehicles()
+    vBtn.Text = tostring(Config.VehiclesFarm.Vehicle)
+    print(string.format("[VEH-FARM] vehicles: %d (source: %s), selected: '%s'",
+        #ownedMounts, dataFromGame and "game data" or "fallback list", tostring(Config.VehiclesFarm.Vehicle)))
+end, nil, "War Tycoon")
+
+createModule("Overmind Users", "Draws the Overmind logo over players who also run this script. Needs the presence endpoint, e.g. https://host/api/presence (see Server/badge/README.md).", "Visuals", Config.Badge.Enabled, function(v)
+    Config.Badge.Enabled = v
+    if v then
+        Automation.BadgeLoop()
+    else
+        pcall(Automation.BadgeClearAll)
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    -- [ v73 ] «host/api/presence» без схемы тоже принимается: схема и путь достраиваются,
+    -- а мусор вроде «1» больше не уходит в запрос (см. Automation.BadgeEndpointUrl).
+    Internal.createStringInput(sub, "Presence endpoint (e.g. host/api/presence)", Config.Badge.Endpoint, function(v) Config.Badge.Endpoint = v end)
+    Internal.createStringInput(sub, "Logo (rbxassetid)", Config.Badge.Logo, function(v) Config.Badge.Logo = v end)
+    Internal.createSlider(sub, "Badge size", 5, 30, math.floor((Config.Badge.Size or 1) * 10 + 0.5),
+        function(v) Config.Badge.Size = v / 10 end,
+        function(v) return string.format("%.1fx", v / 10) end)
+    Internal.createSlider(sub, "Poll every", 3, 30, Config.Badge.PollSeconds or 6,
+        function(v) Config.Badge.PollSeconds = v end,
+        function(v) return tostring(v) .. " sec" end)
+    local rowName = Internal.createSettingRow(sub, "Show player name")
+    Internal.createiOSSwitch(rowName, Config.Badge.ShowName ~= false, function(v) Config.Badge.ShowName = v end, rowName:FindFirstChild("TextLabel"), nil, true)
+    local rowSelf = Internal.createSettingRow(sub, "Mark yourself too")
+    Internal.createiOSSwitch(rowSelf, Config.Badge.IncludeSelf == true, function(v) Config.Badge.IncludeSelf = v end, rowSelf:FindFirstChild("TextLabel"), nil, true)
+    local rowServer = Internal.createSettingRow(sub, "Same server only")
+    Internal.createiOSSwitch(rowServer, Config.Badge.OnlySameServer ~= false, function(v) Config.Badge.OnlySameServer = v end, rowServer:FindFirstChild("TextLabel"), nil, true)
+    Internal.addColorSetting(sub, "Badge color", Config.Badge.Color, function(c) Config.Badge.Color = c end)
+
+    local testBtn = Instance.new("TextButton")
+    testBtn.Size = UDim2.new(1, 0, 0, 28)
+    testBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65)
+    testBtn.Text = "Test connection"
+    testBtn.TextColor3 = Theme.Text
+    testBtn.Font = Theme.FontBold
+    testBtn.TextSize = 11
+    testBtn.Parent = sub
+    Instance.new("UICorner", testBtn).CornerRadius = UDim.new(0, 6)
+    testBtn.MouseButton1Click:Connect(function()
+        local ok, res = Automation.BadgePoll()
+        -- [ v77 ] вторая попытка: хостинг изредка отдаёт 502/503 на один запрос
+        if not ok then ok, res = Automation.BadgePoll() end
+        local count = 0
+        if ok then
+            for _ in pairs(res or {}) do count = count + 1 end
+        end
+        local msg = ok and ("BADGE: " .. tostring(count) .. " USER(S) ONLINE") or ("BADGE: " .. tostring(res))
+        _G.Log(msg, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+        if Internal.ShowIslandNotification then
+            Internal.ShowIslandNotification(msg, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+        end
+        if ok then Automation.BadgeApply() end
+    end)
+end, nil, "Universal")
+
+-- [ v65 ] МОДУЛЬ ДРУЗЕЙ: настройки сервиса, вкладка и тест связи
+createModule("Friend System", "Friends tab with live status, ping and one-click Join through your own presence server (Server/).", "Gui", Config.Friends.Enabled, function(v)
+    Config.Friends.Enabled = v
+    if v then
+        Automation.FriendLoop()
+    elseif Internal.FriendsRender then
+        Internal.FriendsRender()
+    end
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createStringInput(sub, "Server URL", Config.Friends.Endpoint, function(v)
+        Config.Friends.Endpoint = tostring(v or ""):gsub("%s+", "")
+    end)
+    Internal.createStringInput(sub, "Auth key (optional)", Config.Friends.AuthKey, function(v)
+        Config.Friends.AuthKey = tostring(v or ""):gsub("%s+", "")
+    end)
+    Internal.createSlider(sub, "Push my status every", 10, 120, Config.Friends.PushSeconds or 25,
+        function(v) Config.Friends.PushSeconds = v end,
+        function(v) return tostring(v) .. " s" end)
+    Internal.createSlider(sub, "Poll friends every", 5, 120, Config.Friends.PollSeconds or 20,
+        function(v) Config.Friends.PollSeconds = v end,
+        function(v) return tostring(v) .. " s" end)
+    local rowOffline = Internal.createSettingRow(sub, "Show offline friends")
+    Internal.createiOSSwitch(rowOffline, Config.Friends.ShowOffline ~= false, function(v) Config.Friends.ShowOffline = v end, rowOffline:FindFirstChild("TextLabel"), nil, true)
+
+    local openBtn = Instance.new("TextButton")
+    -- имя "Badge": кнопка красится акцентом темы вместе с остальными бейджами
+    openBtn.Name = "Badge"
+    openBtn.Size = UDim2.new(1, 0, 0, 28)
+    openBtn.BackgroundColor3 = Config.Theme.Accent
+    openBtn.Text = "Open Friends tab"
+    openBtn.TextColor3 = Theme.Text
+    openBtn.Font = Theme.FontBold
+    openBtn.TextSize = 11
+    openBtn.Parent = sub
+    Instance.new("UICorner", openBtn).CornerRadius = UDim.new(0, 6)
+    table.insert(Internal.UIObjects.Accents, openBtn)
+    openBtn.MouseButton1Click:Connect(function()
+        if _G.SelectTab then _G.SelectTab("Friends") end
+    end)
+
+    local testBtn = Instance.new("TextButton")
+    testBtn.Size = UDim2.new(1, 0, 0, 28)
+    testBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65)
+    testBtn.Text = "Test connection (send my status)"
+    testBtn.TextColor3 = Theme.Text
+    testBtn.Font = Theme.FontBold
+    testBtn.TextSize = 11
+    testBtn.Parent = sub
+    Instance.new("UICorner", testBtn).CornerRadius = UDim.new(0, 6)
+    testBtn.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local message, ok
+            if not Automation.FriendEndpoint() then
+                message, ok = "FRIENDS: SET SERVER URL", false
+            else
+                local pushed, pushResult = Automation.FriendPush()
+                if not pushed then
+                    message, ok = "FRIENDS: " .. tostring(pushResult), false
+                else
+                    message, ok = "FRIENDS: STATUS SENT", true
+                end
+            end
+            _G.Log(message, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification(message, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            end
+        end)
+    end)
+end, nil, "Universal")
+
+-- [ v65 ] если система друзей была включена в прошлой сессии — поднимаем луп сами
+task.spawn(function()
+    task.wait(2)
+    if Config.Friends and Config.Friends.Enabled and Automation.FriendLoop then
+        Automation.FriendLoop()
+    end
+    if Internal.FriendsRender then Internal.FriendsRender() end
+end)
+
+createModule("Copy Coordinates", "Copies your current CFrame to the clipboard + saves it for TP After Spawn", "Misc", false, function()
+    -- [ v48 ] раньше тут было Core.LocalPlayer (такого поля нет) -> модуль падал
+    local lp = game:GetService("Players").LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local cfString = string.format("CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f)",
+            hrp.CFrame:GetComponents())
+
+        Config.VehiclesFarm.TpCoords = cfString
+        if type(setclipboard) == "function" then
+            pcall(function() setclipboard(cfString) end)
+        end
+        _G.Log("Coordinates copied + saved for TP After Spawn", Color3.fromRGB(0, 255, 150))
+        print(cfString)
+    else
+        _G.Log("Copy Coordinates: character not found", Color3.fromRGB(255, 80, 80))
+    end
+end)
+
+local function scanRemotes()
+    _G.Log("Scanning Remotes...", Color3.fromRGB(255, 255, 0))
+    local count = 0
+    for _, v in game:GetDescendants() do
+        if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+            local n = v.Name:lower()
+            if n:find("spawn") or n:find("vehicle") or n:find("car") or n:find("drive") or n:find("buy") then
+                _G.Log("Found: " .. v.Name .. " (" .. v.ClassName .. ")", Color3.fromRGB(0, 255, 150))
+                print("OVERMIND SCAN: Path = " .. v:GetFullName())
+                count = count + 1
+            end
+        end
+        if count > 20 then break end
+    end
+    if count == 0 then _G.Log("No vehicle remotes found!", Color3.fromRGB(255, 50, 50)) end
+end
+Automation.ScanRemotes = scanRemotes
+
+createModule("Scan Remotes", "Scans game for vehicle-related events", "Misc", false, function(v)
+    if v then Automation.ScanRemotes() end
+end)
+
+createModule("Remote Debugger", "Logs all RemoteEvent calls to console", "Misc", false, function(v)
+    remoteDebugEnabled = v
+    if v then
+        _G.Log("Remote Debugger: ACTIVE", Color3.fromRGB(0, 255, 0))
+    else
+        _G.Log("Remote Debugger: DISABLED", Color3.fromRGB(255, 100, 100))
+    end
+end)
+
+createModule("Debug Mode", "F9 console diagnostics (bhop etc)", "Misc", false, function(v)
+    Config.DebugMode = v
+    if v then
+        _G.Log("Debug Mode: ON", Color3.fromRGB(0, 255, 150))
+    end
+end)
+
+-- [ v45 ] ВАЖНО
+createModule("Knit Dump", "READ-ONLY: prints Knit services + their remotes (no hooks)", "Misc", false, function(v)
+    Config.Cheat.SpawnSniffer = v
+    if not v then return end
+
+    task.spawn(function()
+        local function p(...)
+            local parts = {}
+            for i = 1, select("#", ...) do
+                parts[i] = tostring(select(i, ...))
+            end
+            print("[KNIT-DUMP] " .. table.concat(parts, " "))
+        end
+
+        local knit = RS:FindFirstChild("Packages")
+        knit = knit and knit:FindFirstChild("Knit")
+        p("Knit root:", knit and knit:GetFullName() or "NOT FOUND")
+        p("hint from game UI: RS.Packages.Knit.Services.PartsService.RF.GetParts")
+
+        if knit then
+            local services = knit:FindFirstChild("Services")
+            if services then
+                for _, svc in services:GetChildren() do
+                    local list = {}
+                    for _, c in svc:GetDescendants() do
+                        if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
+                            list[#list + 1] = c.ClassName .. ":" .. c.Name
+                        end
+                    end
+                    p(("Services.%s -> %s"):format(svc.Name, #list > 0 and table.concat(list, ", ") or "(no remotes)"))
+                end
+            else
+                p("Knit.Services NOT FOUND")
+            end
+            for _, c in knit:GetDescendants() do
+                if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
+                    p("knit-remote:", c:GetFullName())
+                end
+            end
+        end
+
+        p("DONE")
+        _G.Log("Knit Dump: done, check the [KNIT-DUMP] lines in the console", Color3.fromRGB(0, 255, 150))
+    end)
+end)
+
+-- [ v24 TEAM INSPECTOR ] оверлей справа
+createModule("Team Inspector", "Overlay: how teamcheck sees every player + raw attributes (Blox Strike debug)", "Misc", false, function(v)
+    State._teamInspectorOn = v
+    if v then
+        task.spawn(function()
+            -- создаём оверлей один раз
+            local gui = State._teamInspectorGui
+            if not (gui and gui.Parent) then
+                gui = Instance.new("ScreenGui")
+                gui.Name = "Overmind_TeamInspector"
+                gui.ResetOnSpawn = false
+                local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end)
+                if not ok then gui.Parent = Core.Local.Player:WaitForChild("PlayerGui") end
+                local frame = Instance.new("Frame")
+                frame.Name = "Panel"
+                frame.AnchorPoint = Vector2.new(1, 0)
+                frame.Position = UDim2.new(1, -10, 0, 120)
+                frame.Size = UDim2.new(0, 620, 0, 0)
+                frame.AutomaticSize = Enum.AutomaticSize.Y
+                frame.BackgroundColor3 = Color3.fromRGB(10, 10, 16)
+                frame.BackgroundTransparency = 0.25
+                frame.BorderSizePixel = 0
+                frame.Parent = gui
+                Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+                local pad = Instance.new("UIPadding", frame)
+                pad.PaddingTop, pad.PaddingBottom, pad.PaddingLeft, pad.PaddingRight = UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8)
+                local list = Instance.new("UIListLayout", frame)
+                list.Padding = UDim.new(0, 2)
+                local title = Instance.new("TextLabel")
+                title.Size = UDim2.new(1, 0, 0, 14)
+                title.BackgroundTransparency = 1
+                title.Text = "TEAM INSPECTOR (how teamcheck sees players)"
+                title.TextColor3 = Color3.fromRGB(123, 97, 255)
+                title.TextSize = 11
+                title.Font = Enum.Font.GothamBold
+                title.TextXAlignment = Enum.TextXAlignment.Left
+                title.Parent = frame
+                State._teamInspectorFrame = frame
+            end
+            State._teamInspectorGui = gui
+            _G.Log("Team Inspector: ON", Color3.fromRGB(0, 255, 150))
+        end)
+    else
+        if State._teamInspectorGui then pcall(function() State._teamInspectorGui:Destroy() end) end
+        State._teamInspectorGui = nil
+        State._teamInspectorFrame = nil
+    end
+end)
+
+task.spawn(function()
+    while not State.Unloading and IsCurrentInstance() do
+        task.wait(0.5)
+        local frame = State._teamInspectorFrame
+        if frame and frame.Parent and State._teamInspectorOn then
+            pcall(function()
+                for _, child in ipairs(frame:GetChildren()) do
+                    if child:IsA("TextLabel") and child.Name == "Row" then child:Destroy() end
+                end
+                local lp = Core.Local.Player
+                for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+                    if p ~= lp then
+                        local ch = p.Character
+                        local row = Instance.new("TextLabel")
+                        row.Name = "Row"
+                        row.Size = UDim2.new(1, 0, 0, 30)
+                        row.BackgroundTransparency = 1
+                        row.TextSize = 10
+                        row.Font = Enum.Font.Gotham
+                        row.TextXAlignment = Enum.TextXAlignment.Left
+                        row.TextYAlignment = Enum.TextYAlignment.Top
+                        row.RichText = false
+                        row.TextWrapped = true
+                        row.Parent = frame
+                        if not ch then
+                            row.Text = string.format("%s | NO CHARACTER", p.Name)
+                            row.TextColor3 = Color3.fromRGB(140, 140, 140)
+                        else
+                            -- реальный вердикт тимчека (та же функция
+                            local ally = isCharacterAlly(ch)
+                            -- [ v25 ] ключевые атрибуты явно + состояние НАШИХ слоёв чамсов
+                            local deadA = tostring(ch:GetAttribute("Dead"))
+                            local hpA = tostring(ch:GetAttribute("Health"))
+                            local invA = tostring(ch:GetAttribute("Invincible"))
+                            -- [ v28 ] плюс поиск кэша по ЛЮБОЙ модели с тем же именем
+                            local cacheOk = HighlightsCache[ch] ~= nil
+                            local visEn, unvisEn = "-", "-"
+                            local cachedModel = ch
+                            if not cacheOk then
+                                for cModel in pairs(HighlightsCache) do
+                                    if cModel and cModel.Name == ch.Name then
+                                        cacheOk = true
+                                        cachedModel = cModel
+                                        break
+                                    end
+                                end
+                            end
+                            if cacheOk and HighlightsCache[cachedModel] then
+                                local h = HighlightsCache[cachedModel]
+                                if h.fill then
+                                    -- [ v30 ] новый формат
+                                    visEn   = tostring(h.mode or "?") .. " fill=" .. tostring(h.fill.Enabled)
+                                    unvisEn = h.outline and ("outline=" .. tostring(h.outline.Enabled)) or "no-outline"
+                                else
+                                    visEn = h.visible and tostring(h.visible.Enabled) or "nil"
+                                    unvisEn = h.unvisible and tostring(h.unvisible.Enabled) or "nil"
+                                end
+                            end
+                            -- чужие Highlight-и на самой модели
+                            local hlCount = 0
+                            for _, d in ipairs(ch:GetDescendants()) do
+                                if d:IsA("Highlight") then hlCount = hlCount + 1 end
+                            end
+                            -- сырые атрибуты (все)
+                            local attrs = {}
+                            for k, val in pairs(ch:GetAttributes()) do
+                                local s = tostring(val)
+                                if #s > 10 then s = s:sub(1, 10) .. ".." end
+                                table.insert(attrs, k .. "=" .. s)
+                            end
+                            table.sort(attrs)
+                            local vest = hasVestDetails(ch) and "vest=YES" or "vest=no"
+                            row.Text = string.format("%s | %s | %s | Dead=%s HP=%s Inv=%s | OUR-layers: cache=%s vis=%s unvis=%s | foreignHl=%d\n%s",
+                                p.Name,
+                                ally and "ALLY" or "ENEMY",
+                                vest,
+                                deadA, hpA, invA,
+                                cacheOk and "yes" or "NO",
+                                visEn, unvisEn,
+                                hlCount,
+                                next(ch:GetAttributes()) and table.concat(attrs, " ") or "no attributes")
+                            row.TextColor3 = ally and Color3.fromRGB(120, 220, 120) or Color3.fromRGB(255, 120, 120)
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- [ SCRIPT DUMPER ] выгружает исходники ВСЕХ клиентских скриптов игры в OvermindDump
+createModule("Script Dumper", "Dump ALL client scripts to OvermindDump folder (for movement analysis)", "Misc", false, function(v)
+    if not v then return end
+    task.spawn(function()
+        -- [ ПРОГРЕСС НА ОСТРОВЕ ] по ходу дампа видно что происходит
+        local show = function(text, color, hold)
+            _G.Log(text, color)
+            if Internal.ShowIslandNotification and Internal.IslandLabel then
+                pcall(function()
+                    Internal.IslandLabel.Text = text
+                    Internal.IslandLabel.TextColor3 = color or Theme.Accent
+                    local logoWidth = Config.Island.Logo and 35 or 0
+                    local targetWidth = math.max(140, Internal.IslandLabel.TextBounds.X + 60 + logoWidth)
+                    Core.TweenService:Create(DynamicIsland, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, targetWidth, 0, 36)}):Play()
+                    if not hold then
+                        task.delay(2, function()
+                            if State.IslandNotifyActive then Internal.updateIsland() end
+                        end)
+                    end
+                end)
+            end
+        end
+
+        if not writefile then
+            show("DUMP ERROR: writefile is not supported by this executor!", Color3.fromRGB(255, 60, 60), true)
+            return
+        end
+        local out = "OvermindDump"
+        local okFolder = pcall(function()
+            if not isfolder(out) then makefolder(out) end
+        end)
+        if not okFolder then
+            show("DUMP ERROR: cannot create the folder " .. out, Color3.fromRGB(255, 60, 60), true)
+            return
+        end
+        local count, skipped, errors = 0, 0, 0
+        local seen = {}
+        local function safeName(full)
+            local s = full:gsub("[^%w_%-]", "_")
+            if #s > 140 then s = s:sub(-140) end
+            return s
+        end
+        local roots = {
+            {"PlayerScripts", function() return Core.Local.Player:FindFirstChild("PlayerScripts") end},
+            {"ReplicatedFirst", function() return game:GetService("ReplicatedFirst") end},
+            {"ReplicatedStorage", function() return game:GetService("ReplicatedStorage") end},
+            {"StarterGui", function() return game:GetService("StarterGui") end},
+            {"StarterPlayer", function() return game:GetService("StarterPlayer") end},
+            {"Characters", function() return workspace:FindFirstChild("Characters") end},
+            {"WorkspaceRoot", function() return workspace end},
+            {"CoreGui", function() return game:GetService("CoreGui"):FindFirstChild("RobloxGui") end},
+        }
+        local scannedScripts, noSource = 0, 0  -- диагностика
+        for i, rootDef in ipairs(roots) do
+            local label, getter = rootDef[1], rootDef[2]
+            local okRoot, root = pcall(getter)
+            if not okRoot or not root then
+                show("DUMP " .. i .. "/" .. #roots .. ": " .. label .. " - no access", Color3.fromRGB(255, 170, 60))
+            else
+                show("DUMP " .. i .. "/" .. #roots .. ": scanning " .. label .. "...", Color3.fromRGB(255, 255, 0))
+                local n0, e0 = count, errors
+                local okScan, err = pcall(function()
+                    for _, d in ipairs(root:GetDescendants()) do
+                        if (d:IsA("LocalScript") or d:IsA("ModuleScript")) and not seen[d] then
+                            seen[d] = true
+                            scannedScripts += 1
+                            local src = nil
+                            local okSrc = pcall(function() src = d.Source end)
+                            -- НОВАЯ ЛОГИКА
+                            if src == nil or src == "" then
+                                noSource += 1
+                                if okSrc then  -- Source доступен
+                                    continue
+                                end
+                            end
+                            if src and #src > 0 then
+                                local fn = safeName(label .. "_" .. d:GetFullName())
+                                local okW = pcall(function()
+                                    writefile(out .. "/" .. fn .. ".lua", "-- PATH: " .. d:GetFullName() .. "\n-- SOURCE: " .. (src == "" and "[EMPTY]" or "ok") .. "\n" .. src)
+                                end)
+                                if okW then count += 1 else skipped += 1 end
+                            end
+                        end
+                    end
+                end)
+                if not okScan then errors += 1; show("DUMP: error in " .. label .. " (continuing)", Color3.fromRGB(255, 170, 60)) end
+                show("DUMP " .. i .. "/" .. #roots .. ": " .. label .. " +" .. (count - n0) .. " scripts", Color3.fromRGB(120, 220, 255))
+            end
+            task.wait(0.1)
+        end
+        if count == 0 then
+            -- [ ДИАГНОСТИКА ] понятно объясняем
+            if scannedScripts == 0 then
+                show("DUMP ERROR: no scripts found - run this in a match, not in the lobby", Color3.fromRGB(255, 60, 60), true)
+            elseif noSource > 0 then
+                show("DUMP ERROR: " .. noSource .. "/" .. scannedScripts .. " scripts WITHOUT sources - the executor does not return d.Source (try Real/another mode)", Color3.fromRGB(255, 60, 60), true)
+            else
+                show("DUMP ERROR: 0 written, write errors " .. skipped, Color3.fromRGB(255, 60, 60), true)
+            end
+        else
+            show("DUMP DONE: " .. count .. " files -> OvermindDump" .. (noSource > 0 and " | without Source: " .. noSource or "") .. (skipped > 0 and " (write errors " .. skipped .. ")" or ""), Color3.fromRGB(0, 255, 150), true)
+        end
+    end)
+end)
+
+-- FUN (empty)
+
+-- GUI
+createModule("Interface Settings", "Manage visual interface settings", "Gui", nil, nil, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createKeybind(sub, "Menu Toggle:", Config.Theme.Bind, function(k)
+        Config.Theme.Bind = k
+        Internal.ScheduleConfigAutosave()
+    end)
+
+    -- [ v31 ] HUD
+    Internal.createLabel(sub, "HUD")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Anti-Aim Angles HUD"), Config.Visuals.Hud.AntiAim == true, function(v) Config.Visuals.Hud.AntiAim = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Speed HUD"), Config.Visuals.Hud.Speed == true, function(v) Config.Visuals.Hud.Speed = v end, nil, nil, true)
+
+    -- [ v31 ] Лог урона из настоящего ремоута CharacterDamaged + стрелка «откуда прилетело»
+    Internal.createLabel(sub, "Damage Log (real game events)")
+    local dlCfg = Config.Visuals.DamageLog
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Damage Log"), dlCfg.Enabled ~= false, function(v) dlCfg.Enabled = v end, nil, nil, true)
+    Internal.createSlider(sub, "Log Lines", 3, 10, dlCfg.MaxLines or 5, function(v) dlCfg.MaxLines = v end)
+    Internal.createSlider(sub, "Log Duration (s)", 2, 12, dlCfg.Duration or 6, function(v) dlCfg.Duration = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Incoming Direction Arrow"), dlCfg.ShowDirection ~= false, function(v) dlCfg.ShowDirection = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Damage Sound"), dlCfg.Sound ~= false, function(v) dlCfg.Sound = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Flash Chams On Hit"), dlCfg.FlashChams ~= false, function(v) dlCfg.FlashChams = v end, nil, nil, true)
+
+    -- [ v31 ] Дамп GameState
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Dump GameState to F9"), Config.Cheat.GameStateDump == true, function(v) Config.Cheat.GameStateDump = v end, nil, nil, true)
+    Internal.createLabel(sub, "GameState dump: toggle it and check the F9 console (off/on to repeat)")
+
+    -- [ НОВОЕ: UI-звуки ]
+    do
+        local soundRow = Internal.createSettingRow(sub, "UI Sounds")
+        Internal.createiOSSwitch(soundRow, Config.Theme.UISounds ~= false, function(v)
+            Config.Theme.UISounds = v
+            Internal.ScheduleConfigAutosave()
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification(v and "UI Sounds on" or "UI Sounds off", v and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            end
+        end)
+
+        local PRESETS = Internal.CELESTIAL_SOUND_PRESETS
+        local function preview(presetId)
+            -- превью играет всегда
+            task.spawn(function()
+                pcall(function()
+                    local pr
+                    for _, x in ipairs(PRESETS) do if x.Id == presetId then pr = x break end end
+                    pr = pr or PRESETS[1]
+                    local s = Instance.new("Sound")
+                    s.SoundId = pr.Sound
+                    s.Volume = 0.2 * (Config.Theme.UISoundVolume or 1.0)
+                    s.PlaybackSpeed = 1.0
+                    s.Parent = Core.Services.SoundService
+                    s:Play()
+                    s.Ended:Connect(function() s:Destroy() end)
+                    task.delay(3, function() if s.Parent then s:Destroy() end end)
+                end)
+            end)
+        end
+
+        -- [ ФИКС ] выбор пресета был отдельным блоком кнопок
+        local presetIds = {}
+        for _, pr in ipairs(PRESETS) do table.insert(presetIds, pr.Id) end
+        Internal.createSelector(sub, "UI Sound Preset", presetIds, Config.Theme.UISoundPreset or "Click", function(v)
+            Config.Theme.UISoundPreset = v
+            Internal.ScheduleConfigAutosave()
+            preview(v)
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification("Sound: " .. v, Config.Theme.Accent)
+            end
+        end)
+
+        Internal.createSlider(sub, "UI Sound Volume", 0, 100, (Config.Theme.UISoundVolume or 1.0) * 100, function(v)
+            Config.Theme.UISoundVolume = v / 100
+            Internal.ScheduleConfigAutosave()
+        end)
+    end
+
+    -- [ НОВОЕ: звуки включения/выключения модулей ] тумблер + выбор WAV + громкость
+    do
+        local msRow = Internal.createSettingRow(sub, "Module Toggle Sounds")
+        Internal.createiOSSwitch(msRow, Config.Theme.ModuleSounds ~= false, function(v)
+            Config.Theme.ModuleSounds = v
+            Internal.ScheduleConfigAutosave()
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification(v and "Module sounds on" or "Module sounds off", v and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            end
+        end)
+
+        -- Список доступных WAV собираем из папки (enable
+        local function collectOptions(prefix)
+            local opts = {}
+            for name, _ in pairs(Internal.MODULE_SOUNDS or {}) do
+                if name:find("^" .. prefix) then table.insert(opts, name) end
+            end
+            table.sort(opts)
+            if #opts == 0 then table.insert(opts, prefix) end
+            return opts
+        end
+
+        local enableSelector = Internal.createSelector(sub, "Enable Sound", collectOptions("enable"), Config.Theme.ModuleSoundEnable or "enable", function(v)
+            Config.Theme.ModuleSoundEnable = v
+            Internal.ScheduleConfigAutosave()
+            -- превью по клику
+            local id = Internal.MODULE_SOUNDS and Internal.MODULE_SOUNDS[v]
+            if id then
+                task.spawn(function()
+                    pcall(function()
+                        local s = Instance.new("Sound")
+                        s.SoundId = id
+                        s.Volume = Config.Theme.ModuleSoundVolume or 0.6
+                        s.Parent = Core.Services.SoundService
+                        s:Play()
+                        s.Ended:Connect(function() s:Destroy() end)
+                        task.delay(5, function() if s.Parent then s:Destroy() end end)
+                    end)
+                end)
+            end
+        end)
+
+        local disableSelector = Internal.createSelector(sub, "Disable Sound", collectOptions("disable"), Config.Theme.ModuleSoundDisable or "disable", function(v)
+            Config.Theme.ModuleSoundDisable = v
+            Internal.ScheduleConfigAutosave()
+            local id = Internal.MODULE_SOUNDS and Internal.MODULE_SOUNDS[v]
+            if id then
+                task.spawn(function()
+                    pcall(function()
+                        local s = Instance.new("Sound")
+                        s.SoundId = id
+                        s.Volume = Config.Theme.ModuleSoundVolume or 0.6
+                        s.Parent = Core.Services.SoundService
+                        s:Play()
+                        s.Ended:Connect(function() s:Destroy() end)
+                        task.delay(5, function() if s.Parent then s:Destroy() end end)
+                    end)
+                end)
+            end
+        end)
+
+        Internal.createSlider(sub, "Module Sound Volume", 0, 100, (Config.Theme.ModuleSoundVolume or 0.6) * 100, function(v)
+            Config.Theme.ModuleSoundVolume = v / 100
+            Internal.ScheduleConfigAutosave()
+        end)
+
+        -- Обновление списков после докачки/refresh
+        local refreshBtn = Instance.new("TextButton")
+        refreshBtn.Size = UDim2.new(1, 0, 0, 30)
+        refreshBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65); refreshBtn.Text = "Refresh Module Sounds"; refreshBtn.TextColor3 = Theme.Text; refreshBtn.Font = Theme.FontMedium; refreshBtn.TextSize = 12; refreshBtn.Parent = sub
+        Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+        refreshBtn.MouseButton1Click:Connect(function()
+            if Internal.RefreshModuleSounds then Internal.RefreshModuleSounds() end
+            enableSelector.Update(collectOptions("enable"))
+            disableSelector.Update(collectOptions("disable"))
+            if Internal.ShowIslandNotification then Internal.ShowIslandNotification("MODULE SOUNDS REFRESHED", Config.Theme.Accent) end
+        end)
+    end
+
+    -- [ НОВОЕ: KEYBIND LIST ] панель активных биндов/модулей в углу
+    do
+        local kblRow = Internal.createSettingRow(sub, "Keybind List")
+        Internal.createiOSSwitch(kblRow, Config.Theme.KeybindList ~= false, function(v)
+            Config.Theme.KeybindList = v
+            Internal.ScheduleConfigAutosave()
+            if v and Internal.BuildKeybindList and not (Internal.KBLGui and Internal.KBLGui.Parent) then
+                pcall(Internal.BuildKeybindList)
+            end
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification(v and "Keybind list on" or "Keybind list off", v and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            end
+        end)
+    end
+
+    -- [ НОВОЕ: SPECTATOR LIST ] панель «кто наблюдает за тобой»
+    do
+        local spRow = Internal.createSettingRow(sub, "Spectator List")
+        Internal.createiOSSwitch(spRow, Config.Theme.SpectatorList ~= false, function(v)
+            Config.Theme.SpectatorList = v
+            Internal.ScheduleConfigAutosave()
+            if v and Internal.BuildSpectatorList and not (Internal.SpectGui and Internal.SpectGui.Parent) then
+                pcall(Internal.BuildSpectatorList)
+            end
+            if Internal.ShowIslandNotification then
+                Internal.ShowIslandNotification(v and "Spectator list on" or "Spectator list off", v and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 90, 90))
+            end
+        end)
+    end
+
+    -- [ НОВОЕ: выбор курсора меню ]
+    do
+        local CURSORS = { "Plus", "Small", "Dot", "Cross", "Arrow", "None" }
+        local btns = {}
+        local function refresh()
+            for _, b in ipairs(btns) do
+                local active = (Config.Theme.Cursor or "Plus") == b.Name
+                b.BackgroundColor3 = active and Config.Theme.Accent or Color3.fromRGB(45, 46, 58)
+                b.TextColor3 = active and Color3.fromRGB(255, 255, 255) or Theme.Muted
+            end
+        end
+
+        local cursorBlock = Instance.new("Frame")
+        cursorBlock.Size = UDim2.new(1, 0, 0, 30)
+        cursorBlock.BackgroundTransparency = 1
+        cursorBlock.Parent = sub
+        local cl = Instance.new("UIListLayout", cursorBlock)
+        cl.FillDirection = Enum.FillDirection.Horizontal
+        cl.Padding = UDim.new(0, 5)
+
+        for _, cid in ipairs(CURSORS) do
+            local b = Instance.new("TextButton")
+            b.Name = cid
+            b.Size = UDim2.new(0, 57, 1, 0)
+            b.Text = cid
+            b.TextSize = 10
+            b.FontFace = Theme.FontMedium
+            b.TextColor3 = Theme.Muted
+            b.BackgroundColor3 = Color3.fromRGB(45, 46, 58)
+            b.AutoButtonColor = false
+            b.Parent = cursorBlock
+            Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+            table.insert(btns, b)
+            b.MouseButton1Click:Connect(function()
+                if Internal.SetMenuCursorStyle then
+                    Internal.SetMenuCursorStyle(cid)
+                    Internal.ScheduleConfigAutosave()
+                    if cid == "None" then
+                        Internal.SetMenuCursorVisible(false)
+                    elseif Internal.MainFrame and Internal.MainFrame.Visible then
+                        Internal.SetMenuCursorVisible(true)
+                    end
+                end
+                Internal.CelestialPlaySound("click")
+                refresh()
+                if Internal.ShowIslandNotification then
+                    Internal.ShowIslandNotification("Cursor: " .. cid, Config.Theme.Accent)
+                end
+            end)
+        end
+        refresh()
+    end
+    Internal.createSlider(sub, "Blur Intensity", 0, 50, Config.Theme.Blur, function(v)
+        Config.Theme.Blur = v
+        if BlurEffect then
+            BlurEffect.Size = v
+            BlurEffect.Enabled = (v > 0)
+        end
+    end)
+    Internal.createSlider(sub, "Background Dim", 0, 100, Config.Theme.Dim * 100, function(v)
+        Config.Theme.Dim = v / 100
+        local dim = Internal.MainFrame.Parent:FindFirstChild("KubchikDim")
+        if dim and Internal.MainFrame.Visible then
+            Core.TweenService:Create(dim, TweenInfo.new(0.2), {BackgroundTransparency = 1 - Config.Theme.Dim}):Play()
+        end
+    end)
+end, true)
+
+createModule("Config Manager", "Save and load your settings", "Gui", nil, nil, function(p)
+    local sub = Internal.createSubCard(p)
+    local currentConfig = "default"
+
+    local nameBoxRow = Internal.createSettingRow(sub, "Config Name:")
+    local saveBtn  -- форвард-декларация (замыкания ниже ссылаются на неё)
+    local refreshList  -- форвард-декларация (используется в FocusLost выше объявления тела)
+    local nameInput = Instance.new("TextBox")
+    nameInput.Size = UDim2.new(0, 120, 0, 26); nameInput.Position = UDim2.new(1, -120, 0.5, -13); nameInput.BackgroundColor3 = Color3.fromRGB(35, 36, 48); nameInput.Text = "default"; nameInput.TextColor3 = Theme.Text; nameInput.Font = Theme.FontMedium; nameInput.TextSize = 12; nameInput.Parent = nameBoxRow
+    nameInput.ClearTextOnFocus = false
+    Instance.new("UICorner", nameInput).CornerRadius = UDim.new(0, 6)
+    nameInput.FocusLost:Connect(function(enterPressed)
+        currentConfig = sanitizeConfigName(nameInput.Text)
+        nameInput.Text = currentConfig
+        -- [ НОВОЕ ] Enter в поле имени = быстрый Save
+        if enterPressed then
+            SaveConfig(currentConfig)
+            saveBtn.Text = "SAVED!"
+            task.delay(1, function() if saveBtn and saveBtn.Parent then saveBtn.Text = "Save Config" end end)
+            refreshList()
+        end
+    end)
+    -- [ НОВОЕ ] Визуальный фокус на поле имени
+    local nameStroke = Instance.new("UIStroke")
+    nameStroke.Color = Theme.Accent
+    nameStroke.Transparency = 1
+    nameStroke.Thickness = 1
+    nameStroke.Parent = nameInput
+    nameInput.Focused:Connect(function() nameStroke.Transparency = 0 end)
+    nameInput.FocusLost:Connect(function() nameStroke.Transparency = 1 end)
+
+    local btnContainer = Instance.new("Frame")
+    btnContainer.Size = UDim2.new(1, 0, 0, 32)
+    btnContainer.BackgroundTransparency = 1
+    btnContainer.Parent = sub
+    local bl = Instance.new("UIListLayout", btnContainer); bl.FillDirection = Enum.FillDirection.Horizontal; bl.Padding = UDim.new(0, 8)
+
+    saveBtn = Instance.new("TextButton")
+    saveBtn.Size = UDim2.new(0.5, -4, 1, 0); saveBtn.BackgroundColor3 = Theme.Accent; saveBtn.Text = "Save Config"; saveBtn.TextColor3 = Theme.Text; saveBtn.Font = Theme.FontBold; saveBtn.TextSize = 11; saveBtn.Parent = btnContainer
+    Instance.new("UICorner", saveBtn).CornerRadius = UDim.new(0, 6)
+    saveBtn.MouseButton1Click:Connect(function()
+        SaveConfig(currentConfig)
+        saveBtn.Text = "SAVED!"
+        task.delay(1, function() if saveBtn and saveBtn.Parent then saveBtn.Text = "Save Config" end end)
+        refreshList()
+    end)
+
+    local loadBtn = Instance.new("TextButton")
+    loadBtn.Size = UDim2.new(0.5, -4, 1, 0); loadBtn.BackgroundColor3 = Color3.fromRGB(45, 46, 65); loadBtn.Text = "Load Config"; loadBtn.TextColor3 = Theme.Text; loadBtn.Font = Theme.FontBold; loadBtn.TextSize = 11; loadBtn.Parent = btnContainer
+    Instance.new("UICorner", loadBtn).CornerRadius = UDim.new(0, 6)
+    loadBtn.MouseButton1Click:Connect(function() LoadConfig(currentConfig) end)
+
+    -- [ НОВОЕ ] Мягкий hover для кнопок
+    local function addHover(btn)
+        local base = btn.BackgroundColor3
+        btn.MouseEnter:Connect(function() btn.BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.12) end)
+        btn.MouseLeave:Connect(function() btn.BackgroundColor3 = base end)
+    end
+    addHover(saveBtn)
+    addHover(loadBtn)
+
+    Internal.createLabel(sub, "Existing Configs:")
+
+    local configList = Instance.new("ScrollingFrame")
+    configList.Size = UDim2.new(1, 0, 0, 100)
+    configList.BackgroundTransparency = 1
+    configList.BorderSizePixel = 0
+    configList.ScrollBarThickness = 2
+    configList.ScrollBarImageColor3 = Theme.Accent
+    configList.CanvasSize = UDim2.new(0, 0, 0, 0)
+    configList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    configList.Parent = sub
+    local cl = Instance.new("UIListLayout", configList); cl.Padding = UDim.new(0, 4)
+
+    -- Тело refreshList (декларация наверху блока)
+    function refreshList()
+        for _, v in configList:GetChildren() do if v:IsA("TextButton") or v:IsA("TextLabel") then v:Destroy() end end
+        local files = ListConfigs()
+
+        -- [ НОВОЕ ] Пустое состояние вместо пустоты
+        if #files == 0 then
+            local empty = Instance.new("TextLabel")
+            empty.Size = UDim2.new(1, 0, 0, 40)
+            empty.BackgroundTransparency = 1
+            empty.Text = "No configs yet — save one!"
+            empty.TextColor3 = Color3.fromRGB(120, 120, 140)
+            empty.Font = Theme.FontMedium
+            empty.TextSize = 11
+            empty.Parent = configList
+            return
+        end
+
+        for _, name in ipairs(files) do
+            local clean = sanitizeConfigName(name)
+            local isCurrent = (clean == currentConfig)
+
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, 0, 0, 24)
+            b.BackgroundColor3 = isCurrent and Theme.Accent or Color3.fromRGB(30, 31, 40)
+            b.BackgroundTransparency = isCurrent and 0.75 or 0
+            b.Text = "  " .. clean .. (isCurrent and "   ●" or "")
+            b.TextColor3 = isCurrent and Theme.Accent or Color3.fromRGB(200, 200, 200)
+            b.Font = Theme.FontMedium
+            b.TextSize = 10
+            b.TextXAlignment = Enum.TextXAlignment.Left
+            b.Parent = configList
+            Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+
+            -- Кнопка удаления (X) справа
+            local delBtn = Instance.new("TextButton")
+            delBtn.Size = UDim2.new(0, 20, 1, -4)
+            delBtn.Position = UDim2.new(1, -24, 0, 2)
+            delBtn.BackgroundTransparency = 1
+            delBtn.Text = "X"
+            delBtn.TextColor3 = Color3.fromRGB(180, 70, 70)
+            delBtn.Font = Enum.Font.GothamBold
+            delBtn.TextSize = 11
+            delBtn.Parent = b
+
+            delBtn.MouseButton1Click:Connect(function()
+                if delBtn:GetAttribute("Confirming") then
+                    local ok = pcall(function()
+                        if delfile then
+                            delfile("Overmind/Configs/" .. clean .. ".json")
+                        elseif writefile then
+                            writefile("Overmind/Configs/" .. clean .. ".json", "{}")
+                        end
+                    end)
+                    if ok and Internal.ShowIslandNotification then
+                        Internal.ShowIslandNotification("CONFIG DELETED: " .. clean:upper(), Color3.fromRGB(255, 80, 80))
+                    end
+                    if clean == currentConfig then currentConfig = "default"; nameInput.Text = "default" end
+                    delBtn:SetAttribute("Confirming", nil)
+                    refreshList()
+                else
+                    delBtn:SetAttribute("Confirming", true)
+                    delBtn.Text = "!"
+                    delBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+                    task.delay(2, function()
+                        if delBtn and delBtn.Parent then
+                            delBtn:SetAttribute("Confirming", nil)
+                            delBtn.Text = "X"
+                            delBtn.TextColor3 = Color3.fromRGB(180, 70, 70)
+                        end
+                    end)
+                end
+            end)
+
+            -- Hover строки
+            local rowBase = b.BackgroundColor3
+            b.MouseEnter:Connect(function()
+                if not isCurrent then b.BackgroundColor3 = Color3.fromRGB(40, 41, 55) end
+            end)
+            b.MouseLeave:Connect(function()
+                if not isCurrent then b.BackgroundColor3 = rowBase end
+            end)
+
+            -- Первый клик = выбрать
+            b.MouseButton1Click:Connect(function()
+                if currentConfig == clean and b:GetAttribute("Armed") then
+                    LoadConfig(clean)
+                    currentConfig = clean
+                    b:SetAttribute("Armed", nil)
+                else
+                    currentConfig = clean
+                    nameInput.Text = clean
+                    b:SetAttribute("Armed", true)
+                    task.delay(1.5, function() if b and b.Parent then b:SetAttribute("Armed", nil) end end)
+                end
+                refreshList()
+            end)
+        end
+    end
+
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(1, 0, 0, 28); refreshBtn.BackgroundColor3 = Color3.fromRGB(40, 41, 55); refreshBtn.Text = "Refresh Configs"; refreshBtn.TextColor3 = Theme.Text; refreshBtn.Font = Theme.FontBold; refreshBtn.TextSize = 11; refreshBtn.Parent = sub
+    Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 6)
+    refreshBtn.MouseButton1Click:Connect(refreshList)
+
+    refreshList()
+end, true)
+
+createModule("Debug Console", "Show floating system console", "Gui", Config.Island.DebugConsole, function(v)
+    Config.Island.DebugConsole = v
+    if Internal.DebugFrame then Internal.DebugFrame.Visible = v end
+end)
+
+createModule("Dynamic Island", "Show status island at the top", "Gui", Config.Island.Enabled, function(v)
+    Config.Island.Enabled = v
+    Internal.updateIsland()
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    local function addIslandToggle(text, key)
+        local row = Internal.createSettingRow(sub, text)
+        Internal.createiOSSwitch(row, Config.Island[key], function(val)
+            Config.Island[key] = val
+            Internal.updateIsland()
+        end, row:FindFirstChild("TextLabel"), nil, true)
+    end
+    addIslandToggle("Show Logo", "Logo")
+    addIslandToggle("Show Time", "Time")
+    addIslandToggle("Show FPS", "FPS")
+    addIslandToggle("Show Ping", "Ping")
+    addIslandToggle("Notifications", "Notifications")
+    addIslandToggle("Farm Status", "Farm")
+end); (function()
+    DynamicIsland = Instance.new("TextButton")
+    DynamicIsland.Name = "DynamicIsland"
+    DynamicIsland.Size = UDim2.new(0, 160, 0, 36)
+    DynamicIsland.Position = UDim2.new(0.5, 0, 0, 20)
+    DynamicIsland.AnchorPoint = Vector2.new(0.5, 0)
+    DynamicIsland.BackgroundColor3 = Color3.fromRGB(10, 11, 14)
+    DynamicIsland.BorderSizePixel = 0
+    DynamicIsland.AutoButtonColor = false
+    DynamicIsland.Text = ""
+    DynamicIsland.Active = true
+    DynamicIsland.ZIndex = 5000
+    DynamicIsland.Parent = ScreenGui
+    DynamicIsland.Visible = Config.Island.Enabled
+
+    local IslandCorner = Instance.new("UICorner")
+    IslandCorner.CornerRadius = UDim.new(0, 18)
+    IslandCorner.Parent = DynamicIsland
+
+    local IslandStroke = Instance.new("UIStroke")
+    IslandStroke.Color = Color3.fromRGB(255, 255, 255)
+    IslandStroke.Thickness = 1.6
+    IslandStroke.Parent = DynamicIsland
+    table.insert(Internal.UIObjects.Accents, IslandStroke)
+
+    local IslandContent = Instance.new("Frame")
+    IslandContent.Name = "Content"
+    IslandContent.Size = UDim2.new(1, 0, 1, 0)
+    IslandContent.BackgroundTransparency = 1
+    IslandContent.Parent = DynamicIsland
+
+    local IslandPadding = Instance.new("UIPadding")
+    IslandPadding.PaddingLeft = UDim.new(0, 12)
+    IslandPadding.PaddingRight = UDim.new(0, 18)
+    IslandPadding.Parent = IslandContent
+
+    local IslandLayout = Instance.new("UIListLayout")
+    IslandLayout.FillDirection = Enum.FillDirection.Horizontal
+    IslandLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    IslandLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    IslandLayout.Padding = UDim.new(0, 10)
+    IslandLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    IslandLayout.Parent = IslandContent
+
+    Internal.KLogo = Instance.new("ImageLabel")
+    Internal.KLogo.Name = "Internal.KLogo"
+    Internal.KLogo.Size = UDim2.new(0, 24, 0, 24)
+    Internal.KLogo.BackgroundTransparency = 1
+    Internal.KLogo.Image = "rbxassetid://10723352321"
+    Internal.KLogo.ImageColor3 = Color3.new(1, 1, 1)
+    Internal.KLogo.ImageTransparency = 0
+    Internal.KLogo.ScaleType = Enum.ScaleType.Fit
+    Internal.KLogo.ZIndex = 5001
+    Internal.KLogo.LayoutOrder = 0
+    Internal.KLogo.Parent = IslandContent
+    table.insert(Internal.UIObjects.Accents, Internal.KLogo)
+
+    -- Re-apply logos once both UI elements exist
+
+    -- Immediate application if file exists
+    task.spawn(function()
+        local logoPath = "Overmind/LogoScript.png"
+        if isfile and isfile(logoPath) and getcustomasset then
+            local ok, asset = pcall(getcustomasset, logoPath)
+            if ok and asset then
+                Internal.KLogo.Image = asset
+            end
+        end
+    end)
+
+    Internal.IslandLabel = Instance.new("TextLabel")
+    Internal.IslandLabel.Size = UDim2.new(0, 0, 1, 0)
+    Internal.IslandLabel.AutomaticSize = Enum.AutomaticSize.X
+    Internal.IslandLabel.BackgroundTransparency = 1
+    Internal.IslandLabel.Text = "overmind"
+    Internal.IslandLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Internal.IslandLabel.TextSize = 12
+    Internal.IslandLabel.Font = Enum.Font.GothamBold
+    Internal.IslandLabel.LayoutOrder = 1
+    Internal.IslandLabel.Parent = IslandContent
+
+    -- Перетаскивание острова
+    DynamicIsland.InputBegan:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            State.Dragging.Island = true
+            DynamicIsland:SetAttribute("DragStart", input.Position)
+            DynamicIsland:SetAttribute("StartPos", Vector3.new(DynamicIsland.Position.X.Offset, DynamicIsland.Position.Y.Offset, 0))
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    State.Dragging.Island = false
+                end
+            end)
+        end
+    end)
+
+    DynamicIsland.InputChanged:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            if State.Dragging.Island then
+                local dragStart = DynamicIsland:GetAttribute("DragStart")
+                local startPos = DynamicIsland:GetAttribute("StartPos")
+                if dragStart and startPos then
+                    local delta = input.Position - dragStart
+                    DynamicIsland.Position = UDim2.new(0.5, startPos.X + delta.X, 0, startPos.Y + delta.Y)
+                end
+            end
+        end
+    end)
+
+    -- Клик на остров для открытия меню
+    DynamicIsland.Activated:Connect(function()
+        Core.TweenService:Create(DynamicIsland, TweenInfo.new(0.2, Enum.EasingStyle.Back), {Size = UDim2.new(DynamicIsland.Size.X.Scale, DynamicIsland.Size.X.Offset - 10, 0, 32)}):Play()
+        task.wait(0.1)
+        Core.TweenService:Create(DynamicIsland, TweenInfo.new(0.2, Enum.EasingStyle.Back), {Size = UDim2.new(DynamicIsland.Size.X.Scale, DynamicIsland.Size.X.Offset + 10, 0, 36)}):Play()
+        toggleMenu(not Internal.MainFrame.Visible)
+    end)
+end)()
+
+-- Обновление острова (FPS
+local frameCount = 0
+local lastUpdate = os.clock()
+State.Connections.IslandStats = Core.RunService.RenderStepped:Connect(function(dt)
+    if State.Unloading or not IsCurrentInstance() then return end
+    frameCount = frameCount + 1
+    local now = os.clock()
+    if now - lastUpdate >= 0.5 then
+        State.FPS = math.round(frameCount / (now - lastUpdate))
+        frameCount = 0
+        lastUpdate = now
+    end
+end)
+
+task.spawn(function()
+    while task.wait(1) and ScreenGui and ScreenGui.Parent and IsCurrentInstance() do
+        pcall(function()
+            -- [ v68 ] тип проверяем явно: если GetValue() отдаст nil, math.round падал и
+            -- pcall молча оставлял старое значение
+            local ms = game:GetService("Stats").PerformanceStats.Ping:GetValue()
+            if type(ms) == "number" then State.Ping = math.round(ms) end
+        end)
+    end
+end)
+
+Internal.updateIsland = function(instant)
+    if not State.Loaded or not Config.Island.Enabled then
+        if DynamicIsland then DynamicIsland.Visible = false end
+        return
+    end
+    if State.IslandNotifyActive then return end
+
+    if DynamicIsland then
+        DynamicIsland.Visible = true
+        Internal.IslandLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        Internal.KLogo.Visible = Config.Island.Logo
+
+        local parts = {}
+        -- [ v54 ] live farm status (Auto Build target / cash / purchases)
+        if Config.Island.Farm ~= false and Internal.FarmStatus and Internal.FarmStatus ~= "" then
+            table.insert(parts, Internal.FarmStatus)
+        end
+        if Config.Island.Time then table.insert(parts, os.date("%H:%M:%S")) end
+        if Config.Island.FPS then table.insert(parts, tostring(State.FPS) .. " FPS") end
+        if Config.Island.Ping then table.insert(parts, tostring(State.Ping) .. " ms") end
+        local newText = #parts == 0 and "" or table.concat(parts, "   |   ")
+
+        if Internal.IslandLabel.Text ~= newText or instant then
+            Internal.IslandLabel.Text = newText
+            local logoWidth = Config.Island.Logo and 35 or 0
+            local targetWidth = math.max(80, (Internal.IslandLabel.TextBounds and Internal.IslandLabel.TextBounds.X or 100) + 40 + logoWidth)
+
+            if instant then
+                DynamicIsland.Size = UDim2.new(0, targetWidth, 0, 36)
+            else
+                Core.TweenService:Create(DynamicIsland, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, targetWidth, 0, 36)}):Play()
+            end
+        end
+    end
+end
+
+-- Island Refresh Loop (один цикл 0.1с ниже
+local islandNotifyThread = nil
+Internal.ShowIslandNotification = function(text, color)
+    if not Config.Island.Enabled or not Config.Island.Notifications then return end
+
+    if islandNotifyThread then
+        task.cancel(islandNotifyThread)
+    end
+
+    islandNotifyThread = task.spawn(function()
+        State.IslandNotifyActive = true
+        Internal.IslandLabel.Text = text
+        Internal.IslandLabel.TextColor3 = color or Theme.Accent
+        local logoWidth = Config.Island.Logo and 35 or 0
+        local targetWidth = math.max(140, Internal.IslandLabel.TextBounds.X + 60 + logoWidth)
+
+        local expand = Core.TweenService:Create(DynamicIsland, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, targetWidth, 0, 36)})
+        expand:Play()
+        expand.Completed:Wait()
+
+        task.wait(1.5)
+
+        State.IslandNotifyActive = false
+        Internal.updateIsland()
+    end)
+end
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        Internal.updateIsland()
+        task.wait(1)
+    end
+end)
+
+-- [ NO AIMBOT LOGIC ]
+
+-- УПРАВЛЕНИЕ ОКНОМ (КНОПКА ЗАКРЫТЬ)
+
+local function NukeAllBlurs()
+    local lighting = game:GetService("Lighting")
+    local cam = workspace.CurrentCamera
+
+    if lighting then
+        for _, v in ipairs(lighting:GetChildren()) do
+            if v:IsA("BlurEffect") then
+                pcall(function() v.Enabled = false end)
+                pcall(function() v.Size = 0 end)
+                pcall(function() v:Destroy() end)
+            elseif v:IsA("DepthOfFieldEffect") then
+                local name = v.Name:lower()
+                if name:find("kubchik") or name:find("overmind") or name:find("sacred") then
+                    pcall(function() v.Enabled = false end)
+                    pcall(function() v:Destroy() end)
+                end
+            elseif (v:IsA("ColorCorrectionEffect") or v:IsA("Sky") or v:IsA("SunRaysEffect") or v:IsA("BloomEffect") or v:IsA("Atmosphere")) then
+                local name = v.Name:lower()
+                if name:find("overmind") or name:find("kubchik") then
+                    pcall(function() v:Destroy() end)
+                end
+            end
+        end
+    end
+
+    if cam then
+        for _, v in ipairs(cam:GetChildren()) do
+            if v:IsA("BlurEffect") then
+                pcall(function() v.Enabled = false end)
+                pcall(function() v.Size = 0 end)
+                pcall(function() v:Destroy() end)
+            elseif v:IsA("DepthOfFieldEffect") then
+                local name = v.Name:lower()
+                if name:find("kubchik") or name:find("overmind") or name:find("sacred") then
+                    pcall(function() v.Enabled = false end)
+                    pcall(function() v:Destroy() end)
+                end
+            elseif (v:IsA("ColorCorrectionEffect") or v:IsA("Sky") or v:IsA("SunRaysEffect") or v:IsA("BloomEffect") or v:IsA("Atmosphere")) then
+                local name = v.Name:lower()
+                if name:find("overmind") or name:find("kubchik") then
+                    pcall(function() v:Destroy() end)
+                end
+            end
+        end
+    end
+
+    if BlurEffect then
+        pcall(function() BlurEffect.Enabled = false end)
+        pcall(function() BlurEffect.Size = 0 end)
+        pcall(function() BlurEffect:Destroy() end)
+    end
+    BlurEffect = nil
+end
+
+local closeConfirmed = false
+_G.OvermindBeginUnload = function()
+    -- 1. SET UNLOADING FLAG
+    State.Unloading = true
+    -- Kill-switch
+    pcall(function() if _G.OvermindActiveToken == INSTANCE_TOKEN then _G.OvermindActiveToken = nil end end)
+
+    -- СНАЧАЛА блюр и скрытие меню
+    NukeAllBlurs()
+    if Internal.MainFrame then Internal.MainFrame.Visible = false end
+    if PaletteFrame then PaletteFrame.Visible = false end
+
+    pcall(function()
+        Log("Un-injecting System...", Color3.fromRGB(255, 100, 100))
+
+        -- 2. DISCONNECT ALL CONNECTIONS IMMEDIATELY
+        for name, conn in pairs(State.Connections) do
+            pcall(function() conn:Disconnect() end)
+        end
+        table.clear(State.Connections)
+
+        -- [ v30 ] AntiAim
+        pcall(function()
+            if State.AntiAimRestore then State.AntiAimRestore() end
+            if AntiAimState.CameraSpoofed and AntiAimState.CameraOrigCF and workspace.CurrentCamera then
+                workspace.CurrentCamera.CFrame = AntiAimState.CameraOrigCF
+            end
+        end)
+
+        -- Bhop v5: сигнальный хук CFrame и RenderStep-бинд живут вне Connections
+        if State._bhopCFrameConn then pcall(function() State._bhopCFrameConn:Disconnect() end) State._bhopCFrameConn = nil end
+        State._bhopAnchorConnChar = nil
+        pcall(function() Core.RunService:UnbindFromRenderStep("Overmind_BhopVisual") end)
+        if State._bhopRestoreVisuals then pcall(State._bhopRestoreVisuals) end  -- вернуть коллизии/звуки
+        -- [ v36 ] Снимаем __newindex-хук CustomCamera (иначе после реинжекта игра не могла
+        pcall(function()
+            local mt = State._cameraNewIndexCold
+            local orig = _G.OvermindCameraNewIndex
+            if mt and orig and getrawmetatable and setreadonly then
+                setreadonly(mt, false)
+                mt.__newindex = orig
+                setreadonly(mt, true)
+                _G.OvermindCameraNewIndex = nil
+                State._cameraNewIndexCold = nil
+            end
+        end)
+        -- [ NATIVE JUMP ] отпустить зажатый прыжок при выгрузке
+        if State._bhopNativeHeld and State._bhopNativeJump then
+            pcall(function() State._bhopNativeJump.jump(false) end)
+            State._bhopNativeHeld = false
+        end
+
+        if State.InputBeganConnection then pcall(function() State.InputBeganConnection:Disconnect() end) end
+        if State.InputEndedConnection then pcall(function() State.InputEndedConnection:Disconnect() end) end
+
+        -- Кастомный курсор меню
+        if Internal.DestroyMenuCursor then pcall(Internal.DestroyMenuCursor) end
+
+        -- Spectator List
+        if Internal.SpectGui then
+            pcall(function() Internal.SpectGui:Destroy() end)
+            Internal.SpectGui = nil
+            Internal.SpectHolder = nil
+            Internal.SpectRows = {}
+        end
+
+        -- 3. AGGRESSIVE VISUAL CLEANUP
+        if State.removeAllChams then pcall(State.removeAllChams) end
+        if State.removeAllUniversalChams then pcall(State.removeAllUniversalChams) end
+        if State.removeAllWeaponChams then pcall(State.removeAllWeaponChams) end
+
+        -- Global model restore for any modified character parts
+        local charFolder = workspace:FindFirstChild("Characters")
+        if charFolder then
+            for _, char in ipairs(charFolder:GetDescendants()) do
+                if char:IsA("BasePart") and char:GetAttribute("OrigMat") then
+                    char.Material = Enum.Material[char:GetAttribute("OrigMat")]
+                    char.Color = char:GetAttribute("OrigColor") or char.Color
+                    char.Transparency = char:GetAttribute("OrigTrans") or char.Transparency
+                    char:SetAttribute("OrigMat", nil)
+                    char:SetAttribute("OrigColor", nil)
+                    char:SetAttribute("OrigTrans", nil)
+                end
+            end
+        end
+
+        -- Полное и гарантированное уничтожение ScreenGui со всеми его элементами
+        if ScreenGui then
+            pcall(function()
+                ScreenGui:ClearAllChildren()
+                ScreenGui:Destroy()
+            end)
+        end
+        if ChamsContainer then pcall(function() ChamsContainer:Destroy() end) end
+
+        -- Clean World Entities explicitly
+        for _, gui in pairs(Internal.DroneGuis) do pcall(function() gui:Destroy() end) end
+        for _, h in pairs(Internal.DroneHighlights) do pcall(function() h:Destroy() end) end
+        for _, gui in pairs(Internal.BarrelGuis) do pcall(function() gui:Destroy() end) end
+        for _, h in pairs(Internal.BarrelHighlights) do pcall(function() h:Destroy() end) end
+
+        table.clear(Internal.DroneGuis); table.clear(Internal.DroneHighlights); table.clear(Internal.DroneObjects)
+        table.clear(Internal.BarrelGuis); table.clear(Internal.BarrelHighlights); table.clear(Internal.BarrelObjects)
+
+        -- Clean Grenade Tracers
+        for part, lines in pairs(Internal.GrenadeTracers) do
+            for _, l in ipairs(lines) do pcall(function() l:Remove() end) end
+        end
+        table.clear(Internal.GrenadeTracers)
+
+        -- [ GHOST NAMES FIX ] Explicitly cleanup Visual Registries
+        if State.VisualRegistry and State.VisualRegistry.Entities then
+            for entity, data in pairs(State.VisualRegistry.Entities) do
+                pcall(function()
+                    hide_all_vis(data)
+                    cleanup_instance(entity, data)
+                end)
+            end
+            table.clear(State.VisualRegistry.Entities)
+        end
+        if State.UniversalESPRegistry then
+            for player, drawings in pairs(State.UniversalESPRegistry) do
+                pcall(function()
+                    for _, d in pairs(drawings) do
+                        d.Visible = false
+                        d:Remove()
+                    end
+                end)
+            end
+            table.clear(State.UniversalESPRegistry)
+        end
+
+        -- Cleanup Drawing objects (FOV Circles
+        if State.DrawingRegistry then
+            for _, obj in ipairs(State.DrawingRegistry) do
+                pcall(function() obj.Visible = false; obj:Remove() end)
+            end
+            table.clear(State.DrawingRegistry)
+        end
+        pcall(function() if State.SilentFOV then State.SilentFOV.Visible = false; State.SilentFOV:Remove() end end)
+        pcall(function() if State.RageFOV then State.RageFOV.Visible = false; State.RageFOV:Remove() end end)
+        pcall(function() if State.LegitFOV then State.LegitFOV.Visible = false; State.LegitFOV:Remove() end end)
+        pcall(function() if State.PenText then State.PenText.Visible = false; State.PenText:Remove() end end)
+
+        -- 4. LIGHTING RESTORATION
+        pcall(function()
+            local lighting = game:GetService("Lighting")
+            if lighting then
+                -- Восстановление оригинальных параметров освещения
+                lighting.ClockTime = OriginalState.Lighting.ClockTime
+                lighting.Brightness = OriginalState.Lighting.Brightness
+                lighting.Ambient = OriginalState.Lighting.Ambient
+                lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
+                lighting.FogColor = OriginalState.Lighting.FogColor
+                lighting.FogEnd = OriginalState.Lighting.FogEnd
+                lighting.FogStart = OriginalState.Lighting.FogStart
+                lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
+                lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
+
+                -- Сброс атмосферы
+                local atm = lighting:FindFirstChildOfClass("Atmosphere")
+                if atm then
+                    atm.Density = OriginalState.Atmosphere.Density
+                    atm.Haze = OriginalState.Atmosphere.Haze
+                    atm.Glare = OriginalState.Atmosphere.Glare
+                end
+            end
+        end)
+        if BackgroundDim then pcall(function() BackgroundDim:Destroy() end) end
+        if scopeCrosshairGui then pcall(function() scopeCrosshairGui:Destroy() end) end
+        if Internal.DebugFrame then pcall(function() Internal.DebugFrame:Destroy() end) end
+
+        -- 5. RESET CONFIGS & PLAYER STATS
+        Config.Combat.ESP.Enabled = false
+        Config.Cheat.AutoFarm = false
+        Config.Cheat.Flying = false
+        Config.Cheat.Noclip = false
+        Config.Combat.Ragebot.Enabled = false
+        Config.Combat.Memesense.Enabled = false
+        Config.Combat.SilentAim.Enabled = false
+        -- Config Initializers
+        Config.Visuals.Chams.Enabled = false
+        Config.Visuals.WeaponChams.Enabled = false
+        Config.Visuals.CustomScope.RemoveScope = false
+        Config.Visuals.CustomScope.Crosshair.Enabled = false
+        Config.Cheat.SpeedHack.Enabled = false
+        Config.Cheat.Highjump.Enabled = false
+        Config.CarCrushers.AutoFarm = false
+        Config.WarTycoonFarm.Enabled = false
+
+        -- [ v36 FIX ] Раньше здесь принудительно ставился LockFirstPerson + MaxZoom=0/MinZoom=0
+        pcall(function()
+            local oc = OriginalState.Camera
+            local mode = oc.Mode or Enum.CameraMode.Classic
+            local maxD = oc.MaxDist
+            if not maxD or maxD <= 0 then maxD = 400 end
+            local minD = oc.MinDist
+            if not minD or minD < 0 then minD = 0.5 end
+            Core.Local.Player.CameraMode = mode
+            Core.Local.Player.CameraMaxZoomDistance = maxD
+            Core.Local.Player.CameraMinZoomDistance = minD
+        end)
+
+        pcall(stopFly)
+        pcall(stopPlayback)
+        pcall(clearPathLines)
+
+        local char = Core.Local.Player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.WalkSpeed = 16
+            hum.JumpPower = 50
+            hum.UseJumpPower = false
+            hum.PlatformStand = false
+        end
+
+        -- Cleanup world objects
+        for _, obj in pairs(State.Objects) do
+            pcall(function() if obj and obj.Parent then obj:Destroy() end end)
+        end
+        table.clear(State.Objects)
+    end)
+
+    pcall(function() _G.Log("System Unloaded Successfully.", Color3.fromRGB(0, 255, 0)) end)
+    task.wait(0.2)
+
+    -- Remove Globals
+    _G.Log = nil
+    _G.SelectTab = nil
+    _G.initSkinChangerUI = nil
+
+    pcall(function() ScreenGui:Destroy() end)
+end
+
+-- ЗАПУСК
+State.InputBeganConnection = Core.UserInputService.InputBegan:Connect(function(input, gpe)
+    if State.Unloading or not IsCurrentInstance() then return end
+    if State.BindingModule then
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            local modName = State.BindingModule
+            local keyCode = input.KeyCode
+            -- [ v67 ] снимаем режим ДО чистки биндов: иначе переназначение клавиши молча
+            -- сбрасывало Hold на общий Toggle, и в настройках снова появлялось "Toggle"
+            local prevBind = State.ModuleBinds and State.ModuleBinds[modName]
+            local prevMode = (type(prevBind) == "table" and prevBind.Mode) or State.BindingMode or "Toggle"
+
+            -- Удаляем старые бинды на эту клавишу
+            for name, bind in pairs(State.ModuleBinds) do
+                local bk = (type(bind) == "table") and bind.Key or bind
+                local coerced = Internal.CoerceKeyBind and Internal.CoerceKeyBind(bk, nil)
+                if coerced == keyCode then
+                    State.ModuleBinds[name] = nil
+                    if Config.ModuleBinds then Config.ModuleBinds[name] = nil end
+                end
+            end
+
+            -- Новый формат
+            local bindObj = { Key = keyCode, Mode = prevMode }
+            State.ModuleBinds[modName] = bindObj
+            if Config.ModuleBinds then Config.ModuleBinds[modName] = bindObj end
+
+            local data = State.Modules[modName]
+            if data and data.BindLabel then
+                data.BindLabel.Text = "[" .. keyCode.Name .. "]"
+            end
+
+            -- Обновляем текст в открытых настройках (плавающая панель)
+            if State.SelectedModule == modName and Internal.Celestial and Internal.Celestial.SettingsScroll then
+                local bSub = Internal.Celestial.SettingsScroll:FindFirstChild("BindSubCard")
+                if bSub then
+                    local bBtn = bSub:FindFirstChild("ModuleBindBtn", true)
+                    if bBtn then
+                        bBtn.Text = keyCode.Name
+                    end
+                end
+            end
+
+            State.BindingModule = nil
+            if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+        end
+        return
+    end
+
+    -- [ ФИКС БИНДОВ v35 ] Раньше `if not gpe then` блокировал бинды
+    local focused = Core.UserInputService:GetFocusedTextBox()
+    if not focused then
+        local keyName = input.KeyCode.Name
+        if State.Keys[keyName] ~= nil then State.Keys[keyName] = true end
+
+        -- Самолечение
+        if typeof(Config.Theme.Bind) ~= "EnumItem" then
+            Config.Theme.Bind = Internal.CoerceKeyBind and Internal.CoerceKeyBind(Config.Theme.Bind, Enum.KeyCode.RightShift)
+        end
+        if input.KeyCode == Config.Theme.Bind then
+            toggleMenu(not Internal.MainFrame.Visible)
+        end
+
+        if input.KeyCode == Config.Combat.Memesense.Keybind and Config.Combat.Memesense.Keybind ~= Enum.KeyCode.None then
+            local data = State.Modules["Aimbot"]
+            if data and data.Toggle then
+                data.Toggle()
+            end
+        end
+
+        -- Anti-Aim Manuals & Desync Hotkeys
+        local aaCfg = Config.Combat.AntiAim
+        if aaCfg and aaCfg.Enabled and aaCfg.Manuals and aaCfg.Manuals.Enabled then
+            if input.KeyCode == (aaCfg.Manuals.LeftKey or Enum.KeyCode.Z) then
+                if AntiAimState.ManualState == "Left" then
+                    AntiAimState.ManualState = "None"
+                    AntiAimState.ManualAngle = 0
+                else
+                    AntiAimState.ManualState = "Left"
+                    AntiAimState.ManualAngle = math.rad(90)
+                end
+            elseif input.KeyCode == (aaCfg.Manuals.RightKey or Enum.KeyCode.C) then
+                if AntiAimState.ManualState == "Right" then
+                    AntiAimState.ManualState = "None"
+                    AntiAimState.ManualAngle = 0
+                else
+                    AntiAimState.ManualState = "Right"
+                    AntiAimState.ManualAngle = math.rad(-90)
+                end
+            elseif input.KeyCode == (aaCfg.Manuals.BackKey or Enum.KeyCode.X) then
+                if AntiAimState.ManualState == "Back" then
+                    AntiAimState.ManualState = "None"
+                    AntiAimState.ManualAngle = 0
+                else
+                    AntiAimState.ManualState = "Back"
+                    AntiAimState.ManualAngle = math.rad(180)
+                end
+            elseif input.KeyCode == (aaCfg.Manuals.ResetKey or Enum.KeyCode.V) then
+                AntiAimState.ManualState = "None"
+                AntiAimState.ManualAngle = 0
+            end
+        end
+
+        if aaCfg and aaCfg.Enabled and aaCfg.Desync and aaCfg.Desync.Enabled then
+            if input.KeyCode == (aaCfg.Desync.InvertKey or Enum.KeyCode.F) then
+                AntiAimState.DesyncInvert = not AntiAimState.DesyncInvert
+            end
+        end
+
+        -- Проверка биндов модулей
+        for modName, bind in pairs(State.ModuleBinds) do
+            local bk = (type(bind) == "table") and bind.Key or bind
+            local keyCode = Internal.CoerceKeyBind and Internal.CoerceKeyBind(bk, nil)
+            local mode = (type(bind) == "table" and bind.Mode) or "Toggle"
+            if keyCode and input.KeyCode == keyCode then
+                local data = State.Modules[modName]
+                if data then
+                    if mode == "Hold" and data.Set then
+                        data.Set(true, true, nil, true)  -- [ v62 ] + уведомление в Island
+                    elseif data.Toggle then
+                        data.Toggle()
+                    end
+                end
+            end
+        end
+    end
+end)
+
+State.InputEndedConnection = Core.UserInputService.InputEnded:Connect(function(input)
+    if State.Unloading or not IsCurrentInstance() then return end
+    local keyName = input.KeyCode.Name
+    if State.Keys[keyName] ~= nil then State.Keys[keyName] = false end
+
+    local focused = Core.UserInputService:GetFocusedTextBox()
+    if not focused then
+        -- HOLD-режим биндов
+        for modName, bind in pairs(State.ModuleBinds) do
+            local bk = (type(bind) == "table") and bind.Key or bind
+            local keyCode = Internal.CoerceKeyBind and Internal.CoerceKeyBind(bk, nil)
+            if keyCode and input.KeyCode == keyCode and type(bind) == "table" and bind.Mode == "Hold" then
+                local data = State.Modules[modName]
+                if data and data.Set then data.Set(false, true, nil, true) end  -- [ v62 ]
+            end
+        end
+    end
+end)
+
+-- [ DYNAMIC ENTITY SCANNER (Blox Strike Fix) ]
+
+addEntityToEsp = function(character)
+    if not character or not character.Parent then return end
+    local lp = Core.Local.Player
+    if character == lp.Character then return end
+    if character.Name == lp.Name then return end
+
+    -- Ждем пока загрузятся основные части тела персонажа
+    local hrp = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+    if not hrp then
+        hrp = character:WaitForChild("HumanoidRootPart", 2) or character:WaitForChild("Head", 2)
+    end
+    if not hrp then return end
+
+    local hum = character:FindFirstChildOfClass("Humanoid")
+
+    -- Отслеживаем здоровье как через Humanoid
+    local lastHealth = character:GetAttribute("Health") or (hum and hum.Health) or 100
+
+    local function checkHitSound(currentHealth)
+        if not currentHealth then return end
+        if currentHealth < lastHealth and not isCharacterAlly(character) then
+            local root = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+            if root then
+                if _G.playHitSoundGlobal then
+                    pcall(function() _G.playHitSoundGlobal() end)
+                elseif playHitSound then
+                    pcall(playHitSound)
+                end
+                if TriggerHitMarkerEvent then pcall(TriggerHitMarkerEvent, root.Position) end
+            end
+            -- [ KILL DETECT ] враг здоров 0 или ниже
+            if currentHealth <= 0 and _G.OnEnemyKilled then
+                pcall(_G.OnEnemyKilled, character)
+            end
+        end
+        lastHealth = currentHealth
+    end
+
+    local conn
+    if hum then
+        conn = hum.HealthChanged:Connect(function(health)
+            if State.Unloading then if conn then conn:Disconnect() end return end
+            if not character.Parent then if conn then conn:Disconnect() end return end
+            checkHitSound(health)
+        end)
+    end
+
+    local attrConn
+    attrConn = character:GetAttributeChangedSignal("Health"):Connect(function()
+        if State.Unloading then if attrConn then attrConn:Disconnect() end return end
+        if not character.Parent then if attrConn then attrConn:Disconnect() end return end
+        checkHitSound(character:GetAttribute("Health"))
+    end)
+
+    local childConn = character.ChildAdded:Connect(function()
+        if ChamsPartsCache then ChamsPartsCache[character] = nil end
+    end)
+
+    -- Очистка соединений при удалении персонажа
+    character.AncestryChanged:Connect(function(_, p)
+        if not p then
+            if conn then pcall(function() conn:Disconnect() end) end
+            if attrConn then pcall(function() attrConn:Disconnect() end) end
+            if childConn then pcall(function() childConn:Disconnect() end) end
+        end
+    end)
+
+    getEntityVisuals(character)
+end
+
+task.spawn(function()
+    local charFolder = workspace:WaitForChild("Characters", 10)
+
+    local function scanRecursive(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Model") then
+                if child:GetAttribute("Health") ~= nil or child:FindFirstChild("Head") or child:FindFirstChild("HumanoidRootPart") then
+                    addEntityToEsp(child)
+                end
+                scanRecursive(child)
+            end
+        end
+    end
+
+    if charFolder then
+        scanRecursive(charFolder)
+        State.Connections.CharAdded = charFolder.ChildAdded:Connect(function(obj)
+            if State.Unloading or not IsCurrentInstance() then return end
+            if obj:IsA("Model") then
+                task.wait(0.1)  -- Wait for attributes/parts
+                addEntityToEsp(obj)
+            end
+        end)
+    end
+
+    -- Universal player support
+    State.Connections.PlayerAdded = Core.Services.Players.PlayerAdded:Connect(function(p)
+        State.Connections["CharAdded_" .. p.Name] = p.CharacterAdded:Connect(function(c)
+            if State.Unloading or not IsCurrentInstance() then return end
+            task.wait(0.5)
+            addEntityToEsp(c)
+        end)
+    end)
+
+    for _, p in Core.Services.Players:GetPlayers() do
+        if p.Character then addEntityToEsp(p.Character) end
+        if p ~= Core.Local.Player then
+            State.Connections["CharAdded_" .. p.Name] = p.CharacterAdded:Connect(function(c)
+                if State.Unloading or not IsCurrentInstance() then return end
+                task.wait(0.5)
+                addEntityToEsp(c)
+            end)
+        end
+    end
+
+    -- Auto start Vehicles Farm if enabled in config
+    if Config.VehiclesFarm and Config.VehiclesFarm.Enabled then
+        task.spawn(Automation.VehiclesFarmLoop)
+    end
+
+    -- Safety background scan
+    while task.wait(5) and ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        if charFolder then
+            scanRecursive(charFolder)
+        end
+    end
+end)
+
+pcall(function()
+    _G.SelectTab("Legit")
+    task.wait(0.5)  -- Soft delay to guarantee execution safety
+    updateAccentTheme("Sacred")  -- Run initial coloring only when ScreenGui completely exists!
+
+    -- [ НОВОЕ ] Keybind List
+    if Internal.BuildKeybindList then pcall(Internal.BuildKeybindList) end
+    if Internal.StartKeybindListLoop then pcall(Internal.StartKeybindListLoop) end
+
+    -- [ НОВОЕ ] Spectator List
+    if Internal.BuildSpectatorList then pcall(Internal.BuildSpectatorList) end
+    if Internal.StartSpectatorListLoop then pcall(Internal.StartSpectatorListLoop) end
+
+    -- [ НОВОЕ ] Radar
+    if Internal.BuildRadar then pcall(Internal.BuildRadar) end
+    if Internal.StartRadarLoop then pcall(Internal.StartRadarLoop) end
+
+    -- Auto-load default config if exists
+    task.spawn(function()
+        task.wait(1)
+        if isfile and isfile("Overmind/Configs/default.json") then
+            LoadConfig("default")
+        end
+    end)
+end)
