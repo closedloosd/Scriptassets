@@ -1479,6 +1479,18 @@ Internal.createSlider = function(parent, name, min, max, default, callback, disp
     --   opts = { Step = 0.1, Curve = 2.2 }  -> нелинейная шкала: у малых значений дорожка растянута,
     --                                          поэтому скорость можно выставить точно (7.1, а не рывками по 20)
     -- Без opts слайдер ведёт себя как раньше: целые значения, линейная шкала.
+    -- [ v79 ] ФИКС ПРОПАВШИХ СЛАЙДЕРОВ: шкалу ({ Step = .., Curve = .. }) и шаг (0.1)
+    -- почти везде передают СЕДЬМЫМ аргументом, на месте displayFunc. Тогда подпись
+    -- значения вызывала таблицу/число как функцию, слайдер падал ровно между
+    -- подписью и дорожкой (в интерфейсе оставалось одно название), а pcall вокруг
+    -- schema() обрывал ВСЕ следующие строки модуля. Теперь таблица/число в седьмом
+    -- слоте считается настройками шкалы, а не форматтером.
+    if type(displayFunc) == "table" or type(displayFunc) == "number" then
+        if opts == nil then opts = displayFunc end
+        displayFunc = nil
+    end
+    if type(displayFunc) ~= "function" then displayFunc = nil end
+
     local step, curve = 1, 1
     if type(opts) == "number" then
         step = opts
@@ -1506,7 +1518,10 @@ Internal.createSlider = function(parent, name, min, max, default, callback, disp
     local startValue = math.clamp(tonumber(default) or min, min, max)
 
     local function formatValue(v)
-        if displayFunc then return displayFunc(v) end
+        if displayFunc then
+            local okFmt, text = pcall(displayFunc, v)
+            if okFmt and text ~= nil then return tostring(text) end
+        end
         if decimals == 0 then return tostring(math.round(v)) end
         return string.format("%." .. decimals .. "f", v)
     end
