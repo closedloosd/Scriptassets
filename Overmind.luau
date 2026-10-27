@@ -672,6 +672,8 @@ Config = {
     CarCrushers = { AutoFarm = false, AutoBuy = true, CrusherName = "Pressure Pit", TargetCFrame = CFrame.new(205.893, 81.322, -532.979) },
     WarTycoonFarm = { Enabled = false, Speed = 200, Noclip = false, TargetCFrameStr = "CFrame.new(0, 0, 0)" },
     VehiclesFarm = { Enabled = false, AutoSpawn = true, Vehicle = "MRZR Buggy", TpAfterSpawn = false, TpCoords = "", TpDelay = 1.0 },
+    -- [ v80 ] Teleport spots: every spot keeps its own CFrame and its own key
+    Teleport = { Points = {} },
     WarTycoonBuild = {
         Enabled = false,
         Priority = "Money",  -- Money / House / Yard / Bunker / Cheapest
@@ -12370,6 +12372,117 @@ function Automation.TeleportToCoords(s, attempts)
     return false, lastErr
 end
 
+-- [ v80 ] TELEPORT SPOTS: named CFrame spots, each one with its own key (any game)
+Automation.TpBindButtons = {}
+
+Automation.TpPoints = function()
+    if type(Config.Teleport) ~= "table" then Config.Teleport = { Points = {} } end
+    if type(Config.Teleport.Points) ~= "table" then Config.Teleport.Points = {} end
+    return Config.Teleport.Points
+end
+
+Automation.TpFormatCFrame = function(cf)
+    if typeof(cf) ~= "CFrame" then return "" end
+    return string.format("CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f)", cf:GetComponents())
+end
+
+-- where the player is right now: the vehicle pivot while riding, otherwise the HRP
+Automation.TpGrabCFrame = function()
+    local veh = Automation.GetRidingVehicle and Automation.GetRidingVehicle()
+    if veh then
+        local ok, pivot = pcall(function() return veh:GetPivot() end)
+        if ok and pivot then return Automation.TpFormatCFrame(pivot) end
+    end
+    local lp = game:GetService("Players").LocalPlayer
+    local hrp = lp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then return Automation.TpFormatCFrame(hrp.CFrame) end
+    return nil
+end
+
+-- one key fires one thing: take that key away from the other spots
+Automation.TpClearKey = function(keyCode, keepIndex)
+    local name = typeof(keyCode) == "EnumItem" and keyCode.Name or tostring(keyCode or "")
+    if name == "" or name == "None" then return end
+    local cleared = false
+    for i, pt in ipairs(Automation.TpPoints()) do
+        if i ~= keepIndex and type(pt) == "table" and pt.Key == name then
+            pt.Key = nil
+            cleared = true
+        end
+    end
+    if cleared then Automation.TpRefreshBinds() end
+end
+
+Automation.TpAssignBind = function(index, keyCode)
+    if typeof(keyCode) ~= "EnumItem" then return false end
+    local pt = Automation.TpPoints()[index]
+    if type(pt) ~= "table" then return false end
+    Automation.TpClearKey(keyCode, index)
+    -- a module bind on the same key would fire as well: the spot wins, the module bind is dropped
+    if State.ModuleBinds then
+        for modName, bind in pairs(State.ModuleBinds) do
+            local bk = (type(bind) == "table") and bind.Key or bind
+            local code = Internal.CoerceKeyBind and Internal.CoerceKeyBind(bk, nil)
+            if code == keyCode then
+                State.ModuleBinds[modName] = nil
+                if Config.ModuleBinds then Config.ModuleBinds[modName] = nil end
+            end
+        end
+    end
+    pt.Key = keyCode.Name
+    Automation.TpRefreshBinds()
+    return true
+end
+
+Automation.TpClearBind = function(index)
+    local pt = Automation.TpPoints()[index]
+    if type(pt) ~= "table" then return end
+    pt.Key = nil
+    Automation.TpRefreshBinds()
+end
+
+Automation.TpRefreshBinds = function()
+    for idx, btn in pairs(Automation.TpBindButtons or {}) do
+        if btn.Parent then
+            local pt = Automation.TpPoints()[idx]
+            btn.Text = (type(pt) == "table" and pt.Key) or "NONE"
+        else
+            Automation.TpBindButtons[idx] = nil
+        end
+    end
+end
+
+Automation.TpGo = function(index)
+    local pt = Automation.TpPoints()[index]
+    if type(pt) ~= "table" then return false, "spot not found" end
+    if (pt.CFrame or "") == "" then return false, "coordinates are empty" end
+    if not Automation.ParseCFrameString(pt.CFrame) then return false, "could not parse the coordinates" end
+    local label = tostring(pt.Name or ("Point " .. index))
+    task.spawn(function()
+        local ok, err = Automation.TeleportToCoords(pt.CFrame, 4)
+        if ok then
+            if _G.Log then pcall(_G.Log, "TP: " .. label, Color3.fromRGB(0, 255, 150)) end
+        else
+            if _G.Log then pcall(_G.Log, "TP " .. label .. ": FAILED - " .. tostring(err), Color3.fromRGB(255, 80, 80)) end
+        end
+    end)
+    return true
+end
+
+-- called from the global InputBegan handler, so the menu can stay closed
+Automation.TpHandleKey = function(keyCode)
+    if typeof(keyCode) ~= "EnumItem" then return false end
+    local name = keyCode.Name
+    if name == "" or name == "Unknown" then return false end
+    for i, pt in ipairs(Automation.TpPoints()) do
+        if type(pt) == "table" and pt.Key == name then
+            Automation.TpGo(i)
+            return true
+        end
+    end
+    return false
+end
+
 -- [ v49 ] Спавн -> ждём посадку в технику -> TP -> (цикл ждёт смерть и повторяет)
 function Automation.TpAfterSpawnRoutine()
     local try = (Automation._tpSeq or 0) + 1
@@ -18266,6 +18379,226 @@ end, function(p)
     Internal.createiOSSwitch(rowHold, Config.Cheat.InfiniteJumpHold ~= false, function(v) Config.Cheat.InfiniteJumpHold = v end, rowHold:FindFirstChild("TextLabel"), nil, true)
 end)
 
+-- [ v80 ] TELEPORT: universal CFrame teleport, one card, many spots, one key per spot
+Automation.RenderTeleportPanel = function(p)
+    if not p then return end
+    Automation.TpBindButtons = {}
+    Automation.TpBindingIndex = nil
+
+    -- the generic module-bind row is useless here: this card binds every SPOT, not itself
+    local genericBind = p:FindFirstChild("BindSubCard")
+    if genericBind then genericBind:Destroy() end
+    for _, ch in ipairs(p:GetChildren()) do
+        if ch.Name == "TpPointCard" or ch.Name == "TpAddCard" or ch.Name == "TpHintLabel" or ch.Name == "TpEmptyLabel" then
+            ch:Destroy()
+        end
+    end
+
+    local points = Automation.TpPoints()
+
+    local function autosave()
+        if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+    end
+
+    local function notify(text, color)
+        if _G.Log then pcall(_G.Log, text, color or Color3.fromRGB(0, 255, 150)) end
+    end
+
+    local function makeBtn(parent, text, x, w, color, font)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, w, 0, 26)
+        b.Position = UDim2.new(0, x, 0, 0)
+        b.BackgroundColor3 = color or Color3.fromRGB(35, 36, 48)
+        b.Text = text
+        b.TextColor3 = Theme.Text
+        b.TextSize = 10
+        b.Font = font or Theme.FontMedium
+        b.Parent = parent
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        local stroke = Instance.new("UIStroke", b)
+        stroke.Color = Theme.Separator
+        stroke.Thickness = 1
+        return b
+    end
+
+    local function makeRow(parent, height)
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(1, 0, 0, height or 26)
+        f.BackgroundTransparency = 1
+        f.Parent = parent
+        return f
+    end
+
+    local function makeBox(parent, text, placeholder, size)
+        local t = Instance.new("TextBox")
+        t.Size = UDim2.new(1, 0, 1, 0)
+        t.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
+        t.Text = text or ""
+        t.PlaceholderText = placeholder or ""
+        t.TextColor3 = Theme.Text
+        t.TextSize = size or 10
+        t.Font = Theme.FontMedium
+        t.ClearTextOnFocus = false
+        t.TextXAlignment = Enum.TextXAlignment.Left
+        t.Parent = parent
+        Instance.new("UICorner", t).CornerRadius = UDim.new(0, 6)
+        Instance.new("UIStroke", t).Color = Theme.Separator
+        return t
+    end
+
+    for idx, pt in ipairs(points) do
+        if type(pt) ~= "table" then
+            pt = { Name = "Point " .. idx, CFrame = "", Key = nil }
+            points[idx] = pt
+        end
+
+        local card = Internal.createSubCard(p)
+        card.Name = "TpPointCard"
+        card.LayoutOrder = idx
+
+        -- [ header ] name + delete (needs two clicks)
+        local head = makeRow(card, 26)
+        local title = Instance.new("TextLabel")
+        title.Size = UDim2.new(1, -32, 1, 0)
+        title.BackgroundTransparency = 1
+        title.Text = string.upper(tostring(pt.Name or ("Point " .. idx)))
+        title.TextColor3 = Config.Theme.Accent
+        title.TextSize = 11
+        title.Font = Theme.FontBold
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Parent = head
+
+        local delBtn = makeBtn(head, "X", 0, 26, Color3.fromRGB(60, 28, 32), Theme.FontBold)
+        delBtn.Position = UDim2.new(1, -26, 0, 0)
+        delBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
+        local armed = false
+        delBtn.MouseButton1Click:Connect(function()
+            if not armed then
+                armed = true
+                delBtn.Text = "!"
+                task.delay(2, function()
+                    if delBtn.Parent then
+                        armed = false
+                        delBtn.Text = "X"
+                    end
+                end)
+                return
+            end
+            table.remove(points, idx)
+            autosave()
+            notify("TP: spot removed", Color3.fromRGB(255, 120, 130))
+            Automation.RenderTeleportPanel(p)
+        end)
+
+        -- [ name ]
+        local nameBox = makeBox(makeRow(card, 26), pt.Name or ("Point " .. idx), "Point name", 11)
+        nameBox.FocusLost:Connect(function()
+            local txt = nameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+            if #txt > 24 then txt = txt:sub(1, 24) end
+            pt.Name = (txt ~= "" and txt) or ("Point " .. idx)
+            nameBox.Text = pt.Name
+            title.Text = string.upper(pt.Name)
+            autosave()
+        end)
+
+        -- [ coordinates ] the CFrame string itself
+        local cfBox = makeBox(makeRow(card, 26), tostring(pt.CFrame or ""), "CFrame.new(x, y, z, ...)", 9)
+        cfBox.FocusLost:Connect(function()
+            local txt = cfBox.Text
+            if txt == "" or Automation.ParseCFrameString(txt) then
+                pt.CFrame = txt
+                autosave()
+                if txt ~= "" then notify("TP: coordinates saved", Color3.fromRGB(0, 255, 150)) end
+            else
+                cfBox.Text = tostring(pt.CFrame or "")
+                notify("TP: could not parse the coordinates", Color3.fromRGB(255, 80, 80))
+            end
+        end)
+
+        -- [ actions ] grab here / teleport / bind / clear bind
+        local acts = makeRow(card, 26)
+        local grabBtn = makeBtn(acts, "SET HERE", 0, 74, Color3.fromRGB(45, 38, 60))
+        local goBtn = makeBtn(acts, "TP", 80, 44, Color3.fromRGB(28, 92, 72), Theme.FontBold)
+        local bindBtn = makeBtn(acts, pt.Key or "NONE", 130, 92)
+        local clearBtn = makeBtn(acts, "X", 228, 26, Color3.fromRGB(60, 28, 32), Theme.FontBold)
+        clearBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
+        Automation.TpBindButtons[idx] = bindBtn
+
+        grabBtn.MouseButton1Click:Connect(function()
+            local s = Automation.TpGrabCFrame()
+            if s then
+                pt.CFrame = s
+                cfBox.Text = s
+                autosave()
+                notify("TP: position captured", Color3.fromRGB(0, 255, 150))
+            else
+                notify("TP: character not found", Color3.fromRGB(255, 80, 80))
+            end
+        end)
+
+        goBtn.MouseButton1Click:Connect(function()
+            local ok, err = Automation.TpGo(idx)
+            if not ok then notify("TP " .. tostring(pt.Name) .. ": " .. tostring(err), Color3.fromRGB(255, 170, 0)) end
+        end)
+
+        bindBtn.MouseButton1Click:Connect(function()
+            if Automation.TpBindingIndex == idx then
+                Automation.TpBindingIndex = nil
+                Automation.TpRefreshBinds()
+            else
+                Automation.TpBindingIndex = idx
+                bindBtn.Text = "..."
+            end
+        end)
+
+        clearBtn.MouseButton1Click:Connect(function()
+            Automation.TpClearBind(idx)
+            autosave()
+        end)
+    end
+
+    if #points == 0 then
+        local empty = Internal.createLabel(p, "No spots yet - press ADD POINT.")
+        empty.Name = "TpEmptyLabel"
+        empty.LayoutOrder = 900
+    end
+
+    local addCard = Internal.createSubCard(p)
+    addCard.Name = "TpAddCard"
+    addCard.LayoutOrder = 1000
+    local addBtn = makeBtn(addCard, "+ ADD POINT", 0, 150, Color3.fromRGB(35, 36, 48), Theme.FontBold)
+    addBtn.MouseButton1Click:Connect(function()
+        local s = Automation.TpGrabCFrame()
+        local n = #points + 1
+        points[n] = { Name = "Point " .. n, CFrame = s or "", Key = nil }
+        autosave()
+        if s then
+            notify("TP: point " .. n .. " added (current position saved)", Color3.fromRGB(0, 255, 150))
+        else
+            notify("TP: point " .. n .. " added - set coordinates manually", Color3.fromRGB(255, 170, 0))
+        end
+        Automation.RenderTeleportPanel(p)
+    end)
+
+    local hint = Instance.new("TextLabel")
+    hint.Name = "TpHintLabel"
+    hint.LayoutOrder = 1001
+    hint.Size = UDim2.new(1, 0, 0, 44)
+    hint.BackgroundTransparency = 1
+    hint.Text = "Universal: works in any game, on foot or in a vehicle. Every point keeps its own CFrame and its own key - click a key button, then press any keyboard key. The key fires even with the menu closed."
+    hint.TextColor3 = CelestialPalette.SubText
+    hint.TextSize = 10
+    hint.Font = Theme.FontMedium
+    hint.TextWrapped = true
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextYAlignment = Enum.TextYAlignment.Top
+    hint.Parent = p
+end
+
+createModule("Teleport", "Universal CFrame teleport. Save as many spots as you want - each spot keeps its own coordinates and its own key.", "Movement", nil, nil, function(p)
+    Automation.RenderTeleportPanel(p)
+end, true, "Universal")
+
 -- EXPLOIT
 
 
@@ -20197,6 +20530,19 @@ end
 -- ЗАПУСК
 State.InputBeganConnection = Core.UserInputService.InputBegan:Connect(function(input, gpe)
     if State.Unloading or not IsCurrentInstance() then return end
+    -- [ v80 ] TELEPORT: this keystroke is the new key of a spot
+    if Automation.TpBindingIndex then
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            local spot = Automation.TpBindingIndex
+            Automation.TpBindingIndex = nil
+            if Automation.TpAssignBind(spot, input.KeyCode) and Internal.ShowIslandNotification then
+                pcall(function() Internal.ShowIslandNotification("TP key: " .. input.KeyCode.Name, Config.Theme.Accent) end)
+            end
+            if Internal.ScheduleConfigAutosave then Internal.ScheduleConfigAutosave() end
+        end
+        return
+    end
+
     if State.BindingModule then
         if input.UserInputType == Enum.UserInputType.Keyboard then
             local modName = State.BindingModule
@@ -20217,6 +20563,8 @@ State.InputBeganConnection = Core.UserInputService.InputBegan:Connect(function(i
             end
 
             -- Новый формат
+            -- [ v80 ] the same key must not fire a teleport spot as well
+            if Automation.TpClearKey then Automation.TpClearKey(keyCode) end
             local bindObj = { Key = keyCode, Mode = prevMode }
             State.ModuleBinds[modName] = bindObj
             if Config.ModuleBinds then Config.ModuleBinds[modName] = bindObj end
@@ -20319,6 +20667,8 @@ State.InputBeganConnection = Core.UserInputService.InputBegan:Connect(function(i
                 end
             end
         end
+        -- [ v80 ] TELEPORT: spot keys (universal)
+        if Automation.TpHandleKey then Automation.TpHandleKey(input.KeyCode) end
     end
 end)
 
