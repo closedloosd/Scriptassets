@@ -91,6 +91,10 @@ if not ScreenGui.Parent then
 end
 
 -- GLOBAL HELPERS & TARGETING ENGINE
+-- [ v84 ] TeamCache объявлен ниже по файлу, а isCharacterAlly читает его раньше:
+-- без упреждающего объявления это было обращение к глобальной nil и
+-- ошибка "attempt to index a nil value" на шаге 4 проверки союзника.
+local TeamCache
 local function hasVestDetails(character)
     if not character then return false end
     local armor = character:FindFirstChild("CharacterArmor")
@@ -440,6 +444,163 @@ local OriginalState = {
     Scope = { Size = UDim2.new(1, 0, 1, 0) }
 }
 
+-- [ v84 ] Свет применяется только при изменении настроек.
+-- Раньше блок в RenderStepped переписывал ВСЕ свойства Lighting каждый кадр
+-- (60 раз в секунду) и заново создавал/удалял Atmosphere: движок пересчитывал
+-- освещение постоянно, на слабых ПК это давало просадки и микрофризы.
+-- Теперь значение пишется, только если оно отличается, а включённые оверрайды
+-- переприменяются 4 раза в секунду — этого хватает, чтобы не отдавать свет
+-- обратно игре после респавна или смены раунда.
+Internal.LightCache = {}
+
+function Internal.setLight(prop, value, force)
+    local cache = Internal.LightCache
+    if force or cache[prop] ~= value then
+        cache[prop] = value
+        Core.Services.Lighting[prop] = value
+    end
+end
+
+function Internal.applyLight()
+    local lighting = Core.Services.Lighting
+    local world = Config.Visuals.World
+    local atm = Config.Visuals.Atmosphere
+    local cache = Internal.LightCache
+    local now = os.clock()
+
+    -- Всё выключено и исходное состояние уже вернули — не трогаем движок вообще.
+    if not world.Enabled and not atm.Enabled and cache.__restored then return end
+    cache.__restored = nil
+
+    local force = (now - (cache.__at or 0)) >= 0.25
+    if force then cache.__at = now end
+    local set = Internal.setLight
+
+    if world.Enabled then
+        if world.Time.Enabled then
+            set("ClockTime", world.Time.Value, force)
+        else
+            set("ClockTime", OriginalState.Lighting.ClockTime, force)
+        end
+
+        if world.Brightness.Enabled then
+            set("Brightness", world.Brightness.Value, force)
+        else
+            set("Brightness", OriginalState.Lighting.Brightness, force)
+        end
+
+        if world.Colors.Enabled then
+            set("Ambient", world.Colors.Ambient, force)
+            set("OutdoorAmbient", world.Colors.Outdoor, force)
+        else
+            set("Ambient", OriginalState.Lighting.Ambient, force)
+            set("OutdoorAmbient", OriginalState.Lighting.OutdoorAmbient, force)
+        end
+
+        if world.NightMode.Enabled then
+            set("ColorShift_Bottom", world.NightMode.ColorA, force)
+            set("ColorShift_Top", world.NightMode.ColorB, force)
+        else
+            set("ColorShift_Bottom", OriginalState.Lighting.ColorShift_Bottom, force)
+            set("ColorShift_Top", OriginalState.Lighting.ColorShift_Top, force)
+        end
+
+        if world.WorldColor.Enabled then
+            local c = world.WorldColor.Color
+            set("Ambient", c, force)
+            set("OutdoorAmbient", c, force)
+            set("ColorShift_Bottom", c, force)
+            set("ColorShift_Top", c, force)
+            set("FogColor", c, force)
+        else
+            -- Возвращаем исходные цвета, только если их не перекрывают другие настройки
+            if not world.Colors.Enabled and not world.NightMode.Enabled then
+                set("Ambient", OriginalState.Lighting.Ambient, force)
+                set("OutdoorAmbient", OriginalState.Lighting.OutdoorAmbient, force)
+                set("ColorShift_Bottom", OriginalState.Lighting.ColorShift_Bottom, force)
+                set("ColorShift_Top", OriginalState.Lighting.ColorShift_Top, force)
+            end
+            set("FogColor", OriginalState.Lighting.FogColor, force)
+        end
+
+        -- Небо и атмосфера поверх мира
+        if world.SkyColor.Enabled then
+            local sc = world.SkyColor.Color
+            set("FogColor", sc, force)
+            local o_atm = Internal._skyAtm
+            if not o_atm or not o_atm.Parent then
+                o_atm = lighting:FindFirstChild("Overmind_SkyAtmosphere") or Instance.new("Atmosphere", lighting)
+                o_atm.Name = "Overmind_SkyAtmosphere"
+                Internal._skyAtm = o_atm
+                cache.__skyAtm = nil
+            end
+            if cache.__skyAtm ~= sc then
+                cache.__skyAtm = sc
+                o_atm.Color = sc
+                o_atm.Decay = sc
+            end
+        else
+            if Internal._skyAtm or lighting:FindFirstChild("Overmind_SkyAtmosphere") then
+                local o_atm = Internal._skyAtm or lighting:FindFirstChild("Overmind_SkyAtmosphere")
+                if o_atm then o_atm:Destroy() end
+                Internal._skyAtm = nil
+                cache.__skyAtm = nil
+            end
+            if not world.WorldColor.Enabled then
+                set("FogColor", OriginalState.Lighting.FogColor, force)
+            end
+        end
+
+    end
+
+    if atm.Enabled then
+        local lighting_atm = lighting:FindFirstChildOfClass("Atmosphere")
+        if lighting_atm and lighting_atm.Name ~= "Overmind_SkyAtmosphere" then
+            if cache.__atmDen ~= atm.Density then
+                cache.__atmDen = atm.Density
+                lighting_atm.Density = atm.Density
+            end
+            if cache.__atmHaze ~= atm.Haze then
+                cache.__atmHaze = atm.Haze
+                lighting_atm.Haze = atm.Haze
+            end
+            if cache.__atmGlare ~= atm.Glare then
+                cache.__atmGlare = atm.Glare
+                lighting_atm.Glare = atm.Glare
+            end
+        end
+
+        if atm.ColorCorrection.Enabled then
+            local cc = lighting:FindFirstChild("Overmind_CC")
+            if not cc then
+                cc = Instance.new("ColorCorrectionEffect", lighting)
+                cc.Name = "Overmind_CC"
+                cache.__ccSat, cache.__ccCon, cache.__ccTint = nil, nil, nil
+            end
+            if force or cache.__ccSat ~= atm.ColorCorrection.Saturation then
+                cache.__ccSat = atm.ColorCorrection.Saturation
+                cc.Saturation = atm.ColorCorrection.Saturation
+            end
+            if force or cache.__ccCon ~= atm.ColorCorrection.Contrast then
+                cache.__ccCon = atm.ColorCorrection.Contrast
+                cc.Contrast = atm.ColorCorrection.Contrast
+            end
+            local tint = atm.ColorCorrection.TintColor or Color3.new(1, 1, 1)
+            if force or cache.__ccTint ~= tint then
+                cache.__ccTint = tint
+                cc.TintColor = tint
+            end
+        else
+            local cc = lighting:FindFirstChild("Overmind_CC")
+            if cc then cc:Destroy() end
+        end
+    end
+
+    if not world.Enabled and not atm.Enabled then
+        cache.__restored = true
+    end
+end
+
 -- [ MEMESENSE PENETRATION ENGINE ]
 -- [ ADVANCED PENETRATION ENGINE (Wallbang) ]
 
@@ -529,7 +690,7 @@ local function GetPenetrationStats(origin, direction, maxPen, ignoreList, target
     return stats
 end
 
-local TeamCache = {}
+TeamCache = TeamCache or {}
 
 -- Anti-Cheat Bypass
 local function applyBypass()
@@ -1548,7 +1709,6 @@ Internal.createiOSSwitch = function(parent, default, callback, title, desc, isSu
     end
     return { Toggle = toggle, Set = setState }
 end
-
 
 Internal.createSubCard = function(parent)
     local Card = Instance.new("Frame")
@@ -3596,9 +3756,6 @@ do
     end
 end
 
-
-
-
 -- SCREEN GUI INITIALIZATION
 
 -- METATABLE HOOK FOR THIRD PERSON CAMERA (Блокировка зума от игры)
@@ -3627,7 +3784,6 @@ task.spawn(function()
         State._cameraNewIndexCold = mt
     end
 end)
-
 
 -- CUSTOM SCOPE CROSSHAIR GUI INITIALIZATION
 scopeCrosshairGui = game:GetService("CoreGui"):FindFirstChild("Overmind_GdcScopeCrosshair") or Instance.new("ScreenGui")
@@ -3659,7 +3815,6 @@ topLine.BorderSizePixel = 0
 bottomLine = Instance.new("Frame", scContainer)
 bottomLine.AnchorPoint = Vector2.new(0.5, 0)
 bottomLine.BorderSizePixel = 0
-
 
 local function updateAccentTheme(input)
     local c1, c2
@@ -4085,7 +4240,6 @@ pcall(function()
     State.CubePart = p
 end)
 
-
 local function toggleMenu(state)
     if not Internal.MainFrame then return end
 
@@ -4098,11 +4252,11 @@ local function toggleMenu(state)
 
     local blur = game:GetService("Lighting"):FindFirstChild("KubchikBlur") or BlurEffect
     local dim = Internal.MainFrame.Parent and Internal.MainFrame.Parent:FindFirstChild("KubchikDim")	if state then
-		Internal.CelestialPlaySound("open")
-		-- Разлочиваем мышь от камеры (работает в 1-м лице
-		pcall(function() Internal.MouseModal.Modal = true end)
-		-- Кастомный курсор меню (как в Memesens/Obsidian)
-		if Internal.SetMenuCursorVisible and (Config.Theme.Cursor or "Plus") ~= "None" then
+        Internal.CelestialPlaySound("open")
+        -- Разлочиваем мышь от камеры (работает в 1-м лице
+        pcall(function() Internal.MouseModal.Modal = true end)
+        -- Кастомный курсор меню (как в Memesens/Obsidian)
+        if Internal.SetMenuCursorVisible and (Config.Theme.Cursor or "Plus") ~= "None" then
             Internal.SetMenuCursorVisible(true)
             pcall(function() Internal.SetMenuCursorStyle(Config.Theme.Cursor or "Plus") end)
         end
@@ -4125,9 +4279,9 @@ local function toggleMenu(state)
             Internal.Celestial.SettingsScroll = nil
             State.SelectedModule = nil
         end	else
-		local tweenTime = 0.15
-		pcall(function() Internal.MouseModal.Modal = false end)
-		if Internal.SetMenuCursorVisible then Internal.SetMenuCursorVisible(false) end
+        local tweenTime = 0.15
+        pcall(function() Internal.MouseModal.Modal = false end)
+        if Internal.SetMenuCursorVisible then Internal.SetMenuCursorVisible(false) end
         -- Анимация закрытия (свертывание)
         Core.TweenService:Create(Internal.MainFrame, TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {GroupTransparency = 1, Size = UDim2.fromOffset(800, 500)}):Play()
 
@@ -4985,7 +5139,7 @@ end
 
 Internal.setupDrag = CelestialMakeDraggable  -- совместимость с плавающей консолью
 
-Content = nil  -- легаси-шим (остальные
+Content = nil  -- легаси-шим (остальные ссылки не используются)
 
 (function()
     -- [ ГЛАВНОЕ ОКНО (CanvasGroup + Pop-анимация) ]
@@ -6484,7 +6638,6 @@ _G.SelectTab = function(tabName, isFromSearch)
         end
     end
 
-
     -- [ v57 ] ОДНА «ПОЛОСКА» НА ВЕСЬ РЕЙЛ
     local railPill = Internal.Celestial.ActivePill
     local railY = Internal.Celestial.TabOffsets[tabName]
@@ -7161,7 +7314,6 @@ Internal.ResetModuleConfig = function(modName)
     end)
 end
 
-
 -- SYSTEM LOGS FRAME (Плавающее независимое окно по вашей просьбе)
 Internal.DebugFrame = Instance.new("Frame")
 Internal.DebugFrame.Name = "DebugFrame"
@@ -7529,31 +7681,11 @@ local function migrateOldConfigs()
 end
 migrateOldConfigs()
 
--- [ CUBE CHECKER & SHOW TARGET VISUALS ]
-do
-local CubePart = Instance.new("Part")
-CubePart.Name = "Overmind_CubeChecker"
-CubePart.Size = Vector3.new(1.5, 1.5, 0.01)
-CubePart.Anchored = true
-CubePart.CanCollide = false
-CubePart.Material = Enum.Material.Neon
-CubePart.Transparency = 0.5
-local CubeSelection = Instance.new("SelectionBox", CubePart)
-CubeSelection.LineThickness = 0.05
-CubeSelection.Transparency = 0.2
+-- [ v84 ] Здесь создавались Part, SelectionBox, линия и крестик, которые нигде
+-- не использовались (у них даже не выставлялся Parent), плюс второй PenText.
+-- Всё это жило в памяти до конца сессии — блок удалён.
 
-local TargetLine = createDrawing("Line", {Thickness = 1.5, Visible = false})
-
-local TargetCrosshair = {}
-for i = 1, 4 do
-    local l = createDrawing("Line", {Thickness = 2, Visible = false})
-    TargetCrosshair[i] = l
-end
-
-local PenText = createDrawing("Text", {Visible = false, Center = true, Size = 18, Font = 2, Outline = true})
-end
-
--- GLOBAL TEAM LOGIC HELPERS (Blox Strike Fix)
+-- GLOBAL TEAM LOGIC HELPERS (Blox Strike Fix)-- GLOBAL TEAM LOGIC HELPERS (Blox Strike Fix)
 do
     -- THE ULTIMATE SPAWN-POSITION TEAMCHECK BYPASS
     local function runSpawnTeamScanner()
@@ -7604,7 +7736,6 @@ end)
 end
 
 -- [ UNIFIED TARGET & TEAM SCANNER ENGINE ]
-
 
 -- [ WEAPON & RAGEBOT LOGIC FROM MEMESENS ]
 
@@ -8949,35 +9080,6 @@ State.Connections.MemesenseRender = Core.Services.RunService.RenderStepped:Conne
         end)
     end
 
-    -- 2. Cube Checker Visual
-    if cfg.Enabled and cfg.CubeChecker and State.CubePart then
-        if not State.CubeRayParams then
-            State.CubeRayParams = RaycastParams.new()
-            State.CubeRayParams.FilterType = Enum.RaycastFilterType.Exclude
-        end
-        State.CubeRayParams.FilterDescendantsInstances = {Core.Local.Player.Character, cam}
-
-        local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * cfg.MaxRayDist, State.CubeRayParams)
-        if res then
-            State.CubePart.Parent = workspace
-            State.CubePart.Size = Vector3.new(cfg.CubeSize, cfg.CubeSize, 0.01)
-            State.CubePart.CFrame = CFrame.new(res.Position, res.Position + res.Normal)
-            State.CubePart.Transparency = 0
-            local gui = State.CubePart:FindFirstChildOfClass("SurfaceGui")
-            local frame = gui and gui:FindFirstChildOfClass("Frame")
-            if frame then
-                local col = cfg.CubeColor
-                if cfg.CubeRainbow then
-                    col = Color3.fromHSV(tick() % 5 / 5, 1, 1)
-                end
-                frame.BackgroundColor3 = col
-            end
-        else
-            State.CubePart.Transparency = 1
-        end
-    elseif State.CubePart then
-        State.CubePart.Transparency = 1
-    end
 end)
 
 -- World & Lighting Logic Loop (Moved to RenderStepped for reliability)
@@ -8990,9 +9092,6 @@ task.spawn(function()
         task.wait(0.1)
     end
 end)
-
-
-
 
 -- ЛОГИКА ИЗ Logic.txt (Fly
 
@@ -9283,14 +9382,28 @@ State.Connections.NoclipLoop = Core.RunService.Stepped:Connect(function()
     local char = Core.LocalPlayer.Character
     if not char then return end
     local shouldNoclip = Config.Cheat.Noclip or (Config.Cheat.FlyNoclip and Config.Cheat.Flying)
-    if shouldNoclip then
+    if not shouldNoclip then return end
+
+    -- [ v84 ] GetDescendants() на персонажа в каждом физическом шаге — постоянные
+    -- аллокации ради ~30 частей. Список частей обновляется раз в секунду, а
+    -- CanCollide пишется только когда он реально включён.
+    local cache = Automation._noclipList
+    if not cache or cache.char ~= char or (os.clock() - cache.at) > 1 then
+        local parts = {}
         for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                if Config.Cheat.NoclipRestore ~= false and Automation._noclipSaved[part] == nil then
-                    Automation._noclipSaved[part] = part.CanCollide
-                end
-                part.CanCollide = false
+            if part:IsA("BasePart") then parts[#parts + 1] = part end
+        end
+        cache = { char = char, parts = parts, at = os.clock() }
+        Automation._noclipList = cache
+    end
+
+    local saveOrig = Config.Cheat.NoclipRestore ~= false
+    for _, part in ipairs(cache.parts) do
+        if part.Parent then
+            if saveOrig and Automation._noclipSaved[part] == nil then
+                Automation._noclipSaved[part] = part.CanCollide
             end
+            if part.CanCollide then part.CanCollide = false end
         end
     end
 end)
@@ -13992,7 +14105,6 @@ function Automation.SpawnVehicle(name)
             end
         end
 
-
         safeLog("Vehicles Farm: Spawning " .. name, Color3.fromRGB(255, 255, 0))
 
         -- Снимок моделей workspace ДО спавна
@@ -14394,7 +14506,6 @@ end, function(p)
     Internal.createiOSSwitch(Internal.createSettingRow(sub, "Outline"), cfg.Outline, function(v) cfg.Outline = v end, nil, nil, true)
     Internal.createSlider(sub, "Transparency", 0, 10, cfg.FillTransparency * 10, function(v) cfg.FillTransparency = v / 10 end, 0.1)
 end, nil, "Universal")
-
 
 -- Speed and Highjump Logic
 task.spawn(function()
@@ -14843,6 +14954,16 @@ local function getChamsMaterial(str)
     else return Enum.Material.Neon end
 end
 
+-- [ v84 ] Возврат исходного материала одной части (общий обработчик для pcall)
+local function restoreChamsPart(obj)
+    if obj:IsA("BasePart") and obj:GetAttribute("OrigMat") then
+        obj.Material = Enum.Material[obj:GetAttribute("OrigMat")]
+        obj.Color    = obj:GetAttribute("OrigColor") or obj.Color
+        obj:SetAttribute("OrigMat",   nil)
+        obj:SetAttribute("OrigColor", nil)
+    end
+end
+
 local function removeChams(char)
     if HighlightsCache[char] then
         pcall(function() if HighlightsCache[char].visible then HighlightsCache[char].visible:Destroy() end end)
@@ -14853,14 +14974,9 @@ local function removeChams(char)
     ChamsDamageFlash[char] = nil
     if not char then return end
     for _, obj in ipairs(char:GetDescendants()) do
-        pcall(function()
-            if obj:IsA("BasePart") and obj:GetAttribute("OrigMat") then
-                obj.Material = Enum.Material[obj:GetAttribute("OrigMat")]
-                obj.Color    = obj:GetAttribute("OrigColor") or obj.Color
-                obj:SetAttribute("OrigMat",   nil)
-                obj:SetAttribute("OrigColor", nil)
-            end
-        end)
+        -- [ v84 ] было pcall(function() ... end) на каждую часть: замыкание и
+        -- таблица на каждую часть при каждом снятии chams. Одна общая функция дешевле.
+        pcall(restoreChamsPart, obj)
     end
 end
 
@@ -15244,119 +15360,176 @@ end
 local activeWeaponHighlights = {}
 local WeaponSnapshot = {}
 
+-- [ v84 ] Вьюмодель ищется не каждый кадр, а раз в 0.25 с: камера меняется редко.
+function Internal.findWeaponModel(cam)
+    for _, child in ipairs(cam:GetChildren()) do
+        if child:IsA("Model") and child.Name ~= "Viewmodel" and not child.Name:lower():find("light") then
+            local w = child:FindFirstChild("Weapon") or child
+            if w:IsA("Model") and w.Name ~= "Viewmodel" and not w.Name:lower():find("light") then
+                return w
+            end
+        end
+    end
+    return nil
+end
+
+-- [ v84 ] Раньше текстуры и декали прятались через Parent = nil и НЕ возвращались
+-- при выключении модуля: оружие оставалось «голым» до респавна. Теперь каждый
+-- спрятанный объект запоминается в snapshot и возвращается на место.
+function Internal.applyWeaponPart(part, chamsMode, chamsColor, transparency, reflectance)
+    if chamsMode == "Highlight" then
+        local h = part:FindFirstChild("WeaponChamsHighlight")
+        if not h then
+            h = Instance.new("Highlight")
+            h.Name = "WeaponChamsHighlight"
+            h.Adornee = part
+            h.Parent = part
+            h.FillTransparency = 0
+            h.OutlineTransparency = 1
+            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            table.insert(activeWeaponHighlights, h)
+        end
+        h.FillColor = chamsColor
+        return true
+    end
+
+    local h = part:FindFirstChild("WeaponChamsHighlight")
+    if h then h:Destroy() end
+
+    local snap = WeaponSnapshot[part]
+    if not snap then
+        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
+        snap = {
+            Material = part.Material,
+            Color = part.Color,
+            Transparency = part.Transparency,
+            Reflectance = part.Reflectance,
+            SA = sa,
+            SA_Parent = sa and sa.Parent or nil,
+        }
+        WeaponSnapshot[part] = snap
+    end
+
+    if chamsMode ~= "Neon" then
+        for _, v in ipairs(part:GetChildren()) do
+            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
+                snap.Hidden = snap.Hidden or {}
+                snap.Hidden[v] = v.Parent
+                v.Parent = nil
+            end
+        end
+    end
+
+    if chamsMode == "Glass" then
+        part.Material = Enum.Material.Glass
+        part.Color = chamsColor
+        part.Transparency = transparency
+    elseif chamsMode == "ForceField" then
+        part.Material = Enum.Material.ForceField
+        part.Color = chamsColor
+        part.Transparency = 0
+    elseif chamsMode == "Metal" then
+        part.Material = Enum.Material.Metal
+        part.Color = chamsColor
+        part.Reflectance = reflectance
+        part.Transparency = 0
+    elseif chamsMode == "Neon" then
+        part.Material = Enum.Material.Neon
+        part.Color = chamsColor
+        part.Transparency = 0
+        for _, v in ipairs(part:GetChildren()) do
+            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
+                snap.Hidden = snap.Hidden or {}
+                snap.Hidden[v] = v.Parent
+                v.Parent = nil
+            end
+        end
+    end
+    return true
+end
+
+function Internal.restoreWeaponPart(part, snap)
+    if not part or not part.Parent or not snap then return end
+    part.Material = snap.Material
+    part.Color = snap.Color
+    part.Transparency = snap.Transparency
+    part.Reflectance = snap.Reflectance
+    if snap.SA and snap.SA_Parent then snap.SA.Parent = snap.SA_Parent end
+    if snap.Hidden then
+        for obj, parent in pairs(snap.Hidden) do
+            if obj and parent then obj.Parent = parent end
+        end
+        snap.Hidden = nil
+    end
+end
+
 local function updateWeaponChams()
     local cfg = Config.Visuals.WeaponChams
     local cam = workspace.CurrentCamera
     if not cam then return end
 
-    local chamsEnabled = cfg.Enabled
-    local chamsMode = cfg.Material or "Glass"
-    local chamsColor = cfg.Color or Color3.fromRGB(0, 150, 255)
-
-    local weaponModel = nil
-    for _, child in ipairs(cam:GetChildren()) do
-        if child:IsA("Model") and child.Name ~= "Viewmodel" and not child.Name:lower():find("light") then
-            local w = child:FindFirstChild("Weapon") or child
-            if w:IsA("Model") and w.Name ~= "Viewmodel" and not w.Name:lower():find("light") then
-                weaponModel = w
-                break
-            end
-        end
+    local chamsEnabled = cfg.Enabled and not State.Unloading
+    local cache = Internal.WeaponChamsCache
+    if not cache then
+        cache = {}
+        Internal.WeaponChamsCache = cache
     end
 
-    if not chamsEnabled or not weaponModel or State.Unloading then
+    if not chamsEnabled then
+        -- Нечего восстанавливать — выходим, не создавая таблиц на каждом кадре.
+        if not cache.dirty then return end
+        cache.dirty = nil
+        cache.model = nil
         for _, h in pairs(activeWeaponHighlights) do
             if h and h.Parent then h:Destroy() end
         end
-        activeWeaponHighlights = {}
-
-        -- Восстановление оригинальных свойств из snapshot (для корректного анинжекта)
+        table.clear(activeWeaponHighlights)
         for part, s in pairs(WeaponSnapshot) do
-            pcall(function()
-                if part and part.Parent then
-                    part.Material = s.Material
-                    part.Color = s.Color
-                    part.Transparency = s.Transparency
-                    part.Reflectance = s.Reflectance
-                    if s.SA and s.SA_Parent then s.SA.Parent = s.SA_Parent end
-                end
-            end)
+            pcall(Internal.restoreWeaponPart, part, s)
         end
         table.clear(WeaponSnapshot)
         return
     end
 
-    local currentNeonParts = {}
+    local now = os.clock()
+    local weaponModel = cache.model
+    if not weaponModel or not weaponModel.Parent or now - (cache.modelAt or 0) >= 0.25 then
+        weaponModel = Internal.findWeaponModel(cam)
+        cache.model = weaponModel
+        cache.modelAt = now
+    end
+    if not weaponModel then return end
+
+    local chamsMode = cfg.Material or "Glass"
+    local chamsColor = cfg.Color or Color3.fromRGB(0, 150, 255)
+    local transparency = cfg.Transparency or 0.4
+    local reflectance = cfg.Reflectance or 1.0
+
+    -- Всё то же самое, что в прошлый проход — второй проход не нужен.
+    -- Раз в секунду перепроверяем: у оружия могли появиться новые части.
+    if cache.dirty and cache.model == weaponModel and cache.mode == chamsMode
+        and cache.color == chamsColor and cache.transparency == transparency
+        and cache.reflectance == reflectance and now - (cache.applyAt or 0) < 1 then
+        return
+    end
+    cache.model, cache.mode, cache.color = weaponModel, chamsMode, chamsColor
+    cache.transparency, cache.reflectance, cache.applyAt = transparency, reflectance, now
+    cache.dirty = true
+
+    local currentNeonParts = cache.parts
+    if not currentNeonParts then
+        currentNeonParts = {}
+        cache.parts = currentNeonParts
+    end
+    table.clear(currentNeonParts)
 
     for _, part in ipairs(weaponModel:GetDescendants()) do
         if part:IsA("BasePart") and part.Name ~= "Hitbox" and part.Name ~= "HumanoidRootPart" then
             if part.Name == "ViewmodelLight" or part:FindFirstAncestor("ViewmodelLight") or part:FindFirstAncestor("Viewmodel") then
                 continue
             end
-            pcall(function()
-                if chamsMode == "Highlight" then
-                    currentNeonParts[part] = true
-                    local h = part:FindFirstChild("WeaponChamsHighlight")
-                    if not h then
-                        h = Instance.new("Highlight")
-                        h.Name = "WeaponChamsHighlight"
-                        h.Adornee = part
-                        h.Parent = part
-                        h.FillTransparency = 0
-                        h.OutlineTransparency = 1
-                        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                        table.insert(activeWeaponHighlights, h)
-                    end
-                    h.FillColor = chamsColor
-                else
-                    local h = part:FindFirstChild("WeaponChamsHighlight")
-                    if h then h:Destroy() end
-
-                    if not WeaponSnapshot[part] then
-                        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
-                        WeaponSnapshot[part] = {
-                            Material = part.Material,
-                            Color = part.Color,
-                            Transparency = part.Transparency,
-                            Reflectance = part.Reflectance,
-                            SA = sa,
-                            SA_Parent = sa and sa.Parent or nil
-                        }
-                    end
-
-                    if chamsMode ~= "Neon" then
-                        for _, v in ipairs(part:GetChildren()) do
-                            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
-                                pcall(function() v.Parent = nil end)  -- Reversible hide
-                            end
-                        end
-                    end
-
-                    if chamsMode == "Glass" then
-                        part.Material = Enum.Material.Glass
-                        part.Color = chamsColor
-                        part.Transparency = cfg.Transparency or 0.4
-                    elseif chamsMode == "ForceField" then
-                        part.Material = Enum.Material.ForceField
-                        part.Color = chamsColor
-                        part.Transparency = 0
-                    elseif chamsMode == "Metal" then
-                        part.Material = Enum.Material.Metal
-                        part.Color = chamsColor
-                        part.Reflectance = cfg.Reflectance or 1.0
-                        part.Transparency = 0
-                    elseif chamsMode == "Neon" then
-                        part.Material = Enum.Material.Neon
-                        part.Color = chamsColor
-                        part.Transparency = 0
-                        for _, v in ipairs(part:GetChildren()) do
-                            if v:IsA("SurfaceAppearance") or v:IsA("Texture") or v:IsA("Decal") then
-                                pcall(function() v.Parent = nil end)
-                            end
-                        end
-                    end
-                end
-            end)
+            pcall(Internal.applyWeaponPart, part, chamsMode, chamsColor, transparency, reflectance)
+            if chamsMode == "Highlight" then currentNeonParts[part] = true end
         end
     end
 
@@ -15376,19 +15549,24 @@ function State.removeAllWeaponChams()
     updateWeaponChams()
 end
 
-
 local function updateViewmodelOffset()
     local cfg = Config.Visuals.World.Viewmodel
     if not cfg.Enabled or not cfg.CustomOffsets then return end
     local cam = workspace.CurrentCamera
     if not cam then return end
+    -- [ v84 ] Обход камеры и запись Vector3 не нужны 60 раз в секунду: смещение
+    -- меняется только ползунком в меню. 10 Гц + сравнение перед записью.
+    local vmNow = os.clock()
+    if vmNow - (State._vmOffAt or 0) < 0.1 then return end
+    State._vmOffAt = vmNow
+    local target = Vector3.new(cfg.X, cfg.Y, cfg.Z)
     for _, child in cam:GetChildren() do
         if child:IsA("Model") then
             local stats = child:FindFirstChild("Stats")
             if stats then
                 local def = stats:FindFirstChild("Default")
-                if def and def:IsA("Vector3Value") then
-                    def.Value = Vector3.new(cfg.X, cfg.Y, cfg.Z)
+                if def and def:IsA("Vector3Value") and def.Value ~= target then
+                    def.Value = target
                 end
             end
         end
@@ -16004,7 +16182,9 @@ local function updateZone(parent, isMolly)
             task.wait(0.1)
         end
         for _, c in cylinders do c:Destroy() end
-        VisualRegistry.Zones[parent] = nil
+        -- [ v84 ] было просто VisualRegistry (не определено) -> ошибка в потоке
+        -- каждый раз, когда дым/молотов исчезал, и запись в Zones не очищалась.
+        State.VisualRegistry.Zones[parent] = nil
     end)
 end
 
@@ -16076,55 +16256,48 @@ local function drawAdvancedTargetIndicator(player, char, root, data, esp, cam, d
     end
 end
 
-local BulletImpactV1Part = Instance.new("Part")
-BulletImpactV1Part.Name = "CubeChecker_Physical"
-BulletImpactV1Part.Size = Vector3_new(1.5, 1.5, 0.01)
-BulletImpactV1Part.Anchored = true
-BulletImpactV1Part.CanCollide = false
-BulletImpactV1Part.CanQuery = false
-BulletImpactV1Part.CanTouch = false
-BulletImpactV1Part.Material = Enum.Material.Neon
-BulletImpactV1Part.Transparency = 0.98
-BulletImpactV1Part.Parent = workspace
-
-local selectionBox = Instance.new("SelectionBox")
-selectionBox.Adornee = BulletImpactV1Part
-selectionBox.Color3 = Color3.fromRGB(255, 0, 0)
-selectionBox.LineThickness = 0.04
-selectionBox.Transparency = 0.2
-selectionBox.Parent = BulletImpactV1Part
-
-local impactRayParams = RaycastParams.new()
-impactRayParams.FilterType = Enum.RaycastFilterType.Exclude
-impactRayParams.IgnoreWater = true
-
+-- [ v84 ] Единственная реализация Cube Checker.
+-- Их было три сразу: модуль Memesense, эта функция со своим невидимым Part
+-- (он висел в workspace всегда) и inline-блок в MainRender. При включении
+-- появлялись два квадрата, а луч в цель считался 2-3 раза за кадр.
 local function updateCubeChecker(dt)
+    local cfg = Config.Combat.Memesense
+    local p = State.CubePart
+    if not p then return end
+
+    if not (cfg.Enabled and cfg.CubeChecker) then
+        if p.Parent then p.Parent = nil end
+        return
+    end
+
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local cfg = Config.Combat.Memesense
-    local enabled = cfg.Enabled and cfg.CubeChecker
-    BulletImpactV1Part.Parent = enabled and workspace or nil
 
-    if enabled then
-        local sizeVal = cfg.CubeSize or 1.5
-        local maxDist = cfg.MaxRayDist or 20
-        BulletImpactV1Part.Size = Vector3_new(sizeVal, sizeVal, 0.01)
+    local size = cfg.CubeSize or 1.5
+    p.Size = Vector3.new(size, size, 0.01)
 
-        local userColor = cfg.CubeColor or Color3.fromRGB(255, 0, 0)
-        if cfg.CubeRainbow then
-            userColor = Color3.fromHSV((tick() % 5) / 5, 1, 1)
-        end
+    local col = cfg.CubeColor or Color3.fromRGB(255, 0, 0)
+    if cfg.CubeRainbow then col = Color3.fromHSV((tick() % 5) / 5, 1, 1) end
+    if State.MemesenseTarget and cfg.AimbotEnabled then col = Color3.fromRGB(0, 255, 0) end
+    local gui = p:FindFirstChildOfClass("SurfaceGui")
+    local frame = gui and gui:FindFirstChildOfClass("Frame")
+    if frame then frame.BackgroundColor3 = col end
 
-        local origin = cam.CFrame.Position
-        local direction = cam.CFrame.LookVector * maxDist
-        impactRayParams.FilterDescendantsInstances = {Core.Local.Player.Character, BulletImpactV1Part}
-        local result = workspace:Raycast(origin, direction, impactRayParams)
-        if result then
-            BulletImpactV1Part.CFrame = CFrame.new(result.Position, result.Position + result.Normal)
-        else
-            BulletImpactV1Part.CFrame = CFrame.new(origin + direction)
-        end
-        selectionBox.Color3 = userColor
+    local params = State.CubeRayParams
+    if not params then
+        params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        State.CubeRayParams = params
+    end
+    params.FilterDescendantsInstances = { Core.Local.Player.Character, p }
+    local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * (cfg.MaxRayDist or 20), params)
+    if res then
+        p.CFrame = CFrame.lookAt(res.Position + (res.Normal * 0.01), res.Position + res.Normal)
+        p.Transparency = 0
+        if p.Parent ~= workspace then p.Parent = workspace end
+    else
+        p.Transparency = 1
+        if p.Parent then p.Parent = nil end
     end
 end
 
@@ -16305,6 +16478,12 @@ local function updateHud()
         HudText.aa    = createDrawing("Text", { Size = 14, Center = false, Outline = true, Font = 2 })
         HudText.speed = createDrawing("Text", { Size = 14, Center = false, Outline = true, Font = 2 })
     end
+    -- [ v84 ] Две string.format-строки на каждый кадр ни к чему: отладочный
+    -- HUD читается глазом и обновляется 10 раз в секунду.
+    local hudNow = os.clock()
+    if hudNow - (State._hudAt or 0) < 0.1 then return end
+    State._hudAt = hudNow
+
     local cam = workspace.CurrentCamera
 
     if cfgHud.AntiAim and cam then
@@ -16511,8 +16690,6 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                 end
             end
         end
-
-        State.frameCounter = (State.frameCounter or 0) + 1  -- [ ОПТИМИЗАЦИЯ ] без дубля
     end
 
     if not cam then return end
@@ -16547,8 +16724,21 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
         local myCharAim = Core.Local.Player and Core.Local.Player.Character
         local myRootAim = myCharAim and (myCharAim:FindFirstChild("HumanoidRootPart") or myCharAim:FindFirstChild("Head"))
 
+        -- [ v84 ] Персонаж проходит и по списку Players, и по папке Characters:
+        -- без этой проверки updateChams (луч видимости + запись Highlight)
+        -- выполнялся дважды за кадр на каждого игрока.
+        local seenChams = State.ChamsSeen
+        if not seenChams then
+            seenChams = {}
+            State.ChamsSeen = seenChams
+        else
+            table.clear(seenChams)
+        end
+
         local function checkCharForChams(ch)
             if not ch or ch == Core.Local.Player.Character then return end
+            if seenChams[ch] then return end
+            seenChams[ch] = true
             if ch:GetAttribute("Dead") == true then
                 removeChams(ch)
                 return
@@ -16646,7 +16836,7 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
     updateHud()  -- [ v31 ] HUD
     maybeDumpGameState()  -- [ v31 ] разовый дамп GameState по тогглу (Misc)
 
-    -- Target Finding (Optimization
+    -- Target Finding (раз в 2 кадра, если аимбот выключен)
     local aimbotActive = Config.Combat.Memesense.Enabled
     if aimbotActive or State.frameCounter % 2 == 0 then
         FindAllTargets()
@@ -16692,161 +16882,45 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
     if State.PenText then
         if Config.Combat.Memesense.Enabled and Config.Combat.Memesense.ShowPenetration then
             State.PenText.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2 - 70)
-            local stats = GetPenetrationStats(cam.CFrame.Position, cam.CFrame.LookVector, 4)
-            if stats.Success then
-                State.PenText.Visible = true
-                State.PenText.Text = string.format("WALLBANG: YES\n(%.1f studs)", stats.TotalThickness or 0)
-                State.PenText.Color = Color3.fromRGB(0, 255, 0)
-            else
-                State.PenText.Visible = true
-                State.PenText.Text = "WALLBANG: NO"
-                State.PenText.Color = Color3.fromRGB(255, 0, 0)
+            -- [ v84 ] Полная симуляция пробитий (до 4 лучей) считалась каждый кадр.
+            -- Тексту WALLBANG хватает 5 обновлений в секунду.
+            State._penAccum = (State._penAccum or 1) + dt
+            if State._penAccum >= 0.2 then
+                State._penAccum = 0
+                local stats = GetPenetrationStats(cam.CFrame.Position, cam.CFrame.LookVector, 4)
+                if stats.Success then
+                    State.PenText.Visible = true
+                    State.PenText.Text = string.format("WALLBANG: YES\n(%.1f studs)", stats.TotalThickness or 0)
+                    State.PenText.Color = Color3.fromRGB(0, 255, 0)
+                else
+                    State.PenText.Visible = true
+                    State.PenText.Text = "WALLBANG: NO"
+                    State.PenText.Color = Color3.fromRGB(255, 0, 0)
+                end
             end
         else
             State.PenText.Visible = false
         end
     end
 
-    -- Cube Checker Update
-    pcall(function()
-        local cfg = Config.Combat.Memesense
-        local p = State.CubePart
-        if not p then return end
-        if cfg.Enabled and cfg.CubeChecker then
-            local size = cfg.CubeSize
-            p.Size = Vector3.new(size, size, 0.01)
-            local col = cfg.CubeColor
-            if cfg.CubeRainbow then col = Color3.fromHSV((tick() % 5) / 5, 1, 1) end
-            if State.MemesenseTarget and cfg.AimbotEnabled then col = Color3.fromRGB(0, 255, 0) end
-            p:FindFirstChildOfClass("SurfaceGui").Frame.BackgroundColor3 = col
+    -- Lighting & Atmosphere Update (пишет только изменившееся, см. Internal.applyLight)
+    pcall(Internal.applyLight)
 
-            -- [ ОПТИМИЗАЦИЯ ] RaycastParams создаётся один раз
-            if not State.CubeRayParams then
-                State.CubeRayParams = RaycastParams.new()
-                State.CubeRayParams.FilterType = Enum.RaycastFilterType.Exclude
-            end
-            local params = State.CubeRayParams
-            params.FilterDescendantsInstances = {Core.Local.Player.Character, p}
-            local res = workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * cfg.MaxRayDist, params)
-            if res then
-                p.Parent = workspace
-                p.CFrame = CFrame.lookAt(res.Position + (res.Normal * 0.01), res.Position + res.Normal)
-            else p.Parent = nil end
-        else p.Parent = nil end
-    end)
-
-    -- Lighting & Atmosphere Update
-    pcall(function()
-        local lighting = Core.Services.Lighting
-        local world = Config.Visuals.World
-        local atm = Config.Visuals.Atmosphere
-
-        if world.Enabled then
-            -- 1. Clock Time
-            if world.Time.Enabled then
-                lighting.ClockTime = world.Time.Value
-            else
-                lighting.ClockTime = OriginalState.Lighting.ClockTime
-            end
-
-            -- 2. Brightness
-            if world.Brightness.Enabled then
-                lighting.Brightness = world.Brightness.Value
-            else
-                lighting.Brightness = OriginalState.Lighting.Brightness
-            end
-
-            -- 3. Colors (Ambient & Outdoor)
-            if world.Colors.Enabled then
-                lighting.Ambient = world.Colors.Ambient
-                lighting.OutdoorAmbient = world.Colors.Outdoor
-            else
-                lighting.Ambient = OriginalState.Lighting.Ambient
-                lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
-            end
-
-            -- 4. Night Mode
-            if world.NightMode.Enabled then
-                lighting.ColorShift_Bottom = world.NightMode.ColorA
-                lighting.ColorShift_Top = world.NightMode.ColorB
-            else
-                lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
-                lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
-            end
-
-            -- 5. World Color
-            if world.WorldColor.Enabled then
-                local c = world.WorldColor.Color
-                lighting.Ambient = c
-                lighting.OutdoorAmbient = c
-                lighting.ColorShift_Bottom = c
-                lighting.ColorShift_Top = c
-                lighting.FogColor = c
-            else
-                -- We only reset if none of the other color settings are overriding
-                if not world.Colors.Enabled and not world.NightMode.Enabled then
-                    lighting.Ambient = OriginalState.Lighting.Ambient
-                    lighting.OutdoorAmbient = OriginalState.Lighting.OutdoorAmbient
-                    lighting.ColorShift_Bottom = OriginalState.Lighting.ColorShift_Bottom
-                    lighting.ColorShift_Top = OriginalState.Lighting.ColorShift_Top
-                end
-                lighting.FogColor = OriginalState.Lighting.FogColor
-            end
-
-            -- 6. Sky Color & Atmosphere
-            if world.SkyColor.Enabled then
-                local sc = world.SkyColor.Color
-                lighting.FogColor = sc
-                local o_atm = lighting:FindFirstChild("Overmind_SkyAtmosphere") or Instance.new("Atmosphere", lighting)
-                o_atm.Name = "Overmind_SkyAtmosphere"
-                o_atm.Color = sc
-                o_atm.Decay = sc
-            else
-                local o_atm = lighting:FindFirstChild("Overmind_SkyAtmosphere")
-                if o_atm then o_atm:Destroy() end
-                if not world.WorldColor.Enabled then
-                    lighting.FogColor = OriginalState.Lighting.FogColor
-                end
-            end
-
-            -- 7. Skybox Enforcement (Fix for round resets)
-            if world.Skybox.Enabled then
-                local currentSky = lighting:FindFirstChild("Overmind_Sky")
-                if not currentSky then
-                    UpdateSkybox(world.Skybox.Preset)
-                end
-            end
-
-            -- 8. Weather Enforcement
-            if world.Weather ~= "None" then
-                if not WeatherObjects.Part or not WeatherObjects.Part.Parent then
-                    UpdateWeather(world.Weather)
-                end
+    -- [ v84 ] Небо и погода проверяются здесь: UpdateSkybox/WeatherObjects объявлены
+    -- ниже по файлу, внутри applyLight они были бы глобальными (nil) и давали ошибку.
+    if Config.Visuals.World.Enabled then
+        local worldCfg = Config.Visuals.World
+        if worldCfg.Skybox.Enabled and not Core.Services.Lighting:FindFirstChild("Overmind_Sky") then
+            UpdateSkybox(worldCfg.Skybox.Preset)
+        end
+        if worldCfg.Weather ~= "None" then
+            if not WeatherObjects.Part or not WeatherObjects.Part.Parent then
+                UpdateWeather(worldCfg.Weather)
             end
         end
+    end
 
-        if atm.Enabled then
-            -- 9. Atmosphere
-            local lighting_atm = lighting:FindFirstChildOfClass("Atmosphere")
-            if lighting_atm and lighting_atm.Name ~= "Overmind_SkyAtmosphere" then
-                lighting_atm.Density, lighting_atm.Haze, lighting_atm.Glare = atm.Density, atm.Haze, atm.Glare
-            end
-
-            -- 10. Color Correction
-            if atm.ColorCorrection.Enabled then
-                local cc = lighting:FindFirstChild("Overmind_CC") or Instance.new("ColorCorrectionEffect", lighting)
-                cc.Name = "Overmind_CC"
-                cc.Saturation = atm.ColorCorrection.Saturation
-                cc.Contrast = atm.ColorCorrection.Contrast
-                cc.TintColor = atm.ColorCorrection.TintColor or Color3.new(1,1,1)
-            else
-                local cc = lighting:FindFirstChild("Overmind_CC")
-                if cc then cc:Destroy() end
-            end
-        end
-    end)
-
-    -- [ HARD GC (Garbage Collector) & ESP RENDER LOOP ]
+    -- [ ESP RENDER LOOP ]
     -- [ v32 ] Подавление ESP в наблюдателях
     local espMain = Config.Visuals.ESP
     local suppressEsp = isLocalPlayerDead() and (espMain.SpectatorESP ~= true)
@@ -16874,8 +16948,13 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
             local function rescanES(container)
                 for _, ch in ipairs(container:GetChildren()) do
                     if ch:IsA("Model") then
-                        if not State.VisualRegistry.Entities[ch]
-                            and ch:FindFirstChild("HumanoidRootPart")
+                        local knownVis = State.VisualRegistry.Entities[ch]
+                        if knownVis then
+                            -- [ v84 ] Список частей кэшировался навсегда: аксессуары и
+                            -- оружие, добавленные после первого расчёта, не попадали в
+                            -- рамку ESP. Сбрасываем кэш на том же редком рескане.
+                            knownVis.partlist = nil
+                        elseif ch:FindFirstChild("HumanoidRootPart")
                             and ch ~= Core.Local.Player.Character
                             and ch:GetAttribute("Dead") ~= true then
                             getEntityVisuals(ch)
@@ -16943,7 +17022,7 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
         end
 
         activeEntities[entity] = true
-        -- [ v32 ] Я мёртв/в наблюдателях -> ESP подавлен (см
+        -- [ v32 ] Я мёртв или в наблюдателях -> ESP подавлен (см. Spectator ESP)
         if suppressEsp then continue end
 
         local hrp = root
@@ -16954,15 +17033,17 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
             local min2, max2, onscreen = nil, nil, false
             local c3d, on3d = nil, false
 
-            -- ОПТИМИЗАЦИЯ
-            local aabbKey = "AABB_" .. entity.Name
-            local cachedAABB = State[aabbKey]
-
+            -- [ v84 ] Кэш AABB живёт в записи сущности, а не в State под ключом
+            -- "AABB_" .. имя: ушла конкатенация строки на каждого игрока в каждом кадре
+            -- (постоянный мусор для GC) и State больше не забивается мусорными ключами.
+            local cachedAABB = data.aabb
             if not cachedAABB or (State.frameCounter % 2 == 0) then
                 local x0, y0, z0, x1, y1, z1 = compute_world_aabb(parts)
                 if x0 then
-                    cachedAABB = {x0, y0, z0, x1, y1, z1}
-                    State[aabbKey] = cachedAABB
+                    cachedAABB = cachedAABB or {}
+                    cachedAABB[1], cachedAABB[2], cachedAABB[3] = x0, y0, z0
+                    cachedAABB[4], cachedAABB[5], cachedAABB[6] = x1, y1, z1
+                    data.aabb = cachedAABB
                 end
             end
 
@@ -16979,7 +17060,7 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                 continue
             end
 
-                pcall(function()
+                local espOk, espErr = pcall(function()
                     -- ── BOX ──────────────────────────────────────────
                     if esp.Box.Enabled and onscreen and min2 and max2 then
                             local x, y = min2.X, min2.Y
@@ -17048,7 +17129,7 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                             for _,s in ipairs(data.healthbar.segments) do s.Visible = false end
                         end
 
-                        -- ── TEXTS (NAME
+                        -- ── TEXTS (NAME / HEALTH / DISTANCE / WEAPON)
                         if esp.Names.Enabled and onscreen and min2 and max2 then
                             data.name.Text, data.name.Color, data.name.Position, data.name.Visible = entity.Name:upper(), esp.Names.Color, Vector2_new((min2.X+max2.X)*0.5, min2.Y-15), true
                         else data.name.Visible = false end
@@ -17102,6 +17183,12 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                         -- ── TARGET INDICATOR ─────────────────────────────
                         drawAdvancedTargetIndicator(Core.Services.Players:GetPlayerFromCharacter(entity), entity, hrp, data, esp, cam, dt)
                     end)
+                    -- [ v84 ] Ошибка больше не теряется: раньше ESP молча переставал
+                    -- рисовать сущность и причину нельзя было увидеть даже в F9.
+                    if not espOk and not State._espErrorShown then
+                        State._espErrorShown = true
+                        warn("[ESP] ошибка отрисовки: " .. tostring(espErr))
+                    end
                 end
             end
 
@@ -17115,11 +17202,17 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
     end
 
     -- Зоны гранат (Scan)
+    -- [ v84 ] workspace:GetChildren() на каждый кадр ради пары объектов — дорого.
+    -- Новые молотовы/дымы подхватываются с задержкой до 0.25 с.
     if Config.Visuals.Projectiles.GrenadeESP.Enabled then
-        for _, obj in workspace:GetChildren() do
-            local n = obj.Name:lower()
-            if n:find("molotov") or n:find("fire") then updateZone(obj, true)
-            elseif n:find("smoke") then updateZone(obj, false) end
+        State._zoneScanAccum = (State._zoneScanAccum or 1) + dt
+        if State._zoneScanAccum >= 0.25 then
+            State._zoneScanAccum = 0
+            for _, obj in ipairs(workspace:GetChildren()) do
+                local n = obj.Name:lower()
+                if n:find("molotov") or n:find("fire") then updateZone(obj, true)
+                elseif n:find("smoke") then updateZone(obj, false) end
+            end
         end
     end
 
@@ -17133,7 +17226,18 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
         local playerGui = Core.Local.Player:FindFirstChild("PlayerGui")
         if playerGui then
             local scopeCfg = Config.Visuals.CustomScope
-            local s, scope = pcall(function() return playerGui.MainGui.Gameplay.Middle.SniperScope end)
+            -- [ v84 ] Ссылка на SniperScope резолвилась через pcall каждый кадр,
+            -- хотя GUI не пересоздаётся. Теперь путь резолвится раз в 2 секунды.
+            Internal.ScopeFull = Internal.ScopeFull or UDim2.new(1, 0, 1, 0)
+            local scopeCache = Internal.ScopeCache
+            local scopeNow = os.clock()
+            if not scopeCache or scopeCache.gui ~= playerGui or not scopeCache.scope
+                or not scopeCache.scope.Parent or scopeNow - scopeCache.at > 2 then
+                local ok, found = pcall(function() return playerGui.MainGui.Gameplay.Middle.SniperScope end)
+                scopeCache = { gui = playerGui, scope = ok and found or nil, at = scopeNow }
+                Internal.ScopeCache = scopeCache
+            end
+            local s, scope = scopeCache.scope ~= nil, scopeCache.scope
             -- [ БАГ-ФИКС ] ShowScopeSniper форсит scope.Visible = true каждую итерацию
             local isScoped = (s and scope and scope.Visible and not scopeCfg.ShowScopeSniper) or false
 
@@ -17144,18 +17248,18 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                         if isScoped then
                             scope.Size = UDim2.new(0, 0, 0, 0)
                         else
-                            if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                            if scope.Size ~= Internal.ScopeFull then scope.Size = Internal.ScopeFull end
                         end
                     elseif scopeCfg.ShowScopeSniper then
                         -- Если включен Show Scope Sniper
-                        if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                        if scope.Size ~= Internal.ScopeFull then scope.Size = Internal.ScopeFull end
                         scope.Visible = true
 
                         -- Фикс: Если игра прячет элементы Middle/Gameplay при зуме в сторонних режимах
                         if scope.Parent then scope.Parent.Visible = true end
                         if scope.Parent and scope.Parent.Parent then scope.Parent.Parent.Visible = true end
                     else
-                        if scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                        if scope.Size ~= Internal.ScopeFull then scope.Size = Internal.ScopeFull end
                     end
 
                     -- 3. Модификация FOV прицела
@@ -17206,7 +17310,7 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
                 end
             else
                 if scContainer then scContainer.Visible = false end
-                if s and scope and scope.Size ~= UDim2.new(1, 0, 1, 0) then scope.Size = UDim2.new(1, 0, 1, 0) end
+                if s and scope and scope.Size ~= Internal.ScopeFull then scope.Size = Internal.ScopeFull end
             end
         end
 
@@ -17218,12 +17322,18 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
             Core.Local.Player.CameraMaxZoomDistance = dist
             Core.Local.Player.CameraMinZoomDistance = dist
 
-            -- Фикс: Чтобы видеть свои руки и оружие от третьего лица в Blox Strike
-            for _, child in ipairs(cam:GetChildren()) do
-                if child:IsA("Model") and not child.Name:lower():find("light") then
-                    for _, part in ipairs(child:GetDescendants()) do
-                        if part:IsA("BasePart") and part.LocalTransparencyModifier > 0 then
-                            part.LocalTransparencyModifier = 0
+            -- Фикс: Чтобы видеть свои руки и оружие от третьего лица в Blox Strike.
+            -- [ v84 ] Полный обход вьюмодели каждый кадр не нужен: 10 раз в секунду
+            -- достаточно, чтобы прозрачность не успевала вернуться.
+            State._tpAccum = (State._tpAccum or 0) + dt
+            if State._tpAccum >= 0.1 then
+                State._tpAccum = 0
+                for _, child in ipairs(cam:GetChildren()) do
+                    if child:IsA("Model") and not child.Name:lower():find("light") then
+                        for _, part in ipairs(child:GetDescendants()) do
+                            if part:IsA("BasePart") and part.LocalTransparencyModifier > 0 then
+                                part.LocalTransparencyModifier = 0
+                            end
                         end
                     end
                 end
@@ -17966,7 +18076,6 @@ end, function(p)
     Internal.createSelector(sub, "Preset Condition", {"Standing", "Moving", "Air", "Crouching", "SlowWalk"}, cfg.Condition, function(v) cfg.Condition = v end)
 end)
 
-
 -- [ v81 ] RAGE-ПАК FORTLINE
 
 createModule("Hitbox Expander", "Client-side hitbox scaling (Fortline and other shooters): the shot ray lands on the enlarged enemy hitbox even in the shoulder or leg.", "Rage", Config.Fortline.HitboxExpander.Enabled, function(v)
@@ -18024,7 +18133,6 @@ end, function(p)
     Internal.createiOSSwitch(Internal.createSettingRow(sub, "Auto Shoot"), cfg.AutoShoot, function(v) cfg.AutoShoot = v end, nil, nil, true)
     Internal.createSlider(sub, "Shoot Delay (ms)", 10, 500, math.floor((cfg.AutoShootDelay or 0.05) * 1000), function(v) cfg.AutoShootDelay = v / 1000 end, { Step = 1 })
 end, nil, "Fortline")
-
 
 -- SKIN CHANGER DATA (Robust Asset Loader)
     local function GetLocalAsset(name, folderOverride)
@@ -18762,7 +18870,6 @@ task.spawn(function()
     local oldSend = nil
 
 -- [ CUBE CHECKER ]
-
 
     local function createTracerBean(startPos, endPos)
         local cfg = Config.Visuals.Projectiles.BulletTracers
@@ -19509,6 +19616,10 @@ end)
 -- INVENTORY & WORLD
 createModule("World", "Environment and weather control", "Visuals", Config.Visuals.World.Enabled, function(v)
     Config.Visuals.World.Enabled = v
+    -- [ v84 ] сброс кэша света: ниже значения восстанавливаются напрямую, и без
+    -- сброса applyLight считал бы их уже записанными и не применил при повторном
+    -- включении модуля.
+    Internal.LightCache = {}
     if not v then
         local lighting = game:GetService("Lighting")
         lighting.ClockTime = OriginalState.Lighting.ClockTime
@@ -20705,8 +20816,6 @@ createModule("Teleport", "Universal CFrame teleport. Save as many spots as you w
 end, true, "Universal")
 
 -- EXPLOIT
-
-
 
 -- VISUALS
 
