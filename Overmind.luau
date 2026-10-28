@@ -12986,7 +12986,8 @@ function Automation.SpawnVehicle(name)
         return
     end
     local nowSpawn = tick()
-    if nowSpawn - (Automation._lastSpawnAt or 0) < 3 then
+    local lastSpawn = Automation._lastSpawnAt
+    if lastSpawn and (nowSpawn - lastSpawn) < 3 then
         print("[VEHICLES-FARM] spawn skipped: 3 s cooldown")
         return
     end
