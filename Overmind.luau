@@ -671,7 +671,19 @@ Config = {
     PathSystem = { Speed = 100, RecordInterval = 0.2, Recording = false, Playing = false, SelectedPath = nil },
     CarCrushers = { AutoFarm = false, AutoBuy = true, CrusherName = "Pressure Pit", TargetCFrame = CFrame.new(205.893, 81.322, -532.979) },
     WarTycoonFarm = { Enabled = false, Speed = 200, Noclip = false, TargetCFrameStr = "CFrame.new(0, 0, 0)" },
-    VehiclesFarm = { Enabled = false, AutoSpawn = true, Vehicle = "MRZR Buggy", TpAfterSpawn = false, TpCoords = "", TpDelay = 1.0 },
+    VehiclesFarm = {
+        Enabled = false, AutoSpawn = true, Vehicle = "MRZR Buggy",
+        TpAfterSpawn = false, TpCoords = "", TpDelay = 1.0,
+        -- [ v82 ] универсальный TP: тип техники, посадка на поверхность, блокировка физики
+        TpType = "Auto",  -- Auto / Car / Tank / Heli / Plane / Boat / Sub
+        TpSurface = true,  -- ставить машину на землю/воду, а не в точку камеры
+        TpLevel = true,  -- выравнивать крен и тангаж, оставлять только поворот
+        TpAnchor = true,  -- якорить части на время TP (убирает улёт физики)
+        TpOffset = 0,  -- доп. высота в студах (минус - ниже)
+        TpAir = 10,  -- вертолёты/самолёты: сколько студов над землёй
+        TpDepth = 8,  -- подводные лодки: глубина погружения
+        TpAttempts = 4,  -- попыток TP
+    },
     -- [ v80 ] Teleport spots: every spot keeps its own CFrame and its own key
     Teleport = { Points = {} },
     WarTycoonBuild = {
@@ -856,6 +868,45 @@ Config = {
                 Oil = 0.4
             }
         }
+    },
+
+    -- [ v81 ] FORTLINE: rage-пак и оружейный пак. Отдельный профиль настроек, чтобы не
+    -- смешивать его с настройками Blox Strike (Config.Combat.*).
+    Fortline = {
+        HitboxExpander = {
+            Enabled = false,
+            Size = 8,
+            Parts = "Head + Torso",
+            TeamCheck = true,
+            Visualize = false,
+            Color = Color3.fromRGB(255, 60, 120),
+            Transparency = 0.55,
+        },
+        RageAimbot = {
+            Enabled = false,
+            Keybind = Enum.KeyCode.E,
+            Mode = "Hold",
+            Hitbox = "Head",
+            UseFOV = true,
+            FieldOfView = 120,
+            ShowFOV = false,
+            FOVColor = Color3.fromRGB(255, 90, 90),
+            Smoothness = 1,
+            VisibleCheck = true,
+            TeamCheck = true,
+            SkipKnocked = true,
+            AimInMenu = false,
+            AutoShoot = false,
+            AutoShootDelay = 0.05,
+        },
+        WeaponMods = {
+            NoRecoil = false,
+            NoSpread = false,
+            RapidFire = false,
+            FireRateMultiplier = 2,
+            InstantReload = false,
+            InfAmmo = false,
+        },
     },
 
     -- [VISUALS INTEGRATION (Drawing API)]
@@ -3591,6 +3642,8 @@ end
 
 State.SilentFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = Config.Combat.SilentAim.FieldOfView, Color = Config.Combat.SilentAim.FOVColor })
 State.RageFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = Config.Combat.Ragebot.FieldOfView, Color = Config.Combat.Ragebot.FOVColor })
+-- [ v81 ] круг FOV для Fortline Rage Aimbot
+State.FortlineFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = Config.Fortline.RageAimbot.FieldOfView, Color = Config.Fortline.RageAimbot.FOVColor })
 State.LegitFOV = createDrawing("Circle", { Visible = false, Thickness = 1, NumSides = 60, Radius = 100, Color = Color3.new(1,1,1) })
 State.PenText = createDrawing("Text", { Visible = false, Center = true, Size = 18, Font = 2, Color = Color3.fromRGB(0, 255, 0), Outline = true })
 
@@ -6140,6 +6193,7 @@ local GAME_LABELS = {
 }
 
 local GAME_COLORS = {
+    ["Fortline"] = Color3.fromRGB(0, 214, 190),  -- [ v81 ] бейдж FORTLINE (модули видны в любой игре)
     ["War Tycoon"] = Color3.fromRGB(255, 165, 40),
     ["Blox Strike"] = Color3.fromRGB(255, 80, 80),
     ["Car Crushers 2"] = Color3.fromRGB(0, 170, 255),
@@ -6956,6 +7010,14 @@ local function LoadConfig(name)
                         ["Rapid Fire"] = Config.Combat.WeaponMods.RapidFire,
                         ["No Flash"] = Config.Combat.WeaponMods.NoFlash,
                         ["No Smoke"] = Config.Combat.WeaponMods.NoSmoke,
+                        -- [ v81 ] Fortline: rage-пак и оружейный пак
+                        ["Hitbox Expander"] = Config.Fortline.HitboxExpander.Enabled,
+                        ["Rage Aimbot"] = Config.Fortline.RageAimbot.Enabled,
+                        ["No Recoil (Fortline)"] = Config.Fortline.WeaponMods.NoRecoil,
+                        ["No Spread (Fortline)"] = Config.Fortline.WeaponMods.NoSpread,
+                        ["Rapid Fire (Fortline)"] = Config.Fortline.WeaponMods.RapidFire,
+                        ["Instant Reload (Fortline)"] = Config.Fortline.WeaponMods.InstantReload,
+                        ["Infinite Ammo (Fortline)"] = Config.Fortline.WeaponMods.InfAmmo,
                         ["World"] = Config.Visuals.World.Enabled,
                         ["Atmosphere"] = Config.Visuals.Atmosphere.Enabled,
                         ["Projectiles"] = Config.Visuals.Projectiles.Enabled,
@@ -12163,6 +12225,16 @@ function Automation.TryDirectMountSpawn(name)
     if type(name) ~= "string" or name == "" then return false end
     local fired = {}
 
+    -- [ v82 ] снимок ДО спавна: по нему находим именно нашу новую модель, а не чужую с тем же именем
+    local beforeSpawn = {}
+    pcall(function()
+        for _, m in ipairs(workspace:GetDescendants()) do
+            if m:IsA("Model") and m.Name:lower():find(name:lower(), 1, true) then
+                beforeSpawn[m] = true
+            end
+        end
+    end)
+
     -- 1) СЫРОЙ РЕМОУТ
     pcall(function()
         local svc = RS:FindFirstChild("Packages")
@@ -12200,6 +12272,26 @@ function Automation.TryDirectMountSpawn(name)
     end
 
     if #fired > 0 then
+        task.spawn(function()
+            local deadline = tick() + 4
+            while tick() < deadline do
+                task.wait(0.5)
+                local found = nil
+                pcall(function()
+                    for _, m in ipairs(workspace:GetDescendants()) do
+                        if m:IsA("Model") and m.Name:lower():find(name:lower(), 1, true) and not beforeSpawn[m] then
+                            found = m
+                            return
+                        end
+                    end
+                end)
+                if found then
+                    Automation.VT.NoteSpawned(found)
+                    print("[SPAWN-DIRECT] new model tracked: " .. found:GetFullName())
+                    return
+                end
+            end
+        end)
         print("[SPAWN-DIRECT] sent (" .. table.concat(fired, " | ") .. ") mount='" .. name .. "'")
         return true
     end
@@ -12239,137 +12331,423 @@ function Automation.IsSeatedInVehicle()
     return hum.Sit == true
 end
 
--- [ v49 ] Модель техники
-function Automation.GetRidingVehicle()
+-- [ v82 ] UNIVERSAL VEHICLE TELEPORT (car / tank / helicopter / plane / boat / submarine)
+-- Почему машина улетала «в рандомные корды»:
+--   1) каждый ретрай заново искал технику сканом workspace по имени — и мог взять ЧУЖУЮ модель;
+--   2) PivotTo на живую физику без блокировки: остаточная скорость и пружины подвески уносили машину;
+--   3) пивот машины ставился ровно в точку HRP, поэтому танк/вертолёт оказывался в земле или в воздухе.
+-- Теперь модель фиксируется один раз на весь телепорт, точка считается от поверхности (земля/вода),
+-- части на пару кадров анкорятся, скорости обнуляются до и после, затем проверяется прибытие.
+Automation.VT = Automation.VT or {}
+Automation.VT.KindOrder = { "Auto", "Car", "Tank", "Heli", "Plane", "Boat", "Sub" }
+Automation.VT.Busy = false
+Automation.VT.SpawnedModel = nil
+Automation.VT.SpawnedAt = 0
+
+-- старые конфиги не знают новых полей: подставляем значения на месте
+function Automation.VT.Cfg()
+    local c = Config.VehiclesFarm
+    if type(c) ~= "table" then
+        c = {}
+        Config.VehiclesFarm = c
+    end
+    if c.TpType ~= "Car" and c.TpType ~= "Tank" and c.TpType ~= "Heli" and c.TpType ~= "Plane"
+        and c.TpType ~= "Boat" and c.TpType ~= "Sub" then
+        c.TpType = "Auto"
+    end
+    c.TpSurface = (c.TpSurface ~= false)
+    c.TpLevel = (c.TpLevel ~= false)
+    c.TpAnchor = (c.TpAnchor ~= false)
+    c.TpOffset = math.clamp(tonumber(c.TpOffset) or 0, -100, 200)
+    c.TpAir = math.clamp(tonumber(c.TpAir) or 10, 0, 200)
+    c.TpDepth = math.clamp(tonumber(c.TpDepth) or 8, 0, 100)
+    c.TpAttempts = math.clamp(math.floor(tonumber(c.TpAttempts) or 4), 1, 10)
+    return c
+end
+
+-- какую технику заспавнил сервер: запоминаем точную модель, чтобы TP не искал её по имени
+function Automation.VT.NoteSpawned(model)
+    if typeof(model) ~= "Instance" then return end
+    Automation.VT.SpawnedModel = model
+    Automation.VT.SpawnedAt = tick()
+end
+
+function Automation.VT.ModelFromSeat(seat, char)
+    if not seat or typeof(seat) ~= "Instance" then return nil end
+    local model = seat:FindFirstAncestorOfClass("Model")
+    local guard = 0
+    while model and char and (model == char or model:IsDescendantOf(char)) and guard < 8 do
+        model = model.Parent and model.Parent:FindFirstAncestorOfClass("Model") or nil
+        guard = guard + 1
+    end
+    return model
+end
+
+-- тип техники по имени модели, именам частей и атрибутам; ручной выбор в настройках главнее
+function Automation.VT.ModelKind(model)
+    local cfg = Automation.VT.Cfg()
+    if cfg.TpType ~= "Auto" then return cfg.TpType end
+    if not model or typeof(model) ~= "Instance" then return "Car" end
+
+    local words = {}
+    local function add(text)
+        if type(text) == "string" and text ~= "" then words[#words + 1] = text:lower() end
+    end
+
+    add(model.Name)
+    for _, child in ipairs(model:GetChildren()) do add(child.Name) end
+    for _, key in ipairs({ "VehicleType", "MountType", "Type", "Class", "Kind", "Category", "Role" }) do
+        local ok, val = pcall(function() return model:GetAttribute(key) end)
+        if ok and type(val) == "string" then add(val) end
+    end
+    local scanned = 0
+    for _, d in ipairs(model:GetDescendants()) do
+        scanned = scanned + 1
+        if scanned > 250 then break end
+        add(d.Name)
+    end
+
+    local text = " " .. table.concat(words, " ") .. " "
+    -- строгое слово: короткое «sub» не должно ловить «subpart»
+    local function has(word)
+        local from = 1
+        while true do
+            local at = text:find(word, from, true)
+            if not at then return false end
+            local before = (at == 1) and " " or text:sub(at - 1, at - 1)
+            local after = text:sub(at + #word, at + #word)
+            if not before:match("%a") and not after:match("%a") then return true end
+            from = at + #word
+        end
+    end
+    -- начало слова: «SubmarineHull» и «RotorBlade» тоже считаются
+    local function starts(word)
+        local from = 1
+        while true do
+            local at = text:find(word, from, true)
+            if not at then return false end
+            local before = (at == 1) and " " or text:sub(at - 1, at - 1)
+            if not before:match("%a") then return true end
+            from = at + #word
+        end
+    end
+
+    if starts("submarine") or has("sub") or starts("uboat") then return "Sub" end
+    if starts("helicopter") or starts("chopper") or starts("rotor") or starts("heli") then return "Heli" end
+    if has("plane") or starts("aircraft") or has("jet") or starts("fighter") or starts("bomber")
+        or starts("wing") or starts("aileron") or starts("rudder") or starts("turbine") then
+        return "Plane"
+    end
+    if starts("tank") or has("mbt") or starts("apc") or has("ifv") or starts("turret") or starts("tread") or starts("tracks") then return "Tank" end
+    if starts("boat") or starts("ship") or starts("yacht") or starts("vessel") or starts("hull") or has("speedboat") or starts("gunboat") then return "Boat" end
+    return "Car"
+end
+
+function Automation.VT.Parts(model)
+    if not model or typeof(model) ~= "Instance" then return {} end
+    local parts = {}
+    pcall(function()
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") then
+                parts[#parts + 1] = d
+                if #parts >= 400 then break end
+            end
+        end
+    end)
+    return parts
+end
+
+-- пивот, габариты и расстояние от пивота до нижней точки модели
+function Automation.VT.Metrics(model)
+    local info = { pivot = nil, size = Vector3.zero, bottom = 0 }
+    if not model or typeof(model) ~= "Instance" or not model.Parent then return info end
+    pcall(function()
+        local bbCF, bbSize = model:GetBoundingBox()
+        local pivot = model:GetPivot()
+        info.pivot = pivot
+        info.size = bbSize
+        info.bottom = math.max(0, pivot.Position.Y - (bbCF.Position.Y - bbSize.Y * 0.5))
+    end)
+    return info
+end
+
+-- что под точкой: земля или вода (вода важна лодкам и субмаринам)
+function Automation.VT.SurfaceAt(pos, model)
+    local params = RaycastParams.new()
+    pcall(function() params.FilterType = Enum.RaycastFilterType.Exclude end)
+    pcall(function() params.FilterType = Enum.RaycastFilterType.Blacklist end)
+    local ignore = {}
+    if model then ignore[#ignore + 1] = model end
     local lp = Core.LocalPlayer
-    local char = lp and lp.Character
-    if not char then return nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
+    if lp and lp.Character then ignore[#ignore + 1] = lp.Character end
+    pcall(function() params.FilterDescendantsInstances = ignore end)
+    pcall(function() params.IgnoreWater = false end)
 
-    local function asVehicleModel(part)
-        if not part then return nil end
-        local model = part:FindFirstAncestorOfClass("Model")
-        local guard = 0
-        while model and (model == char or model:IsDescendantOf(char)) and guard < 8 do
-            model = model.Parent and model.Parent:FindFirstAncestorOfClass("Model") or nil
-            guard = guard + 1
-        end
-        return model
-    end
-
-    -- 1) сиденье
-    if hum and hum.SeatPart then
-        local m = asVehicleModel(hum.SeatPart)
-        if m then return m end
-    end
-
-    -- 2) любое сиденье/VehicleSeat
-    if hum then
-        for _, v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("Seat") or v:IsA("VehicleSeat") then
-                local ok, occ = pcall(function() return v.Occupant end)
-                if ok and occ == hum then
-                    local m = asVehicleModel(v)
-                    if m then return m end
-                end
-            end
-        end
-    end
-
-    -- 3) свежая модель техники рядом с нами (игра могла ещё не посадить игрока)
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    local targetName = tostring(Config.VehiclesFarm.Vehicle or ""):lower()
-    if hrp and targetName ~= "" then
-        local best, bestDist = nil, math.huge
-        for _, v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("Model") and v ~= char and not v:IsDescendantOf(char) then
-                local seat = v:FindFirstChildWhichIsA("Seat", true)
-                local isVeh = seat or v:FindFirstChild("Chassis") or v:FindFirstChild("Body")
-                if isVeh and v.Name:lower():find(targetName, 1, true) then
-                    local ok, pivot = pcall(function() return v:GetPivot() end)
-                    if ok then
-                        local d = (pivot.Position - hrp.Position).Magnitude
-                        if d < 250 and d < bestDist then
-                            best, bestDist = v, d
-                        end
-                    end
-                end
-            end
-        end
-        if best then return best end
+    local origin = Vector3.new(pos.X, pos.Y + 500, pos.Z)
+    local ok, hit = pcall(function() return workspace:Raycast(origin, Vector3.new(0, -2000, 0), params) end)
+    if ok and hit then
+        return { y = hit.Position.Y, material = hit.Material, water = (hit.Material == Enum.Material.Water) }
     end
     return nil
+end
+
+-- итоговая точка: земля + высота до днища, вода для лодок/субмарин, воздух для вертолётов/самолётов
+function Automation.VT.Solve(cf, model, kind)
+    local cfg = Automation.VT.Cfg()
+    local pos = cf.Position
+    local rot = cf - pos
+
+    if cfg.TpLevel then
+        local okAngles, angles = pcall(function() return { cf:ToEulerAnglesYXZ() } end)
+        local yaw = (okAngles and tonumber(angles[2])) or 0
+        local okRot, leveled = pcall(function() return CFrame.fromEulerAnglesYXZ(0, yaw, 0) end)
+        if okRot and leveled then rot = leveled end
+    end
+
+    local metrics = Automation.VT.Metrics(model)
+    -- у персонажа HRP выше ступней: иначе после TP ноги уходят в землю
+    local bottom = model and metrics.bottom or 3
+    local y = pos.Y
+    local surface = nil
+
+    if cfg.TpSurface then
+        surface = Automation.VT.SurfaceAt(pos, model)
+        local groundY = surface and surface.y or pos.Y
+        if kind == "Boat" then
+            if surface and surface.water then
+                y = groundY - bottom * 0.35
+            else
+                y = groundY + bottom
+            end
+        elseif kind == "Sub" then
+            if surface and surface.water then
+                y = groundY - (bottom + cfg.TpDepth)
+            else
+                y = groundY + bottom
+            end
+        elseif kind == "Heli" or kind == "Plane" then
+            y = groundY + bottom + cfg.TpAir
+        else
+            y = groundY + bottom
+        end
+    end
+
+    y = y + cfg.TpOffset
+    return CFrame.new(Vector3.new(pos.X, y, pos.Z)) * rot, surface
+end
+
+function Automation.VT.ZeroVelocity(parts)
+    for _, part in ipairs(parts or {}) do
+        if part and part.Parent then
+            pcall(function()
+                part.AssemblyLinearVelocity = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+end
+
+-- блокируем сборку на время перемещения: без этого физика уносит машину после PivotTo
+function Automation.VT.Freeze(parts)
+    local saved = {}
+    for _, part in ipairs(parts or {}) do
+        if part and part.Parent then
+            local ok, wasAnchored = pcall(function() return part.Anchored end)
+            if ok and not wasAnchored then
+                saved[#saved + 1] = part
+                pcall(function() part.Anchored = true end)
+            end
+        end
+    end
+    return saved
+end
+
+function Automation.VT.Unfreeze(saved)
+    for _, part in ipairs(saved or {}) do
+        if part and part.Parent then
+            pcall(function() part.Anchored = false end)
+        end
+    end
+end
+
+-- сиденье, в котором мы сидим: сначала Humanoid.SeatPart, потом поиск по Occupant рядом с нами
+function Automation.VT.SeatByOccupant(hum, char)
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not hum or not root then return nil end
+    local found = nil
+    pcall(function()
+        local params = OverlapParams.new()
+        pcall(function() params.FilterType = Enum.RaycastFilterType.Exclude end)
+        pcall(function() params.FilterDescendantsInstances = { char } end)
+        local nearby = workspace:GetPartBoundsInRadius(root.Position, 40, params)
+        for _, part in ipairs(nearby or {}) do
+            if (part:IsA("Seat") or part:IsA("VehicleSeat")) and part.Occupant == hum then
+                found = part
+                return
+            end
+        end
+    end)
+    return found
+end
+
+function Automation.VT.Resolve()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local model, seat = nil, nil
+
+    if hum and hum.SeatPart then
+        seat = hum.SeatPart
+        model = Automation.VT.ModelFromSeat(seat, char)
+    end
+    if not model and hum then
+        local nearSeat = Automation.VT.SeatByOccupant(hum, char)
+        if nearSeat then
+            seat = nearSeat
+            model = Automation.VT.ModelFromSeat(nearSeat, char)
+        end
+    end
+
+    -- ещё не посадили, но сервер только что заспавнил нашу технику — берём именно её
+    if not model then
+        local cand = Automation.VT.SpawnedModel
+        local fresh = cand and typeof(cand) == "Instance" and cand.Parent and (tick() - (Automation.VT.SpawnedAt or 0)) <= 20
+        if fresh then
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local okPivot, pivot = pcall(function() return cand:GetPivot() end)
+            if okPivot and pivot and hrp and (pivot.Position - hrp.Position).Magnitude <= 120 then
+                model = cand
+            end
+        end
+    end
+
+    return {
+        character = char,
+        humanoid = hum,
+        seat = seat,
+        model = model,
+        kind = Automation.VT.ModelKind(model),
+        parts = model and Automation.VT.Parts(model) or {},
+    }
+end
+
+function Automation.VT.Where(info)
+    if info and info.model and info.model.Parent then
+        local ok, pivot = pcall(function() return info.model:GetPivot() end)
+        if ok and pivot then return pivot.Position end
+    end
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then return hrp.Position end
+    return nil
+end
+
+-- сам телепорт: одна зафиксированная модель, якорь, проверка прибытия и ретраи
+function Automation.VT.Jump(cf, opts)
+    opts = opts or {}
+    local cfg = Automation.VT.Cfg()
+    local attempts = math.clamp(math.floor(tonumber(opts.Attempts) or cfg.TpAttempts or 4), 1, 10)
+    local lp = Core.LocalPlayer
+    local info = Automation.VT.Resolve()
+    if not info.character then return false, "character not found" end
+
+    local target, surface = Automation.VT.Solve(cf, info.model, info.kind)
+    local tolerance = 15
+    local arrived = false
+    local lastErr = "teleport did not happen"
+    local mode = info.model and "vehicle" or "character"
+    local kind = info.kind
+
+    Automation.VT.Busy = true
+    local okRun, runErr = pcall(function()
+        for attempt = 1, attempts do
+            if not info.character.Parent then
+                lastErr = "character disappeared"
+                return
+            end
+
+            local frozen = nil
+            if info.model and info.model.Parent then
+                for _, part in ipairs(info.parts) do
+                    pcall(function() part:SetNetworkOwner(lp) end)
+                end
+                Automation.VT.ZeroVelocity(info.parts)
+                if cfg.TpAnchor then frozen = Automation.VT.Freeze(info.parts) end
+            else
+                local hrp = info.character:FindFirstChild("HumanoidRootPart")
+                if hrp then pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end) end
+            end
+
+            local moved = false
+            if info.model and info.model.Parent then
+                moved = pcall(function() info.model:PivotTo(target) end)
+            end
+            if not moved then
+                local hrp = info.character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    moved = pcall(function() hrp.CFrame = target end)
+                    mode = "character"
+                end
+            end
+
+            Automation.VT.ZeroVelocity(info.parts)
+            task.wait(0.1)
+            Automation.VT.Unfreeze(frozen)
+            Automation.VT.ZeroVelocity(info.parts)
+            task.wait(0.15)
+
+            local nowPos = Automation.VT.Where(info)
+            local dist = nowPos and (nowPos - target.Position).Magnitude or nil
+            print(string.format("[VEH-TP] attempt %d/%d: %s, %s, distance %.1f studs",
+                attempt, attempts, moved and "moved" or "NOT moved", mode .. "/" .. kind, dist or -1))
+
+            if dist and dist <= tolerance then
+                arrived = true
+                return
+            end
+            if dist then
+                lastErr = string.format("did not arrive: %.1f studs left", dist)
+            else
+                lastErr = moved and "target disappeared after the teleport" or "teleport did not happen"
+            end
+            task.wait(0.2)
+        end
+    end)
+    Automation.VT.Busy = false
+
+    if not okRun then return false, "teleport error: " .. tostring(runErr) end
+    local extra = { kind = kind, mode = mode, surface = surface, target = target }
+    if arrived then return true, nil, extra end
+    return false, lastErr, extra
+end
+
+-- что за техника и куда она встанет — для кнопки диагностики
+function Automation.VT.Diagnose()
+    local info = Automation.VT.Resolve()
+    local metrics = Automation.VT.Metrics(info.model)
+    local pos = info.model and metrics.pivot and metrics.pivot.Position or Automation.VT.Where(info)
+    local surface = pos and Automation.VT.SurfaceAt(pos, info.model) or nil
+    print(string.format("[VEH-TP] diagnose: model=%s kind=%s bottom=%.1f size=(%.1f %.1f %.1f) surface=%s",
+        info.model and info.model:GetFullName() or "none (character)",
+        info.kind,
+        metrics.bottom or 0,
+        metrics.size.X, metrics.size.Y, metrics.size.Z,
+        surface and string.format("%s %.1f", tostring(surface.material), surface.y) or "none"))
+    return info.kind, metrics, surface
+end
+
+-- совместимость со старым кодом: возвращает модель техники, в которой мы сидим
+function Automation.GetRidingVehicle()
+    local info = Automation.VT.Resolve()
+    return info.model
 end
 
 -- [ v49 ] Телепорт на сохранённые координаты
 function Automation.TeleportToCoords(s, attempts)
     local cf = Automation.ParseCFrameString(s)
     if not cf then return false, "could not parse the coordinates" end
-    local lp = Core.LocalPlayer
-    local char = lp and lp.Character
-    if not char then return false, "character not found" end
-
-    attempts = math.max(1, tonumber(attempts) or 4)
-    local lastErr = "teleport did not happen"
-
-    for i = 1, attempts do
-        local veh = Automation.GetRidingVehicle()
-        local label = veh and ("vehicle '" .. tostring(veh.Name) .. "'") or "character"
-
-        -- 1) забираем сетевую власть у частей техники (иначе сервер откатит позицию)
-        if veh then
-            for _, p in ipairs(veh:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    pcall(function() p:SetNetworkOwner(lp) end)
-                end
-            end
-            if veh.PrimaryPart then
-                pcall(function() veh.PrimaryPart.AssemblyLinearVelocity = Vector3.zero end)
-            end
-        end
-
-        -- 2) сам телепорт
-        local moved = false
-        if veh then
-            moved = pcall(function() veh:PivotTo(cf) end)
-        end
-        if not moved then
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-                moved = pcall(function() hrp.CFrame = cf end)
-            end
-            if not moved then
-                moved = pcall(function() char:PivotTo(cf) end)
-            end
-        end
-
-        -- 3) проверяем факт
-        task.wait(0.15)
-        local nowPos
-        local veh2 = Automation.GetRidingVehicle()
-        if veh2 then
-            local ok, pivot = pcall(function() return veh2:GetPivot() end)
-            if ok then nowPos = pivot.Position end
-        else
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp then nowPos = hrp.Position end
-        end
-        local dist = nowPos and (nowPos - cf.Position).Magnitude or nil
-        print(string.format("[TP-AFTER-SPAWN] attempt %d/%d: %s %s, distance to target %.1f studs",
-            i, attempts, label, moved and "moved" or "NOT moved", dist or -1))
-
-        if dist and dist <= 15 then
-            return true
-        end
-        if dist then
-            lastErr = string.format("did not arrive: %.1f studs left", dist)
-        else
-            lastErr = moved and "target disappeared after the teleport" or "teleport did not happen"
-        end
-        task.wait(0.35)
-    end
-    return false, lastErr
+    return Automation.VT.Jump(cf, { Attempts = attempts })
 end
 
 -- [ v80 ] TELEPORT SPOTS: named CFrame spots, each one with its own key (any game)
@@ -12502,15 +12880,28 @@ function Automation.TpAfterSpawnRoutine()
             task.wait(0.2)
             waited = waited + 0.2
         end
-        if waited >= 3 then
-            print("[TP-AFTER-SPAWN] seat not confirmed within 3 s - teleporting what we have")
+        if Automation._tpSeq ~= try then return end
+        if waited >= 3 and not Automation.IsSeatedInVehicle() then
+            print("[TP-AFTER-SPAWN] seat not confirmed within 3 s - teleporting the character only")
+        end
+
+        -- не начинаем второй TP поверх первого: два PivotTo подряд дают улёт
+        local busyWait = 0
+        while Automation.VT.Busy and busyWait < 5 do
+            if Automation._tpSeq ~= try then return end
+            task.wait(0.2)
+            busyWait = busyWait + 0.2
         end
         if Automation._tpSeq ~= try then return end
 
-        local ok, err = Automation.TeleportToCoords(Config.VehiclesFarm.TpCoords)
+        local ok, err, extra = Automation.TeleportToCoords(Config.VehiclesFarm.TpCoords)
         if ok then
-            print(string.format("[TP-AFTER-SPAWN] teleport done (delay %.1f + wait %.1f s)", delaySec, waited))
-            if _G.Log then pcall(_G.Log, "TP: teleport done", Color3.fromRGB(0, 255, 150)) end
+            print(string.format("[TP-AFTER-SPAWN] teleport done (delay %.1f + wait %.1f s, %s/%s)",
+                delaySec, waited, extra and extra.mode or "?", extra and extra.kind or "?"))
+            if _G.Log then
+                pcall(_G.Log, "TP: teleport done (" .. tostring(extra and extra.kind or "") .. ")",
+                    Color3.fromRGB(0, 255, 150))
+            end
         else
             print("[TP-AFTER-SPAWN] FAILED: " .. tostring(err))
             if _G.Log then pcall(_G.Log, "TP: FAILED - " .. tostring(err), Color3.fromRGB(255, 80, 80)) end
@@ -12589,6 +12980,17 @@ function Automation.SpawnTpLoop()
 end
 
 function Automation.SpawnVehicle(name)
+    -- [ v82 ] второй спавн во время TP уводил машину с точки: держим паузу и не спавним в полёте
+    if Automation.VT and Automation.VT.Busy then
+        print("[VEHICLES-FARM] spawn skipped: teleport in progress")
+        return
+    end
+    local nowSpawn = tick()
+    if nowSpawn - (Automation._lastSpawnAt or 0) < 3 then
+        print("[VEHICLES-FARM] spawn skipped: 3 s cooldown")
+        return
+    end
+    Automation._lastSpawnAt = nowSpawn
     -- [ v46 ] Сначала ПРЯМОЙ спавн через Knit MountService.SpawnMount
     if Automation.TryDirectMountSpawn(name) then
         -- [ v49 ] TP After Spawn
@@ -12829,6 +13231,7 @@ function Automation.SpawnVehicle(name)
         if fired then
             local newModel = checkNewModel(5)
             if newModel then
+                Automation.VT.NoteSpawned(newModel)
                 safeLog("Vehicles Farm: Spawn CONFIRMED (new model in workspace)", Color3.fromRGB(0, 255, 150))
             else
                 safeLog("Vehicles Farm: click sent, waiting for the vehicle to appear...", Color3.fromRGB(255, 160, 0))
@@ -12863,9 +13266,14 @@ function Automation.VehiclesFarmHelper()
         if terminal then
             local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
             if hrp then
-                safeLog("Teleporting to Vehicle Spawner!", Color3.fromRGB(0, 255, 0))
-                print("[VEHICLES-FARM] Teleporting to terminal: " .. terminal:GetFullName())
-                hrp.CFrame = terminal.CFrame * CFrame.new(0, 0, 3) + Vector3.new(0, 2, 0)
+                -- [ v82 ] сидя в технике дёргать HRP нельзя: сварка сиденья утаскивает машину
+                if Automation.IsSeatedInVehicle() then
+                    print("[VEHICLES-FARM] seated in a vehicle - skipping the warp to the terminal")
+                else
+                    safeLog("Teleporting to Vehicle Spawner!", Color3.fromRGB(0, 255, 0))
+                    print("[VEHICLES-FARM] Teleporting to terminal: " .. terminal:GetFullName())
+                    hrp.CFrame = terminal.CFrame * CFrame.new(0, 0, 3) + Vector3.new(0, 2, 0)
+                end
                 task.wait(0.3)
 
                 if promptObj and fireproximityprompt then
@@ -15352,6 +15760,14 @@ State.Connections.MainRender = Core.Services.RunService.RenderStepped:Connect(fu
         State.RageFOV.Position = mouseLoc
         State.RageFOV.Color = Config.Combat.Ragebot.FOVColor
     end
+    -- [ v81 ] круг FOV Fortline Rage Aimbot
+    if State.FortlineFOV then
+        local flAim = Config.Fortline.RageAimbot
+        State.FortlineFOV.Visible = flAim.Enabled and flAim.ShowFOV == true and flAim.UseFOV == true
+        State.FortlineFOV.Radius = flAim.FieldOfView
+        State.FortlineFOV.Position = mouseLoc
+        State.FortlineFOV.Color = flAim.FOVColor
+    end
 
     if State.PenText then
         if Config.Combat.Memesense.Enabled and Config.Combat.Memesense.ShowPenetration then
@@ -15898,6 +16314,580 @@ end)
 
 -- ОПРЕДЕЛЕНИЕ МОДУЛЕЙ С ПОЛНЫМИ НАСТРОЙКАМИ
 
+-- [ v81 ] FORTLINE PACK — движки rage-пака и оружейного пака.
+-- Отдельный профиль настроек (Config.Fortline), потому что у Fortline свои механики:
+-- броня/нокдаун, свои поля оружия. Принцип тот же, что и у остальных движков скрипта:
+-- вся работа здесь, карточки модулей — ниже, в блоке определений.
+-- Обёрнуто в анонимную функцию: в основном блоке скрипта уже почти предел локальных
+-- переменных Luau (200), лишние имена наверху добавить нельзя.
+Internal.Fortline = Internal.Fortline or {}
+;(function(FL)
+FL.Version = 81
+
+-- [ ОПОЗНАНИЕ ИГРЫ ] у FORTLINE несколько копий с разными PlaceId, поэтому смотрим
+-- и на имя, и на список известных id. Нужно только для диагностики в F9: сами модули
+-- видны в любой игре и помечены бейджем "Fortline".
+FL.PlaceIds = {
+    [16440734455] = true,
+    [14313259147] = true,
+    [71969757010520] = true,
+    [111282072531662] = true,
+}
+
+FL.IsFortlineGame = function()
+    if FL.PlaceIds[game.PlaceId] then return true end
+    local ok, name = pcall(function() return tostring(game.Name or "") end)
+    if not ok or not name then return false end
+    return name:upper():find("FORTLINE", 1, true) ~= nil
+end
+
+-- [ HITBOX EXPANDER ]
+-- Клиентское расширение хитбоксов противников. В шутерах Roblox попадание считает
+-- клиент (луч из оружия + отправка попадания на сервер), поэтому по увеличенному
+-- хитбоксу пуля залетает даже в плечо или ногу, а Silent Aim и Ragebot попадают чаще.
+FL.HB = FL.HB or {}
+FL.HB.Modified = FL.HB.Modified or {}   -- part -> { Size, Transparency, Color }
+
+FL.HB.PartsFor = function(char, scheme)
+    local list = {}
+    if not char then return list end
+    local function add(part)
+        if part and part:IsA("BasePart") then table.insert(list, part) end
+    end
+    if scheme == "Head" then
+        add(char:FindFirstChild("Head"))
+    elseif scheme == "Torso" then
+        add(char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart"))
+    elseif scheme == "Whole Body" then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("BasePart") then add(child) end
+        end
+    else -- "Head + Torso"
+        add(char:FindFirstChild("Head"))
+        add(char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart"))
+    end
+    return list
+end
+
+FL.HB.Apply = function(part, size, visualize, color, transparency)
+    local rec = FL.HB.Modified[part]
+    if not rec then
+        local ok = pcall(function()
+            rec = { Size = part.Size, Transparency = part.Transparency, Color = part.Color }
+        end)
+        if not ok or type(rec) ~= "table" then return end
+        FL.HB.Modified[part] = rec
+    end
+    pcall(function()
+        part.Size = Vector3.new(size, size, size)
+        if visualize then
+            part.Transparency = transparency
+            part.Color = color
+        else
+            part.Transparency = rec.Transparency
+            part.Color = rec.Color
+        end
+    end)
+end
+
+FL.HB.Restore = function(part)
+    local rec = FL.HB.Modified[part]
+    if not rec then return end
+    FL.HB.Modified[part] = nil
+    pcall(function()
+        part.Size = rec.Size
+        part.Transparency = rec.Transparency
+        part.Color = rec.Color
+    end)
+end
+
+FL.HB.RestoreAll = function()
+    for part in pairs(FL.HB.Modified) do
+        FL.HB.Restore(part)
+    end
+end
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local hb = Config.Fortline and Config.Fortline.HitboxExpander
+        if not (hb and hb.Enabled) then
+            if next(FL.HB.Modified) then FL.HB.RestoreAll() end
+            task.wait(0.25)
+            continue
+        end
+        pcall(function()
+            local size = math.clamp(tonumber(hb.Size) or 8, 1, 40)
+            local color = hb.Color or Color3.fromRGB(255, 60, 120)
+            local transparency = tonumber(hb.Transparency) or 0.55
+            local wanted = {}
+            local lp = Core.Local.Player
+            for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+                local char = p.Character
+                if p ~= lp and char then
+                    local skip = false
+                    if hb.TeamCheck ~= false and isCharacterAlly(char) then skip = true end
+                    if not skip then
+                        local hum = char:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            for _, part in ipairs(FL.HB.PartsFor(char, hb.Parts)) do
+                                wanted[part] = true
+                                FL.HB.Apply(part, size, hb.Visualize == true, color, transparency)
+                            end
+                        end
+                    end
+                end
+            end
+            -- вернуть всё, что больше не цель: смена пресета, респавн, выход игрока
+            for part in pairs(FL.HB.Modified) do
+                if not wanted[part] or not part.Parent then
+                    FL.HB.Restore(part)
+                end
+            end
+        end)
+        task.wait(0.12)
+    end
+    FL.HB.RestoreAll()
+end)
+
+-- [ RAGE AIMBOT ]
+-- Мгновенная наводка КАМЕРЫ в цель + (по желанию) авто-стрельба. Отдельный от
+-- Legit-«Aimbot» модуль: свой таргетинг (свой FOV, свой хитбокс, приоритет живых
+-- в BR), snap без разгона и своя задержка выстрела. Работает в паре с Silent Aim:
+-- тот подменяет пулю, этот наводит камеру.
+FL.Aim = FL.Aim or {}
+FL.Aim.Target = nil
+FL.Aim.Toggled = false
+FL.Aim.KeyHeld = false
+FL.Aim.LastShot = 0
+FL.Aim.LastDiag = 0
+
+FL.Aim.IsKnocked = function(char, hum)
+    if not char then return false end
+    local names = { "Downed", "Knocked", "IsDowned", "IsKnocked", "DBNO", "Incapacitated" }
+    for i = 1, #names do
+        if char:GetAttribute(names[i]) == true then return true end
+    end
+    if hum and hum:GetAttribute("Downed") == true then return true end
+    return false
+end
+
+FL.Aim.PartFor = function(char, hitbox)
+    local want = tostring(hitbox or "Head")
+    local part = char:FindFirstChild(want)
+    if not (part and part:IsA("BasePart")) then
+        -- кастомные модели: ищем по подстроке, как это делает Silent Aim
+        local lowerWant = want:lower()
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("BasePart") and child.Name:lower():find(lowerWant, 1, true) then
+                part = child
+                break
+            end
+        end
+    end
+    if not (part and part:IsA("BasePart")) then
+        part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    end
+    if part and part:IsA("BasePart") then return part end
+    return nil
+end
+
+FL.Aim.FindTarget = function()
+    local cfg = Config.Fortline and Config.Fortline.RageAimbot
+    local cam = Core.Local.Camera
+    local lp = Core.Local.Player
+    if not (cfg and cam and lp) then return nil end
+    local center = cam.ViewportSize / 2
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(Core.Services.Players:GetPlayers()) do
+        local char = p.Character
+        if p ~= lp and char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local skip = not (hum and hum.Health > 0)
+            if not skip and cfg.TeamCheck ~= false and isCharacterAlly(char) then skip = true end
+            if not skip and cfg.SkipKnocked and FL.Aim.IsKnocked(char, hum) then skip = true end
+            if not skip then
+                local part = FL.Aim.PartFor(char, cfg.Hitbox)
+                if part then
+                    local visible = true
+                    if cfg.VisibleCheck ~= false then visible = isVisible(part) end
+                    if visible then
+                        local sp = cam:WorldToViewportPoint(part.Position)
+                        local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                        if (not cfg.UseFOV) or d <= (tonumber(cfg.FieldOfView) or 120) then
+                            if d < bestDist then best, bestDist = part, d end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+FL.Aim.Fire = function()
+    if Weapon and Weapon.IsEquipped and (Weapon.Rounds == nil or Weapon.Rounds > 0) and type(Weapon.shoot) == "function" then
+        local ok = pcall(function() Weapon:shoot() end)
+        if ok then return true end
+    end
+    -- универсальный запасной путь: активируем экипированный инструмент
+    local lp = Core.Local.Player
+    local char = lp and lp.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if tool then
+        local ok = pcall(function() tool:Activate() end)
+        if ok then return true end
+    end
+    return false
+end
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local cfg = Config.Fortline and Config.Fortline.RageAimbot
+        if not (cfg and cfg.Enabled) then
+            FL.Aim.Target = nil
+            FL.Aim.Toggled = false
+            FL.Aim.KeyHeld = false
+            task.wait(0.1)
+            continue
+        end
+        pcall(function()
+            local uis = Core.Services.UserInputService
+            local key = cfg.Keybind and Internal.CoerceKeyBind(cfg.Keybind, nil) or nil
+            local mode = cfg.Mode or "Hold"
+            local active = false
+            if mode == "Always" then
+                active = true
+            elseif key then
+                local down = uis:IsKeyDown(key)
+                if mode == "Toggle" then
+                    if down and not FL.Aim.KeyHeld then FL.Aim.Toggled = not FL.Aim.Toggled end
+                    FL.Aim.KeyHeld = down
+                    active = FL.Aim.Toggled == true
+                else
+                    active = down
+                end
+            end
+            if active and cfg.AimInMenu ~= true then
+                local menuBlocking = (Internal.MainFrame and Internal.MainFrame.Visible)
+                    or (Internal.Celestial and Internal.Celestial.SettingsFrame and Internal.Celestial.SettingsFrame.Parent ~= nil)
+                    or State.BindingModule ~= nil
+                if menuBlocking then active = false end
+            end
+            local target = active and FL.Aim.FindTarget() or nil
+            FL.Aim.Target = target
+            local cam = Core.Local.Camera
+            if target and cam then
+                local smooth = math.clamp(tonumber(cfg.Smoothness) or 1, 1, 25)
+                local desired = CFrame.new(cam.CFrame.Position, target.Position)
+                if smooth <= 1.01 then
+                    cam.CFrame = desired
+                else
+                    cam.CFrame = cam.CFrame:Lerp(desired, 1 / smooth)
+                end
+                if cfg.AutoShoot then
+                    local now = os.clock()
+                    local delay = math.clamp(tonumber(cfg.AutoShootDelay) or 0.05, 0.01, 1)
+                    if (now - (FL.Aim.LastShot or 0)) >= delay then
+                        FL.Aim.LastShot = now
+                        FL.Aim.Fire()
+                    end
+                end
+            end
+            if Config.DebugMode and (os.clock() - (FL.Aim.LastDiag or 0)) > 2 then
+                FL.Aim.LastDiag = os.clock()
+                print(string.format("[FORTLINE] rage-aimbot active=%s target=%s game=%s fortline=%s",
+                    tostring(active),
+                    target and target:GetFullName() or "-",
+                    tostring(game.Name),
+                    tostring(FL.IsFortlineGame())))
+            end
+        end)
+        task.wait()
+    end
+end)
+
+-- [ ОРУЖЕЙНЫЙ ПАК FORTLINE ] один движок на все пять модулей.
+-- Ищет поля оружия в текущей игре: атрибуты инструмента, NumberValue внутри инструмента,
+-- таблицу оружия, которую отдаёт игра (архетип Blox Strike и совместимые), плюс хуки
+-- функций отдачи/разброса/перезарядки по имени. Что нашлось — печатается в F9
+-- (Misc -> Debug Mode): по этому списку движок можно донастроить под новую версию игры.
+FL.Weapon = FL.Weapon or {}
+FL.Weapon.Base = FL.Weapon.Base or {}        -- holder -> { "Source:Name" = исходное значение }
+FL.Weapon.Hooked = FL.Weapon.Hooked or {}
+FL.Weapon.Hooks = FL.Weapon.Hooks or 0
+FL.Weapon.Scanned = FL.Weapon.Scanned or false
+FL.Weapon.LastRecords = FL.Weapon.LastRecords or {}
+FL.Weapon.LastDiag = FL.Weapon.LastDiag or 0
+
+FL.Weapon.Patterns = {
+    Recoil = { "recoil", "kick", "aimpunch" },
+    Spread = { "spread", "inaccuracy", "bloom" },
+    FireRate = { "firerate", "fire_rate", "firedelay", "fire_delay", "cooldown", "rateoffire", "attackrate", "shotinterval" },
+    Reload = { "reloadtime", "reload_time", "reloadduration", "reloaddelay", "reloadspeed" },
+    Ammo = { "ammo", "rounds", "magazine", "bullets" },
+}
+
+FL.Weapon.Classify = function(name)
+    if type(name) ~= "string" or #name == 0 or #name > 60 then return nil end
+    local ln = name:lower()
+    for kind, list in pairs(FL.Weapon.Patterns) do
+        for i = 1, #list do
+            if ln:find(list[i], 1, true) then return kind end
+        end
+    end
+    return nil
+end
+
+FL.Weapon.Collect = function()
+    local out = {}
+    local lp = Core.Local.Player
+    local char = lp and lp.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    local seen = {}
+
+    local function addHolder(holder)
+        if holder == nil or seen[holder] then return end
+        seen[holder] = true
+        if typeof(holder) == "Instance" then
+            local ok, attrs = pcall(function() return holder:GetAttributes() end)
+            if ok and type(attrs) == "table" then
+                for name, value in pairs(attrs) do
+                    if type(value) == "number" then
+                        local kind = FL.Weapon.Classify(name)
+                        if kind then
+                            table.insert(out, { Kind = kind, Name = name, Holder = holder, Source = "Attribute" })
+                        end
+                    end
+                end
+            end
+            local ok2, descendants = pcall(function() return holder:GetDescendants() end)
+            if ok2 and type(descendants) == "table" then
+                for _, d in ipairs(descendants) do
+                    if typeof(d) == "Instance" and d:IsA("ValueBase") then
+                        local v = d.Value
+                        if type(v) == "number" then
+                            local kind = FL.Weapon.Classify(d.Name)
+                            if kind then
+                                table.insert(out, { Kind = kind, Name = d.Name, Holder = d, Source = "Value" })
+                            end
+                        end
+                    end
+                end
+            end
+        elseif type(holder) == "table" then
+            local count = 0
+            for k, v in next, holder do
+                count = count + 1
+                if count > 400 then break end
+                if type(k) == "string" and type(v) == "number" then
+                    local kind = FL.Weapon.Classify(k)
+                    if kind then
+                        table.insert(out, { Kind = kind, Name = k, Holder = holder, Source = "Field" })
+                    end
+                end
+            end
+        end
+    end
+
+    addHolder(tool)
+    addHolder(Weapon)
+    return out
+end
+
+FL.Weapon.Key = function(rec)
+    return tostring(rec.Source) .. ":" .. tostring(rec.Name)
+end
+
+FL.Weapon.Original = function(rec, value)
+    local bucket = FL.Weapon.Base[rec.Holder]
+    if not bucket then
+        bucket = {}
+        FL.Weapon.Base[rec.Holder] = bucket
+    end
+    local key = FL.Weapon.Key(rec)
+    if bucket[key] == nil then bucket[key] = value end
+    return bucket[key]
+end
+
+FL.Weapon.Read = function(rec)
+    if rec.Source == "Attribute" then
+        local ok, v = pcall(function() return rec.Holder:GetAttribute(rec.Name) end)
+        if ok and type(v) == "number" then return v end
+    elseif rec.Source == "Value" then
+        local ok, v = pcall(function() return rec.Holder.Value end)
+        if ok and type(v) == "number" then return v end
+    else
+        local ok, v = pcall(function() return rec.Holder[rec.Name] end)
+        if ok and type(v) == "number" then return v end
+    end
+    return nil
+end
+
+FL.Weapon.Write = function(rec, value)
+    if rec.Source == "Attribute" then
+        pcall(function() rec.Holder:SetAttribute(rec.Name, value) end)
+        return
+    end
+    if rec.Source == "Value" then
+        pcall(function() rec.Holder.Value = value end)
+        return
+    end
+    local ok = pcall(function() rec.Holder[rec.Name] = value end)
+    if not ok then
+        ok = pcall(function() rawset(rec.Holder, rec.Name, value) end)
+    end
+    if not ok and setreadonly then
+        pcall(function() setreadonly(rec.Holder, false) end)
+        pcall(function() rec.Holder[rec.Name] = value end)
+        pcall(function() setreadonly(rec.Holder, true) end)
+    end
+end
+
+FL.Weapon.RestoreBase = function()
+    if not next(FL.Weapon.Base) then return end
+    for holder, bucket in pairs(FL.Weapon.Base) do
+        for key, value in pairs(bucket) do
+            local source, name = key:match("^(%a+):(.+)$")
+            if name then
+                FL.Weapon.Write({ Holder = holder, Name = name, Source = source }, value)
+            end
+        end
+    end
+    table.clear(FL.Weapon.Base)
+end
+
+FL.Weapon.Apply = function()
+    local cfg = Config.Fortline and Config.Fortline.WeaponMods
+    if not cfg then return end
+    local records = FL.Weapon.Collect()
+    FL.Weapon.LastRecords = records
+    if #records == 0 then return end
+    local mult = math.clamp(tonumber(cfg.FireRateMultiplier) or 2, 1, 20)
+    for i = 1, #records do
+        local rec = records[i]
+        local value = FL.Weapon.Read(rec)
+        if value ~= nil then
+            -- [ v81 ] исходное значение записываем ДО подмены: иначе откат вернёт уже
+            -- изменённое число (нашли тестом: отдача/разброс/патроны не восстанавливались)
+            local base = FL.Weapon.Original(rec, value)
+            local target = nil
+            if rec.Kind == "Recoil" and cfg.NoRecoil then
+                target = 0
+            elseif rec.Kind == "Spread" and cfg.NoSpread then
+                target = 0
+            elseif rec.Kind == "FireRate" and cfg.RapidFire then
+                target = base / mult
+            elseif rec.Kind == "Reload" and cfg.InstantReload then
+                local isSpeed = rec.Name:lower():find("speed", 1, true) ~= nil
+                target = isSpeed and (base * 10) or (base / 10)
+            elseif rec.Kind == "Ammo" and cfg.InfAmmo and value < 999 then
+                target = 999
+            end
+            if target ~= nil and math.abs(value - target) > 1e-6 then
+                FL.Weapon.Write(rec, target)
+            end
+        end
+    end
+end
+
+FL.Weapon.Scan = function(force)
+    if FL.Weapon.Scanning then return end
+    if FL.Weapon.Scanned and not force then return end
+    FL.Weapon.Scanned = true
+    if not getreg or not hookfunction then return end
+    FL.Weapon.Scanning = true
+    task.spawn(function()
+        local reg = getreg() or {}
+        local found = 0
+        for i = 1, #reg do
+            local obj = reg[i]
+            if type(obj) == "function" and not FL.Weapon.Hooked[obj] then
+                local ok, info = pcall(debug.getinfo, obj)
+                local name = ok and info and info.name or nil
+                if type(name) == "string" then
+                    local ln = name:lower()
+                    local kind = nil
+                    if ln:find("recoil", 1, true) or ln:find("weaponkick", 1, true) or ln:find("aimpunch", 1, true) then
+                        kind = "Recoil"
+                    elseif ln:find("spread", 1, true) then
+                        kind = "Spread"
+                    elseif ln:find("reload", 1, true) and (ln:find("time", 1, true) or ln:find("duration", 1, true)) then
+                        kind = "Reload"
+                    elseif ln:find("firerate", 1, true) then
+                        kind = "FireRate"
+                    end
+                    if kind then
+                        FL.Weapon.Hooked[obj] = kind
+                        local okHook = pcall(function()
+                            local old
+                            old = hookfunction(obj, function(...)
+                                local flags = Config.Fortline and Config.Fortline.WeaponMods
+                                if flags then
+                                    if kind == "Recoil" and flags.NoRecoil then return end
+                                    if kind == "Spread" and flags.NoSpread then return 0 end
+                                    if kind == "Reload" and flags.InstantReload then return 0 end
+                                    if kind == "FireRate" and flags.RapidFire then
+                                        local mult = math.clamp(tonumber(flags.FireRateMultiplier) or 2, 1, 20)
+                                        local results = { old(...) }
+                                        for r = 1, #results do
+                                            if type(results[r]) == "number" and results[r] > 0 then
+                                                results[r] = results[r] / mult
+                                            end
+                                        end
+                                        return table.unpack(results)
+                                    end
+                                end
+                                return old(...)
+                            end)
+                        end)
+                        if okHook then found = found + 1 end
+                    end
+                end
+            end
+            if i % 2000 == 0 then task.wait() end
+            if State.Unloading then break end
+        end
+        FL.Weapon.Hooks = (FL.Weapon.Hooks or 0) + found
+        FL.Weapon.Scanning = false
+        print(string.format("[FORTLINE] weapon scan done: hooks=%d (recoil/spread/reload/firerate)", found))
+    end)
+end
+
+FL.Weapon.Rescan = function()
+    FL.Weapon.Scanned = false
+    FL.Weapon.Scan(true)
+end
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
+        local cfg = Config.Fortline and Config.Fortline.WeaponMods
+        local anyOn = cfg and (cfg.NoRecoil or cfg.NoSpread or cfg.RapidFire or cfg.InstantReload or cfg.InfAmmo)
+        if anyOn then
+            if not FL.Weapon.Scanned then FL.Weapon.Scan() end
+            pcall(FL.Weapon.Apply)
+            if Config.DebugMode and (os.clock() - (FL.Weapon.LastDiag or 0)) > 5 then
+                FL.Weapon.LastDiag = os.clock()
+                local records = FL.Weapon.LastRecords or {}
+                local shown = {}
+                for i = 1, math.min(#records, 10) do
+                    local rec = records[i]
+                    table.insert(shown, string.format("%s.%s=%s", rec.Kind, rec.Name, tostring(FL.Weapon.Read(rec))))
+                end
+                local char = Core.Local.Player and Core.Local.Player.Character
+                local tool = char and char:FindFirstChildOfClass("Tool")
+                print(string.format("[FORTLINE] mods=on weapon=%s fields=%d hooks=%d | %s",
+                    tool and tool.Name or "-", #records, FL.Weapon.Hooks or 0, table.concat(shown, ", ")))
+            end
+        elseif next(FL.Weapon.Base) then
+            pcall(FL.Weapon.RestoreBase)
+        end
+        task.wait(0.35)
+    end
+    pcall(FL.Weapon.RestoreBase)
+    FL.HB.RestoreAll()
+end)
+end)(Internal.Fortline)
+
 -- [ ULTIMATE MODULE DEFINITIONS ]
 
 -- COMBAT MODULES
@@ -16055,6 +17045,65 @@ end, function(p)
     Internal.createLabel(sub, "=== CONDITIONS & PRESETS ===")
     Internal.createSelector(sub, "Preset Condition", {"Standing", "Moving", "Air", "Crouching", "SlowWalk"}, cfg.Condition, function(v) cfg.Condition = v end)
 end)
+
+
+-- [ v81 ] RAGE-ПАК FORTLINE
+
+createModule("Hitbox Expander", "Client-side hitbox scaling (Fortline and other shooters): the shot ray lands on the enlarged enemy hitbox even in the shoulder or leg.", "Rage", Config.Fortline.HitboxExpander.Enabled, function(v)
+    Config.Fortline.HitboxExpander.Enabled = v
+    if not v and Internal.Fortline then Internal.Fortline.HB.RestoreAll() end
+end, function(p)
+    local cfg = Config.Fortline.HitboxExpander
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Hitbox Size (studs)", 1, 30, cfg.Size, function(v) cfg.Size = v end, { Step = 0.5 })
+    Internal.createSelector(sub, "Target Parts", { "Head", "Torso", "Head + Torso", "Whole Body" }, cfg.Parts, function(v) cfg.Parts = v end)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Visualize"), cfg.Visualize, function(v) cfg.Visualize = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "Hitbox Color", cfg.Color, function(color) cfg.Color = color end)
+    Internal.createSlider(sub, "Transparency", 0, 100, math.floor((cfg.Transparency or 0.55) * 100), function(v) cfg.Transparency = v / 100 end)
+
+    Internal.createLabel(sub, "8-10 studs is usually enough. Whole Body gives the biggest hitbox, but resized limbs are visible to you.")
+end, nil, "Fortline")
+
+createModule("Rage Aimbot", "Instant camera snap aimbot: own FOV, own target part, live-target priority and auto-fire. Pairs with Silent Aim (that one redirects the bullet).", "Rage", Config.Fortline.RageAimbot.Enabled, function(v)
+    Config.Fortline.RageAimbot.Enabled = v
+    if not v and Internal.Fortline then
+        Internal.Fortline.Aim.Target = nil
+        Internal.Fortline.Aim.Toggled = false
+        Internal.Fortline.Aim.KeyHeld = false
+    end
+end, function(p)
+    local cfg = Config.Fortline.RageAimbot
+    local sub = Internal.createSubCard(p)
+
+    Internal.createKeybind(sub, "Aimbot Key", cfg.Keybind, function(k) cfg.Keybind = k end)
+    Internal.createSelector(sub, "Key Mode", { "Hold", "Toggle", "Always" }, cfg.Mode, function(v) cfg.Mode = v end)
+    Internal.createSelector(sub, "Target Part", { "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso" }, cfg.Hitbox, function(v) cfg.Hitbox = v end)
+    Internal.createSlider(sub, "Smoothness (1 = instant)", 1, 25, cfg.Smoothness, function(v) cfg.Smoothness = v end, { Step = 0.1 })
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Aim While Menu Open"), cfg.AimInMenu == true, function(v) cfg.AimInMenu = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "FOV")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Use FOV Limit"), cfg.UseFOV, function(v) cfg.UseFOV = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Show FOV Circle"), cfg.ShowFOV, function(v) cfg.ShowFOV = v end, nil, nil, true)
+    Internal.addColorSetting(sub, "FOV Color", cfg.FOVColor, function(color)
+        cfg.FOVColor = color
+        if State.FortlineFOV then State.FortlineFOV.Color = color end
+    end)
+    Internal.createSlider(sub, "FOV Radius", 10, 800, cfg.FieldOfView, function(v)
+        cfg.FieldOfView = v
+        if State.FortlineFOV then State.FortlineFOV.Radius = v end
+    end)
+
+    Internal.createLabel(sub, "Checks")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Visible Check"), cfg.VisibleCheck, function(v) cfg.VisibleCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Team Check"), cfg.TeamCheck, function(v) cfg.TeamCheck = v end, nil, nil, true)
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Skip Knocked (BR)"), cfg.SkipKnocked, function(v) cfg.SkipKnocked = v end, nil, nil, true)
+
+    Internal.createLabel(sub, "Auto Fire")
+    Internal.createiOSSwitch(Internal.createSettingRow(sub, "Auto Shoot"), cfg.AutoShoot, function(v) cfg.AutoShoot = v end, nil, nil, true)
+    Internal.createSlider(sub, "Shoot Delay (ms)", 10, 500, math.floor((cfg.AutoShootDelay or 0.05) * 1000), function(v) cfg.AutoShootDelay = v / 1000 end, { Step = 1 })
+end, nil, "Fortline")
 
 
 -- SKIN CHANGER DATA (Robust Asset Loader)
@@ -16733,6 +17782,54 @@ end)
 createModule("No Smoke", "Remove smoke grenade effect", "Exploit", Config.Combat.WeaponMods.NoSmoke, function(v)
     Config.Combat.WeaponMods.NoSmoke = v
 end)
+-- [ v81 ] ОРУЖЕЙНЫЙ ПАК FORTLINE
+-- Движок один на все пять модулей (Internal.Fortline.Weapon): он сам ищет поля оружия
+-- в текущей игре, поэтому под новую версию игры править код не нужно — только список
+-- найденных полей в F9.
+Internal.FortlineWeaponDiag = function(parent)
+    local sub = Internal.createSubCard(parent)
+    Internal.createLabel(sub, "Engine looks for weapon values in: tool attributes, NumberValues inside the tool, the weapon table the game exposes, and functions named like recoil / spread / reload / firerate.")
+    Internal.createLabel(sub, "Enable Misc -> Debug Mode and open F9: every 5 seconds the engine prints what it found (fields + hook count).")
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 30)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 46, 65)
+    btn.Text = "Rescan Weapon (hooks + fields)"
+    btn.TextColor3 = Theme.Text
+    btn.Font = Theme.FontMedium
+    btn.TextSize = 12
+    btn.Parent = sub
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    btn.MouseButton1Click:Connect(function()
+        if Internal.Fortline and Internal.Fortline.Weapon then Internal.Fortline.Weapon.Rescan() end
+        if Internal.ShowIslandNotification then Internal.ShowIslandNotification("Fortline weapon rescan started (see F9)", Config.Theme.Accent) end
+    end)
+end
+
+createModule("No Recoil (Fortline)", "Zeroes out weapon recoil: recoil / kick values plus matching function hooks", "Exploit", Config.Fortline.WeaponMods.NoRecoil, function(v)
+    Config.Fortline.WeaponMods.NoRecoil = v
+end, function(p) Internal.FortlineWeaponDiag(p) end, nil, "Fortline")
+
+createModule("No Spread (Fortline)", "Zeroes out bullet spread: spread / inaccuracy values plus matching function hooks", "Exploit", Config.Fortline.WeaponMods.NoSpread, function(v)
+    Config.Fortline.WeaponMods.NoSpread = v
+end, nil, nil, "Fortline")
+
+createModule("Rapid Fire (Fortline)", "Speeds up the fire rate of the current weapon", "Exploit", Config.Fortline.WeaponMods.RapidFire, function(v)
+    Config.Fortline.WeaponMods.RapidFire = v
+end, function(p)
+    local sub = Internal.createSubCard(p)
+    Internal.createSlider(sub, "Fire Rate Multiplier", 1, 10, Config.Fortline.WeaponMods.FireRateMultiplier, function(v)
+        Config.Fortline.WeaponMods.FireRateMultiplier = v
+    end, 0.1)
+    Internal.createLabel(sub, "Applies to whatever the engine found: FireRate / FireDelay / Cooldown values and functions with firerate in the name.")
+end, nil, "Fortline")
+
+createModule("Instant Reload (Fortline)", "Cuts reload time: reload time / duration values plus reload function hooks", "Exploit", Config.Fortline.WeaponMods.InstantReload, function(v)
+    Config.Fortline.WeaponMods.InstantReload = v
+end, nil, nil, "Fortline")
+
+createModule("Infinite Ammo (Fortline)", "Keeps the ammo counter high (client-side)", "Exploit", Config.Fortline.WeaponMods.InfAmmo, function(v)
+    Config.Fortline.WeaponMods.InfAmmo = v
+end, nil, nil, "Fortline")
 
 -- WEAPON MODS ENGINE (Logic from Memesens)
 task.spawn(function()
@@ -19076,6 +20173,83 @@ end, function(p)
         end
     end)
 
+    -- [ v82 ] UNIVERSAL TP: тип техники и посадка на поверхность
+    local tpCfg = Automation.VT.Cfg()
+    Internal.createLabel(sub, "Universal teleport: car, tank, helicopter, plane, boat, submarine")
+    Internal.createSelector(sub, "TP vehicle type", Automation.VT.KindOrder, tpCfg.TpType, function(v)
+        Config.VehiclesFarm.TpType = v
+        _G.Log("TP: vehicle type " .. tostring(v), Color3.fromRGB(0, 220, 190))
+    end)
+
+    local surfaceRow = Internal.createSettingRow(sub, "Drop to ground / water")
+    Internal.createiOSSwitch(surfaceRow, tpCfg.TpSurface, function(v) Config.VehiclesFarm.TpSurface = v end,
+        surfaceRow:FindFirstChild("TextLabel"), nil, true)
+    local levelRow = Internal.createSettingRow(sub, "Level vehicle (yaw only)")
+    Internal.createiOSSwitch(levelRow, tpCfg.TpLevel, function(v) Config.VehiclesFarm.TpLevel = v end,
+        levelRow:FindFirstChild("TextLabel"), nil, true)
+    local anchorRow = Internal.createSettingRow(sub, "Anchor during TP")
+    Internal.createiOSSwitch(anchorRow, tpCfg.TpAnchor, function(v) Config.VehiclesFarm.TpAnchor = v end,
+        anchorRow:FindFirstChild("TextLabel"), nil, true)
+
+    Internal.createSlider(sub, "Height offset", -20, 40, tpCfg.TpOffset, function(v)
+        Config.VehiclesFarm.TpOffset = v
+    end, { Unit = "st" })
+    Internal.createSlider(sub, "Air clearance (heli / plane)", 0, 60, tpCfg.TpAir, function(v)
+        Config.VehiclesFarm.TpAir = v
+    end, { Unit = "st" })
+    Internal.createSlider(sub, "Dive depth (submarine)", 0, 60, tpCfg.TpDepth, function(v)
+        Config.VehiclesFarm.TpDepth = v
+    end, { Unit = "st" })
+    Internal.createSlider(sub, "Attempts", 1, 10, tpCfg.TpAttempts, function(v)
+        Config.VehiclesFarm.TpAttempts = v
+    end, { Unit = "x" })
+
+    local tpBtnRow = Instance.new("Frame")
+    tpBtnRow.Size = UDim2.new(1, 0, 0, 30)
+    tpBtnRow.BackgroundTransparency = 1
+    tpBtnRow.Parent = sub
+
+    local tpGoBtn = Instance.new("TextButton")
+    tpGoBtn.Size = UDim2.new(0.6, -4, 0, 26)
+    tpGoBtn.BackgroundColor3 = Color3.fromRGB(28, 92, 72)
+    tpGoBtn.Text = "TP NOW"
+    tpGoBtn.TextColor3 = Theme.Text
+    tpGoBtn.Font = Theme.FontBold
+    tpGoBtn.TextSize = 10
+    tpGoBtn.Parent = tpBtnRow
+    tpGoBtn.Position = UDim2.new(0, 0, 0, 2)
+    Instance.new("UICorner", tpGoBtn).CornerRadius = UDim.new(0, 6)
+
+    local tpDiagBtn = Instance.new("TextButton")
+    tpDiagBtn.Size = UDim2.new(0.4, -4, 0, 26)
+    tpDiagBtn.BackgroundColor3 = Color3.fromRGB(45, 38, 60)
+    tpDiagBtn.Text = "DIAGNOSE"
+    tpDiagBtn.TextColor3 = Theme.Text
+    tpDiagBtn.Font = Theme.FontBold
+    tpDiagBtn.TextSize = 10
+    tpDiagBtn.Parent = tpBtnRow
+    tpDiagBtn.Position = UDim2.new(0.6, 4, 0, 2)
+    Instance.new("UICorner", tpDiagBtn).CornerRadius = UDim.new(0, 6)
+
+    tpGoBtn.MouseButton1Click:Connect(function()
+        if (Config.VehiclesFarm.TpCoords or "") == "" then
+            _G.Log("TP: coordinates are empty", Color3.fromRGB(255, 170, 0))
+            return
+        end
+        task.spawn(function()
+            local ok, err, extra = Automation.TeleportToCoords(Config.VehiclesFarm.TpCoords)
+            local msg = ok and ("TP: OK " .. tostring(extra and extra.kind or ""))
+                or ("TP: FAILED - " .. tostring(err))
+            _G.Log(msg, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 80, 80))
+        end)
+    end)
+
+    tpDiagBtn.MouseButton1Click:Connect(function()
+        local kind, metrics = Automation.VT.Diagnose()
+        _G.Log(string.format("TP diag: %s, bottom %.1f", tostring(kind), metrics and metrics.bottom or 0),
+            Color3.fromRGB(0, 220, 190))
+    end)
+
     refreshVehicles()
     vBtn.Text = tostring(Config.VehiclesFarm.Vehicle)
     print(string.format("[VEH-FARM] vehicles: %d (source: %s), selected: '%s'",
@@ -20434,6 +21608,7 @@ _G.OvermindBeginUnload = function()
         end
         pcall(function() if State.SilentFOV then State.SilentFOV.Visible = false; State.SilentFOV:Remove() end end)
         pcall(function() if State.RageFOV then State.RageFOV.Visible = false; State.RageFOV:Remove() end end)
+        pcall(function() if State.FortlineFOV then State.FortlineFOV.Visible = false; State.FortlineFOV:Remove() end end)
         pcall(function() if State.LegitFOV then State.LegitFOV.Visible = false; State.LegitFOV:Remove() end end)
         pcall(function() if State.PenText then State.PenText.Visible = false; State.PenText:Remove() end end)
 
