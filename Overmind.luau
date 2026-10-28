@@ -670,7 +670,28 @@ Config = {
     GoldFarm = { Enabled = false, Speed = 150, CollectDelay = 0.5, WashDelay = 3 },
     PathSystem = { Speed = 100, RecordInterval = 0.2, Recording = false, Playing = false, SelectedPath = nil },
     CarCrushers = { AutoFarm = false, AutoBuy = true, CrusherName = "Pressure Pit", TargetCFrame = CFrame.new(205.893, 81.322, -532.979) },
-    WarTycoonFarm = { Enabled = false, Speed = 200, Noclip = false, TargetCFrameStr = "CFrame.new(0, 0, 0)" },
+    -- [ v83 ] War Tycoon farm больше не летает: персонаж телепортируется на CFrame
+    WarTycoonFarm = {
+        Enabled = false,
+        TargetCFrameStr = "CFrame.new(0, 0, 0)",
+        TpThreshold = 12,
+        TpOffset = 3,
+        TpSurface = true,
+        TpAnchor = true,
+        TpAttempts = 4,
+        RepeatDelay = 0.8,
+    },
+    -- [ v83 ] Auto Death / Auto Skip: добивание нокдауна и выход с экрана смерти
+    AutoRespawn = {
+        Death = false,
+        DeathKey = "X",
+        DeathSeconds = 5,
+        DeathRadius = 45,
+        DeathSelf = true,
+        Skip = false,
+        SkipKeywords = "skip, respawn, play again, continue, redeploy",
+        SkipInterval = 0.4,
+    },
     VehiclesFarm = {
         Enabled = false, AutoSpawn = true, Vehicle = "MRZR Buggy",
         TpAfterSpawn = false, TpCoords = "", TpDelay = 1.0,
@@ -1371,11 +1392,29 @@ Internal.CelestialBindHover = function(btn)
     end
 end
 
-Internal.createSettingRow = function(parent, name)
+Internal.createSettingRow = function(parent, name, desc)
     local Row = Instance.new("Frame")
     Row.Size = UDim2.new(1, 0, 0, 36)
     Row.BackgroundTransparency = 1
     Row.Parent = parent
+
+    -- [ v83 ] подсветка строки при наведении
+    local Highlight = Instance.new("Frame")
+    Highlight.Name = "RowHighlight"
+    Highlight.Size = UDim2.fromScale(1, 1)
+    Highlight.BackgroundColor3 = Config.Theme.Accent
+    Highlight.BackgroundTransparency = 1
+    Highlight.BorderSizePixel = 0
+    Highlight.ZIndex = 0
+    Highlight.Parent = Row
+    Instance.new("UICorner", Highlight).CornerRadius = UDim.new(0, 6)
+
+    Row.MouseEnter:Connect(function()
+        Core.TweenService:Create(Highlight, TweenInfo.new(0.15), { BackgroundTransparency = 0.93 }):Play()
+    end)
+    Row.MouseLeave:Connect(function()
+        Core.TweenService:Create(Highlight, TweenInfo.new(0.2), { BackgroundTransparency = 1 }):Play()
+    end)
 
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -50, 1, 0)  -- Give more space by default
@@ -1388,6 +1427,9 @@ Internal.createSettingRow = function(parent, name)
     Label.TextTruncate = Enum.TextTruncate.AtEnd  -- Keep truncation but with more space
     Label.Parent = Row
 
+    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(Row, desc)
+    end
     return Row
 end
 
@@ -1437,7 +1479,7 @@ Internal.createKeybind = function(parent, name, default, callback)
     end
 end
 
-Internal.createiOSSwitch = function(parent, default, callback, title, desc, isSubSetting)
+Internal.createiOSSwitch = function(parent, default, callback, title, desc, isSubSetting, tip)
     local Switch = Instance.new("TextButton")
     Switch.Name = "iOS_Switch"
     Switch.Size = UDim2.new(0, 40, 0, 20)
@@ -1501,6 +1543,9 @@ Internal.createiOSSwitch = function(parent, default, callback, title, desc, isSu
     end
     Switch.MouseButton1Click:Connect(toggle)
     updateVisuals(false)
+    if type(tip) == "string" and tip ~= "" and Internal.AttachTip and parent:IsA("GuiObject") then
+        Internal.AttachTip(parent, tip)
+    end
     return { Toggle = toggle, Set = setState }
 end
 
@@ -1521,6 +1566,14 @@ Internal.createSubCard = function(parent)
     local Layout = Instance.new("UIListLayout", Card)
     Layout.Padding = UDim.new(0, 10)
     Layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    -- [ v83 ] карточка подсвечивается при наведении
+    Card.MouseEnter:Connect(function()
+        Core.TweenService:Create(Stroke, TweenInfo.new(0.18), { Color = Config.Theme.Accent, Transparency = 0.55 }):Play()
+    end)
+    Card.MouseLeave:Connect(function()
+        Core.TweenService:Create(Stroke, TweenInfo.new(0.25), { Color = Color3.fromRGB(30, 31, 45), Transparency = 0 }):Play()
+    end)
     return Card
 end
 
@@ -1557,6 +1610,8 @@ Internal.createSlider = function(parent, name, min, max, default, callback, disp
     -- [ v74 ] Единица измерения для подписи: opts = { Unit = "ms" } рисует «267.5 ms»,
     -- как в макете Designes/slider_bar.html. Без Unit подпись прежняя, без хвоста.
     local unit = (type(opts) == "table" and tostring(opts.Unit or "")) or ""
+    -- [ v83 ] описание настройки из opts.Desc
+    local desc = (type(opts) == "table" and type(opts.Desc) == "string") and opts.Desc or nil
 
     -- Сколько знаков после точки показывать: шаг 0.5 -> один знак, шаг 0.05 -> два
     local decimals = 0
@@ -1862,9 +1917,14 @@ Internal.createSlider = function(parent, name, min, max, default, callback, disp
             setHot(hot)
         end)
     end)
+
+    if desc and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(Container, desc)
+    end
+    return Container
 end
 
-Internal.createSelector = function(parent, text, options, current, callback)
+Internal.createSelector = function(parent, text, options, current, callback, desc)
     local row = Internal.createSettingRow(parent, text)
     row.ZIndex = 5  -- Ensure rows can layer
 
@@ -1976,7 +2036,10 @@ Internal.createSelector = function(parent, text, options, current, callback)
 
     updateOptions(options)
 
-    return { Button = MainBtn, Update = updateOptions }
+    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(row, desc)
+    end
+    return { Button = MainBtn, Update = updateOptions, Row = row }
 end
 
 Internal.createMultiSelector = function(parent, text, options, currentConfig, callback)
@@ -2103,7 +2166,7 @@ Internal.createLabel = function(parent, text)
     return Label
 end
 
-Internal.addColorSetting = function(parent, text, color, callback)
+Internal.addColorSetting = function(parent, text, color, callback, desc)
     local row = Internal.createSettingRow(parent, text)
     local cp = Instance.new("TextButton")
     cp.Size = UDim2.new(0, 16, 0, 16); cp.Position = UDim2.new(1, -40, 0.5, -8); cp.BackgroundColor3 = color; cp.Text = ""; cp.Parent = row
@@ -2111,6 +2174,9 @@ Internal.addColorSetting = function(parent, text, color, callback)
     local s = Instance.new("UIStroke", cp); s.Color = Color3.new(1,1,1); s.Thickness = 1
     table.insert(Internal.UIObjects.Accents, s)
     cp.MouseButton1Click:Connect(function() openPalette(cp, callback) end)
+    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(row, desc)
+    end
     return row
 end
 
@@ -2135,7 +2201,7 @@ Internal.createInput = function(parent, name, default, callback)
     end)
 end
 
-Internal.createStringInput = function(parent, name, default, callback)
+Internal.createStringInput = function(parent, name, default, callback, desc)
     local row = Internal.createSettingRow(parent, name)
     local InputBox = Instance.new("TextBox")
     InputBox.Size = UDim2.new(0, 120, 0, 26)
@@ -2152,6 +2218,357 @@ Internal.createStringInput = function(parent, name, default, callback)
     stroke.Color = Theme.Separator
     stroke.Thickness = 1.2
     InputBox.FocusLost:Connect(function() callback(InputBox.Text) end)
+    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(row, desc)
+    end
+    return row, InputBox
+end
+
+-- [ v83 ] ОПИСАНИЯ НАСТРОЕК ПРИ НАВЕДЕНИИ + аккуратные секции и кнопки
+-- Тултип живёт в отдельном ScreenGui, поэтому его не режет ScrollingFrame карточки.
+Internal.Tips = {}
+Internal.TipLayer = nil
+Internal.TipShown = false
+Internal._tipWatcher = false
+
+function Internal.BuildTipLayer()
+    if Internal.TipLayer and Internal.TipLayer.Parent then return Internal.TipLayer end
+    -- повторная инъекция не должна оставлять старый слой с подсказками
+    pcall(function()
+        local host = (gethui and gethui()) or game:GetService("CoreGui")
+        for _, old in ipairs(host:GetChildren()) do
+            if old:IsA("ScreenGui") and old.Name == "OvermindTips" then old:Destroy() end
+        end
+    end)
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "OvermindTips"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 70000
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function()
+        if gethui then
+            gui.Parent = gethui()
+        elseif syn and syn.protect_gui then
+            syn.protect_gui(gui)
+            gui.Parent = game:GetService("CoreGui")
+        else
+            gui.Parent = game:GetService("CoreGui")
+        end
+    end)
+    if not gui.Parent then
+        gui.Parent = Core.Local.Player:FindFirstChild("PlayerGui")
+    end
+
+    local box = Instance.new("Frame")
+    box.Name = "TipBox"
+    box.BackgroundColor3 = Color3.fromRGB(19, 20, 30)
+    box.BorderSizePixel = 0
+    box.Size = UDim2.fromOffset(254, 0)
+    box.AutomaticSize = Enum.AutomaticSize.Y
+    box.Visible = false
+    box.ZIndex = 2
+    box.Parent = gui
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+
+    local stroke = Instance.new("UIStroke", box)
+    stroke.Color = Config.Theme.Accent
+    stroke.Thickness = 1
+    stroke.Transparency = 0.35
+
+    local pad = Instance.new("UIPadding", box)
+    pad.PaddingTop = UDim.new(0, 8)
+    pad.PaddingBottom = UDim.new(0, 9)
+    pad.PaddingLeft = UDim.new(0, 11)
+    pad.PaddingRight = UDim.new(0, 11)
+
+    local text = Instance.new("TextLabel")
+    text.Name = "TipText"
+    text.BackgroundTransparency = 1
+    text.Size = UDim2.new(1, 0, 0, 0)
+    text.AutomaticSize = Enum.AutomaticSize.Y
+    text.Text = ""
+    text.TextColor3 = Color3.fromRGB(214, 218, 232)
+    text.TextSize = 11
+    text.Font = Enum.Font.GothamMedium
+    text.TextWrapped = true
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.TextYAlignment = Enum.TextYAlignment.Top
+    text.ZIndex = 3
+    text.Parent = box
+
+    Internal.TipLayer = gui
+    return gui
+end
+
+function Internal.ShowTip(text)
+    local gui = Internal.BuildTipLayer()
+    local box = gui and gui:FindFirstChild("TipBox")
+    local label = box and box:FindFirstChild("TipText")
+    if not box or not label then return end
+    if label.Text ~= text then label.Text = text end
+    box.Visible = true
+end
+
+function Internal.HideTip()
+    local gui = Internal.TipLayer
+    local box = gui and gui:FindFirstChild("TipBox")
+    if box then box.Visible = false end
+end
+
+function Internal.PlaceTip(mouse)
+    local gui = Internal.TipLayer
+    local box = gui and gui:FindFirstChild("TipBox")
+    if not box then return end
+    local size = box.AbsoluteSize
+    if size.X <= 0 or size.Y <= 0 then return end
+    local cam = workspace.CurrentCamera
+    local viewport = (cam and cam.ViewportSize) or Vector2.new(1920, 1080)
+    local x = mouse.X + 16
+    local y = mouse.Y + 18
+    if x + size.X > viewport.X - 6 then x = mouse.X - size.X - 12 end
+    if y + size.Y > viewport.Y - 6 then y = mouse.Y - size.Y - 12 end
+    box.Position = UDim2.fromOffset(math.max(4, math.round(x)), math.max(4, math.round(y)))
+end
+
+function Internal.StartTipWatcher()
+    if Internal._tipWatcher then return end
+    Internal._tipWatcher = true
+    task.spawn(function()
+        while not State.Unloading and IsCurrentInstance() and ScreenGui.Parent do
+            task.wait(0.06)
+            local menuOpen = Internal.MainFrame and Internal.MainFrame.Visible
+            if not menuOpen then
+                if Internal.TipShown then
+                    Internal.TipShown = false
+                    Internal.HideTip()
+                end
+            else
+                local mouse = Core.Services.UserInputService:GetMouseLocation()
+                local found = nil
+                for i = #Internal.Tips, 1, -1 do
+                    local entry = Internal.Tips[i]
+                    local obj = entry.Target
+                    if not obj or not obj.Parent then
+                        table.remove(Internal.Tips, i)
+                    elseif obj.Visible and obj.AbsoluteSize.X > 4 and obj.AbsoluteSize.Y > 4 then
+                        local pos = obj.AbsolutePosition
+                        local size = obj.AbsoluteSize
+                        if mouse.X >= pos.X and mouse.X <= pos.X + size.X
+                            and mouse.Y >= pos.Y and mouse.Y <= pos.Y + size.Y then
+                            found = entry
+                            break
+                        end
+                    end
+                end
+
+                if found then
+                    Internal.TipShown = true
+                    Internal.ShowTip(found.Text)
+                    Internal.PlaceTip(mouse)
+                elseif Internal.TipShown then
+                    Internal.TipShown = false
+                    Internal.HideTip()
+                end
+            end
+        end
+        if Internal.TipLayer then
+            Internal.TipLayer:Destroy()
+            Internal.TipLayer = nil
+        end
+    end)
+end
+
+function Internal.AttachTip(target, text)
+    if not target or typeof(target) ~= "Instance" or not target:IsA("GuiObject") then return end
+    if type(text) ~= "string" or text == "" then return end
+    for _, entry in ipairs(Internal.Tips) do
+        if entry.Target == target then
+            entry.Text = text
+            return
+        end
+    end
+    table.insert(Internal.Tips, { Target = target, Text = text })
+    Internal.BuildTipLayer()
+    Internal.StartTipWatcher()
+end
+
+-- [ v83 ] заголовок секции внутри карточки: акцентная риска + uppercase
+Internal.createSectionHeader = function(parent, text, color)
+    local holder = Instance.new("Frame")
+    holder.Name = "SectionHeader"
+    holder.Size = UDim2.new(1, 0, 0, 20)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.fromOffset(3, 12)
+    bar.Position = UDim2.new(0, 0, 0.5, -6)
+    bar.BackgroundColor3 = color or Config.Theme.Accent
+    bar.BorderSizePixel = 0
+    bar.Parent = holder
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -12, 1, 0)
+    label.Position = UDim2.fromOffset(9, 0)
+    label.BackgroundTransparency = 1
+    label.Text = string.upper(tostring(text or ""))
+    label.TextColor3 = Color3.fromRGB(198, 203, 222)
+    label.TextSize = 10
+    label.Font = Enum.Font.GothamBold
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.Parent = holder
+    return holder
+end
+
+-- [ v83 ] единая кнопка с ховером и подсказкой (заменяет самодельные TextButton в карточках)
+Internal.createActionButton = function(parent, text, opts)
+    opts = opts or {}
+    local height = opts.Height or 28
+    local base = opts.Color or Color3.fromRGB(38, 40, 56)
+    local hover = opts.HoverColor or base:Lerp(Color3.new(1, 1, 1), 0.12)
+
+    local btn = Instance.new("TextButton")
+    btn.Size = opts.Size or UDim2.new(1, 0, 0, height)
+    if opts.Position then btn.Position = opts.Position end
+    btn.BackgroundColor3 = base
+    btn.Text = text
+    btn.TextColor3 = opts.TextColor or Theme.Text
+    btn.TextSize = opts.TextSize or 10
+    btn.Font = Theme.FontBold
+    btn.AutoButtonColor = false
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+
+    local stroke = Instance.new("UIStroke", btn)
+    stroke.Color = opts.Stroke or Theme.Separator
+    stroke.Thickness = 1
+    stroke.Transparency = 0.35
+
+    btn.MouseEnter:Connect(function()
+        Core.TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = hover }):Play()
+        Core.TweenService:Create(stroke, TweenInfo.new(0.15), { Transparency = 0 }):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        Core.TweenService:Create(btn, TweenInfo.new(0.2), { BackgroundColor3 = base }):Play()
+        Core.TweenService:Create(stroke, TweenInfo.new(0.2), { Transparency = 0.35 }):Play()
+    end)
+
+    if opts.Tip then Internal.AttachTip(btn, opts.Tip) end
+    if type(opts.Callback) == "function" then
+        btn.MouseButton1Click:Connect(opts.Callback)
+    end
+    return btn
+end
+
+-- [ v83 ] строка статуса: точка + текст, обновляется из модуля
+Internal.createStatusStrip = function(parent, text, color)
+    local strip = Instance.new("Frame")
+    strip.Name = "StatusStrip"
+    strip.Size = UDim2.new(1, 0, 0, 24)
+    strip.BackgroundColor3 = Color3.fromRGB(16, 17, 25)
+    strip.BorderSizePixel = 0
+    strip.Parent = parent
+    Instance.new("UICorner", strip).CornerRadius = UDim.new(0, 6)
+
+    local stroke = Instance.new("UIStroke", strip)
+    stroke.Color = Color3.fromRGB(32, 34, 48)
+    stroke.Thickness = 1
+
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.fromOffset(6, 6)
+    dot.Position = UDim2.new(0, 9, 0.5, -3)
+    dot.BackgroundColor3 = color or Config.Theme.Accent
+    dot.BorderSizePixel = 0
+    dot.Parent = strip
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -24, 1, 0)
+    label.Position = UDim2.fromOffset(21, 0)
+    label.BackgroundTransparency = 1
+    label.Text = tostring(text or "")
+    label.TextColor3 = Color3.fromRGB(168, 174, 194)
+    label.TextSize = 10
+    label.Font = Enum.Font.GothamMedium
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.Parent = strip
+
+    local function setStatus(newText, newColor)
+        if not label.Parent then return end
+        label.Text = tostring(newText or "")
+        if newColor then dot.BackgroundColor3 = newColor end
+    end
+    return strip, setStatus
+end
+
+-- [ v83 ] общая секция Auto Death / Auto Skip для War Tycoon Farm и Vehicles Farm Helper
+Internal.createAutoRespawnSection = function(parent)
+    local cfg = Automation.AutoRespawn.Cfg()
+    Internal.createSectionHeader(parent, "Death handler", Color3.fromRGB(255, 120, 120))
+
+    local deathRow = Internal.createSettingRow(parent, "Auto Death (finish downed)",
+        "Presses the chosen key while a downed player is near you, or while you are downed yourself. Stops after the time limit.")
+    Internal.createiOSSwitch(deathRow, cfg.Death, function(v)
+        Config.AutoRespawn.Death = v
+        if v then
+            Automation.AutoRespawn.Start()
+            _G.Log("Auto Death: ON (" .. tostring(Config.AutoRespawn.DeathKey) .. ")", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("Auto Death: OFF", Color3.fromRGB(255, 120, 120))
+        end
+    end, deathRow:FindFirstChild("TextLabel"), nil, true)
+
+    Internal.createSelector(parent, "Auto Death key", Automation.AutoRespawn.KeyNames, cfg.DeathKey, function(v)
+        Config.AutoRespawn.DeathKey = v
+    end, "Key sent while a player is downed. X is used in War Tycoon; other common keys are in the list.")
+
+    Internal.createSlider(parent, "Press for at most", 1, 20, cfg.DeathSeconds, function(v)
+        Config.AutoRespawn.DeathSeconds = v
+    end, { Unit = "s", Desc = "How long the key keeps being pressed for one downed player before the script waits again." })
+
+    Internal.createSlider(parent, "Downed search radius", 0, 200, cfg.DeathRadius, function(v)
+        Config.AutoRespawn.DeathRadius = v
+    end, { Unit = "st", Desc = "Only downed players within this distance are finished. 0 turns off the search for other players." })
+
+    local selfRow = Internal.createSettingRow(parent, "Also when I am downed",
+        "Keeps pressing the key when your own character is knocked down, so you die and respawn faster.")
+    Internal.createiOSSwitch(selfRow, cfg.DeathSelf, function(v) Config.AutoRespawn.DeathSelf = v end,
+        selfRow:FindFirstChild("TextLabel"), nil, true)
+
+    local skipRow = Internal.createSettingRow(parent, "Auto Skip death screen",
+        "Detects the ELIMINATED / dead screen and clicks its SKIP (or RESPAWN / CONTINUE) button automatically.")
+    Internal.createiOSSwitch(skipRow, cfg.Skip, function(v)
+        Config.AutoRespawn.Skip = v
+        if v then
+            Automation.AutoRespawn.Start()
+            _G.Log("Auto Skip: ON", Color3.fromRGB(0, 255, 150))
+        else
+            _G.Log("Auto Skip: OFF", Color3.fromRGB(255, 120, 120))
+        end
+    end, skipRow:FindFirstChild("TextLabel"), nil, true)
+
+    Internal.createStringInput(parent, "Skip button text", cfg.SkipKeywords, function(v)
+        Config.AutoRespawn.SkipKeywords = v
+    end, "Comma-separated words used to find the skip button on the death screen. Default: skip, respawn, play again, continue, redeploy.")
+
+    Internal.createSlider(parent, "Skip check every", 0.2, 2, cfg.SkipInterval, function(v)
+        Config.AutoRespawn.SkipInterval = v
+    end, { Step = 0.1, Unit = "s", Desc = "How often the skip button is searched for while you are dead. Lower is faster but scans the UI more often." })
+
+    local strip, setStatus = Internal.createStatusStrip(parent, "death handler idle")
+    task.spawn(function()
+        while strip.Parent and not State.Unloading and IsCurrentInstance() do
+            local ok = Automation.AutoRespawn.StatusOk ~= false
+            setStatus("Auto respawn: " .. tostring(Automation.AutoRespawn.Status or "idle"),
+                ok and Color3.fromRGB(0, 220, 160) or Color3.fromRGB(255, 110, 110))
+            task.wait(0.35)
+        end
+    end)
 end
 
 Internal.createBindSubCard = function(parent, modName)
@@ -9601,81 +10018,583 @@ function Automation.StringToCFrame(str)
     return nil
 end
 
+-- [ v83 ] WAR TYCOON FARM: телепорт вместо полёта
+-- Раньше персонаж поднимался на 300 студов и летел к цели: медленно, ловил коллизии и
+-- оставлял PlatformStand включённым. Теперь это обычный TP: точка считается от поверхности,
+-- HRP на пару кадров якорится, скорости обнуляются, прибытие проверяется и есть ретраи.
+Automation.WT = Automation.WT or {}
+Automation.WT.Busy = false
+Automation.WT.LastStatus = "idle"
+Automation.WT.LastOk = nil
+Automation.WT._loopActive = false
+
+function Automation.WT.Cfg()
+    local c = Config.WarTycoonFarm
+    if type(c) ~= "table" then
+        c = {}
+        Config.WarTycoonFarm = c
+    end
+    if type(c.TargetCFrameStr) ~= "string" then c.TargetCFrameStr = "CFrame.new(0, 0, 0)" end
+    c.TpThreshold = math.clamp(tonumber(c.TpThreshold) or 12, 1, 500)
+    c.TpOffset = math.clamp(tonumber(c.TpOffset) or 3, -50, 200)
+    c.TpAttempts = math.clamp(math.floor(tonumber(c.TpAttempts) or 4), 1, 10)
+    c.RepeatDelay = math.clamp(tonumber(c.RepeatDelay) or 0.8, 0.2, 10)
+    c.TpSurface = (c.TpSurface ~= false)
+    c.TpAnchor = (c.TpAnchor ~= false)
+    return c
+end
+
+-- что под точкой: земля, вода или пустота
+function Automation.WT.SurfaceAt(pos)
+    local params = RaycastParams.new()
+    pcall(function() params.FilterType = Enum.RaycastFilterType.Exclude end)
+    pcall(function() params.FilterType = Enum.RaycastFilterType.Blacklist end)
+    local ignore = {}
+    local lp = Core.LocalPlayer
+    if lp and lp.Character then ignore[#ignore + 1] = lp.Character end
+    pcall(function() params.FilterDescendantsInstances = ignore end)
+    pcall(function() params.IgnoreWater = false end)
+    local origin = Vector3.new(pos.X, pos.Y + 600, pos.Z)
+    local ok, hit = pcall(function() return workspace:Raycast(origin, Vector3.new(0, -2400, 0), params) end)
+    if ok and hit then
+        return { y = hit.Position.Y, material = hit.Material, water = hit.Material == Enum.Material.Water }
+    end
+    return nil
+end
+
+-- куда реально ставить персонажа: на поверхность под целью + высота HRP над ступнями
+function Automation.WT.Solve(cf)
+    local cfg = Automation.WT.Cfg()
+    local rotation = cf - cf.Position
+    if cfg.TpSurface then
+        local surface = Automation.WT.SurfaceAt(cf.Position)
+        if surface then
+            local y = surface.y + 3 + cfg.TpOffset
+            return CFrame.new(Vector3.new(cf.Position.X, y, cf.Position.Z)) * rotation, surface
+        end
+    end
+    return CFrame.new(cf.Position + Vector3.new(0, cfg.TpOffset, 0)) * rotation, nil
+end
+
+-- сам TP персонажа; если сидим в технике — отдаём её в универсальный Vehicle TP
+function Automation.WT.Jump(cf, opts)
+    opts = opts or {}
+    local cfg = Automation.WT.Cfg()
+    local attempts = math.clamp(math.floor(tonumber(opts.Attempts) or cfg.TpAttempts or 4), 1, 10)
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    if not char then return false, "character not found" end
+
+    if Automation.IsSeatedInVehicle and Automation.IsSeatedInVehicle()
+        and Automation.VT and Automation.VT.Jump then
+        return Automation.VT.Jump(cf, { Attempts = attempts })
+    end
+
+    local target, surface = Automation.WT.Solve(cf)
+    local arrived, lastErr = false, "teleport did not happen"
+
+    Automation.WT.Busy = true
+    local okRun, runErr = pcall(function()
+        for attempt = 1, attempts do
+            char = lp.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum then
+                lastErr = "character disappeared"
+                return
+            end
+
+            local anchored = false
+            if cfg.TpAnchor then
+                pcall(function() hrp.Anchored = true end)
+                anchored = true
+            end
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+
+            local moved = pcall(function() char:PivotTo(target) end)
+            if not moved then
+                pcall(function() hrp.CFrame = target end)
+            end
+            task.wait(0.08)
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+            if anchored then pcall(function() hrp.Anchored = false end) end
+            task.wait(0.12)
+
+            local dist = hrp.Parent and (hrp.Position - target.Position).Magnitude or nil
+            print(string.format("[WT-TP] attempt %d/%d: %s, distance %.1f studs",
+                attempt, attempts, moved and "moved" or "NOT moved", dist or -1))
+            if dist and dist <= 10 then
+                arrived = true
+                return
+            end
+            lastErr = dist and string.format("did not arrive: %.1f studs left", dist) or "character disappeared"
+            task.wait(0.12)
+        end
+    end)
+    Automation.WT.Busy = false
+
+    if not okRun then return false, "teleport error: " .. tostring(runErr) end
+    local extra = { mode = "character", surface = surface, target = target }
+    if arrived then return true, nil, extra end
+    return false, lastErr, extra
+end
+
 function Automation.WarTycoonFarmLoop()
+    if Automation.WT._loopActive then return end
+    Automation.WT._loopActive = true
+
     task.spawn(function()
-        _G.Log("War Tycoon Farm: Active", Color3.fromRGB(0, 255, 150))
+        local lastLog = 0
+        _G.Log("War Tycoon Farm: Active (teleport)", Color3.fromRGB(0, 255, 150))
         while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() do
-            local success, err = pcall(function()
-                local char = Core.LocalPlayer.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local cfg = Automation.WT.Cfg()
+            local char = Core.LocalPlayer and Core.LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-                if hrp and hum and hum.Health > 0 then
-                    local targetCF = Automation.StringToCFrame(Config.WarTycoonFarm.TargetCFrameStr)
-                    if not targetCF then
-                        _G.Log("War Tycoon: Invalid CFrame!", Color3.fromRGB(255, 0, 0))
-                        Config.WarTycoonFarm.Enabled = false
-                        if State.Modules["War Tycoon Farm"] and State.Modules["War Tycoon Farm"].Toggle then
-                            State.Modules["War Tycoon Farm"].Toggle()
-                        end
-                        return
+            if hrp and hum and hum.Health > 0 then
+                local target = Automation.StringToCFrame(cfg.TargetCFrameStr)
+                if not target then
+                    Automation.WT.LastOk = false
+                    Automation.WT.LastStatus = "invalid CFrame"
+                    _G.Log("War Tycoon: Invalid CFrame!", Color3.fromRGB(255, 0, 0))
+                    Config.WarTycoonFarm.Enabled = false
+                    if State.Modules["War Tycoon Farm"] and State.Modules["War Tycoon Farm"].Toggle then
+                        State.Modules["War Tycoon Farm"].Toggle()
                     end
+                    break
+                end
 
-                    local dist = (hrp.Position - targetCF.Position).Magnitude
-                    if dist > 15 then
-                        hum.PlatformStand = true
-
-                        -- Phase 1: Fly UP
-                        local upHeight = hrp.Position.Y + 300
-                        _G.Log("War Tycoon: Rising...", Color3.fromRGB(255, 255, 0))
-                        while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() and hum.Health > 0 and hrp.Position.Y < upHeight do
-                            local dt = task.wait()
-                            hrp.Velocity = Vector3.zero
-                            hrp.CFrame = hrp.CFrame + Vector3.new(0, Config.WarTycoonFarm.Speed * dt, 0)
-
-                            if Config.WarTycoonFarm.Noclip then
-                                for _, p in char:GetDescendants() do
-                                    if p:IsA("BasePart") then p.CanCollide = false end
-                                end
-                            end
-                        end
-
-                        -- Phase 2: Fly to Target
-                        _G.Log("War Tycoon: Moving to Target...", Color3.fromRGB(255, 255, 0))
-                        while Config.WarTycoonFarm.Enabled and not State.Unloading and IsCurrentInstance() and hum.Health > 0 and (hrp.Position - targetCF.Position).Magnitude > 8 do
-                            local dt = task.wait()
-                            local toTarget = (targetCF.Position - hrp.Position)
-                            local dir = toTarget.Unit
-                            hrp.Velocity = Vector3.zero
-                            hrp.CFrame = hrp.CFrame + (dir * Config.WarTycoonFarm.Speed * dt)
-                            hrp.CFrame = CFrame.new(hrp.Position, targetCF.Position)
-
-                            if Config.WarTycoonFarm.Noclip then
-                                for _, p in char:GetDescendants() do
-                                    if p:IsA("BasePart") then p.CanCollide = false end
-                                end
-                            end
-                        end
-
-                        if Config.WarTycoonFarm.Enabled and hum.Health > 0 then
-                            hrp.CFrame = targetCF
-                            hum.PlatformStand = false
-                            _G.Log("War Tycoon: Reached!", Color3.fromRGB(0, 255, 0))
+                local dist = (hrp.Position - target.Position).Magnitude
+                if dist > cfg.TpThreshold then
+                    local ok, err = Automation.WT.Jump(target)
+                    if ok then
+                        Automation.WT.LastOk = true
+                        Automation.WT.LastStatus = "arrived"
+                        if tick() - lastLog > 2 then
+                            lastLog = tick()
+                            _G.Log("War Tycoon: teleported", Color3.fromRGB(0, 255, 0))
                         end
                     else
-                        hum.PlatformStand = false
-                        task.wait(1)
+                        Automation.WT.LastOk = false
+                        Automation.WT.LastStatus = "failed: " .. tostring(err)
+                        if tick() - lastLog > 2 then
+                            lastLog = tick()
+                            _G.Log("War Tycoon TP: FAILED - " .. tostring(err), Color3.fromRGB(255, 80, 80))
+                        end
                     end
+                    task.wait(cfg.RepeatDelay)
                 else
-                    task.wait(1)
+                    Automation.WT.LastOk = true
+                    Automation.WT.LastStatus = "in place"
+                    task.wait(0.5)
+                end
+            else
+                task.wait(0.6)
+            end
+        end
+        Automation.WT._loopActive = false
+        _G.Log("War Tycoon Farm: Stopped", Color3.fromRGB(255, 50, 50))
+    end)
+end
+
+-- [ v83 ] AUTO DEATH / AUTO SKIP
+-- Auto Death: пока игрок лежит в нокдауне, скрипт жмёт X (настраивается) около 5 секунд.
+-- Auto Skip: на экране ELIMINATED находит кнопку SKIP / RESPAWN / CONTINUE и нажимает её.
+Automation.AutoRespawn = Automation.AutoRespawn or {}
+Automation.AutoRespawn.KeyNames = { "X", "E", "F", "G", "Q", "R", "C", "Space", "Return", "Backspace" }
+Automation.AutoRespawn.Status = "idle"
+Automation.AutoRespawn.StatusOk = true
+Automation.AutoRespawn._loopActive = false
+Automation.AutoRespawn._lastPress = 0
+Automation.AutoRespawn._pressCount = 0
+Automation.AutoRespawn._episodeStart = 0
+Automation.AutoRespawn._lastSkip = 0
+
+Automation.AutoRespawn._DownedAttributes = {
+    "Knocked", "KnockedOut", "Downed", "IsDowned", "IsKnocked", "Down", "IsDown",
+    "Ragdoll", "Ragdolled", "Incapacitated", "BleedOut", "Fallen", "IsFallen", "Surrendered",
+}
+
+Automation.AutoRespawn._DownedStates = (function()
+    local out = {}
+    for _, name in ipairs({ "Physics", "Ragdoll", "FallingDown" }) do
+        pcall(function() out[Enum.HumanoidStateType[name]] = true end)
+    end
+    return out
+end)()
+
+function Automation.AutoRespawn.Cfg()
+    local c = Config.AutoRespawn
+    if type(c) ~= "table" then
+        c = {}
+        Config.AutoRespawn = c
+    end
+    if type(c.DeathKey) ~= "string" or c.DeathKey == "" then c.DeathKey = "X" end
+    c.Death = (c.Death == true)
+    c.Skip = (c.Skip == true)
+    c.DeathSelf = (c.DeathSelf ~= false)
+    c.DeathSeconds = math.clamp(tonumber(c.DeathSeconds) or 5, 1, 20)
+    c.DeathRadius = math.clamp(tonumber(c.DeathRadius) or 45, 0, 300)
+    c.SkipInterval = math.clamp(tonumber(c.SkipInterval) or 0.4, 0.2, 3)
+    if type(c.SkipKeywords) ~= "string" or c.SkipKeywords == "" then
+        c.SkipKeywords = "skip, respawn, play again, continue, redeploy"
+    end
+    return c
+end
+
+-- лежит ли персонаж в нокдауне: атрибуты, состояние гуманоида или наклон корпуса
+function Automation.AutoRespawn.IsDowned(char, hum)
+    if not char or not hum then return false end
+    if (hum.Health or 0) <= 0 then return false end
+
+    for _, key in ipairs(Automation.AutoRespawn._DownedAttributes) do
+        local okA, value = pcall(function() return char:GetAttribute(key) end)
+        if okA and value == true then return true end
+        local pl = Core.Services.Players:GetPlayerFromCharacter(char)
+        if pl then
+            local okP, pv = pcall(function() return pl:GetAttribute(key) end)
+            if okP and pv == true then return true end
+        end
+    end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local ok, up = pcall(function() return hrp.CFrame.UpVector.Y end)
+        if ok and type(up) == "number" and up < 0.55 then return true end
+    end
+
+    local okState, state = pcall(function() return hum:GetState() end)
+    if okState and state and Automation.AutoRespawn._DownedStates[state] then return true end
+    return false
+end
+
+function Automation.AutoRespawn.FindDowned(radius)
+    local out = {}
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return out end
+
+    for _, pl in ipairs(Core.Services.Players:GetPlayers()) do
+        if pl ~= lp then
+            local c = pl.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if h and Automation.AutoRespawn.IsDowned(c, h) then
+                local ally = false
+                if isCharacterAlly then
+                    local okAlly, value = pcall(isCharacterAlly, c)
+                    ally = okAlly and value == true
+                end
+                if not ally then
+                    local chp = c:FindFirstChild("HumanoidRootPart")
+                    if chp and (radius <= 0 or (chp.Position - hrp.Position).Magnitude <= radius) then
+                        out[#out + 1] = c
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function Automation.AutoRespawn.PressKey(name)
+    local okCode, code = pcall(function() return Enum.KeyCode[name] end)
+    if not okCode or not code then code = Enum.KeyCode.X end
+
+    local sent = false
+    if type(keypress) == "function" then
+        pcall(function()
+            keypress(code)
+            sent = true
+        end)
+        task.wait(0.03)
+        if type(keyrelease) == "function" then pcall(function() keyrelease(code) end) end
+    end
+    if not sent then
+        pcall(function()
+            local vim = Core.Services.VirtualInputManager or game:GetService("VirtualInputManager")
+            vim:SendKeyEvent(true, code, false, game)
+            task.wait(0.03)
+            vim:SendKeyEvent(false, code, false, game)
+        end)
+    end
+    return code
+end
+
+function Automation.AutoRespawn.GuiVisible(obj)
+    if not obj or not obj:IsA("GuiObject") then return false end
+    local size = obj.AbsoluteSize
+    if size.X < 6 or size.Y < 6 then return false end
+    local cur = obj
+    local hops = 0
+    while cur and cur ~= game and hops < 12 do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("LayerCollector") then
+            local ok, enabled = pcall(function() return cur.Enabled end)
+            if ok and enabled == false then return false end
+        end
+        cur = cur.Parent
+        hops = hops + 1
+    end
+    return true
+end
+
+function Automation.AutoRespawn.Keywords(cfg)
+    local words = {}
+    -- режем только по запятым: «play again» остаётся одной фразой, а не словами «play» и «again»
+    for word in string.gmatch(string.lower(tostring(cfg.SkipKeywords or "")), "[^,]+") do
+        word = string.match(word, "^%s*(.-)%s*$") or word
+        if #word >= 2 then words[#words + 1] = word end
+    end
+    if #words == 0 then words = { "skip" } end
+    return words
+end
+
+function Automation.AutoRespawn.MatchesKeywords(text, words)
+    text = string.lower(tostring(text or ""))
+    for _, word in ipairs(words) do
+        if string.find(text, word, 1, true) then return true end
+    end
+    return false
+end
+
+function Automation.AutoRespawn.DeadScreenName(name)
+    name = string.lower(tostring(name or ""))
+    return (name:find("death", 1, true) ~= nil) or (name:find("dead", 1, true) ~= nil)
+        or (name:find("eliminat", 1, true) ~= nil) or (name:find("respawn", 1, true) ~= nil)
+        or (name:find("spectat", 1, true) ~= nil) or (name:find("killed", 1, true) ~= nil)
+end
+
+-- текст кнопки: сам TextButton или вложенный TextLabel (у ImageButton текст часто внутри)
+function Automation.AutoRespawn.ButtonText(btn)
+    if not btn then return "" end
+    local parts = { tostring(btn.Text or "") }
+    for _, child in ipairs(btn:GetChildren()) do
+        if child:IsA("TextLabel") then parts[#parts + 1] = tostring(child.Text or "") end
+    end
+    return table.concat(parts, " ")
+end
+
+-- текст кнопки: сам TextButton или вложенный TextLabel (у ImageButton текст часто внутри)
+function Automation.AutoRespawn.ButtonText(btn)
+    if not btn then return "" end
+    local parts = { tostring(btn.Text or "") }
+    for _, child in ipairs(btn:GetChildren()) do
+        if child:IsA("TextLabel") then parts[#parts + 1] = tostring(child.Text or "") end
+    end
+    return table.concat(parts, " ")
+end
+
+function Automation.AutoRespawn.FindSkipButton(cfg)
+    local words = Automation.AutoRespawn.Keywords(cfg)
+    local lp = Core.LocalPlayer
+    local pg = lp and lp:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+
+    -- 1) экран смерти по имени корня (DeathScreen, EliminatedGui, ...)
+    for _, gui in ipairs(pg:GetChildren()) do
+        if Automation.AutoRespawn.DeadScreenName(gui.Name) and gui:IsA("LayerCollector") then
+            if Automation.AutoRespawn.GuiVisible(gui) then
+                for _, d in ipairs(gui:GetDescendants()) do
+                    if d:IsA("GuiButton")
+                        and Automation.AutoRespawn.GuiVisible(d)
+                        and Automation.AutoRespawn.MatchesKeywords(Automation.AutoRespawn.ButtonText(d), words) then
+                        return d
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2) запасной путь: кнопка с ключевым словом рядом с надписью ELIMINATED
+    local scanned = 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        scanned = scanned + 1
+        if scanned > 800 then break end
+        if d:IsA("GuiButton") and Automation.AutoRespawn.GuiVisible(d)
+            and Automation.AutoRespawn.MatchesKeywords(Automation.AutoRespawn.ButtonText(d), words) then
+            local holder = d.Parent
+            if holder then
+                if Automation.AutoRespawn.DeadScreenName(holder.Name) then return d end
+                local hops = 0
+                local node = holder
+                while node and node ~= pg and hops < 4 do
+                    local siblings = node:GetChildren()
+                    for i = 1, math.min(#siblings, 40) do
+                        local sib = siblings[i]
+                        if sib:IsA("TextLabel") then
+                            local t = string.lower(tostring(sib.Text or ""))
+                            if t:find("eliminated", 1, true) or t:find("you were killed", 1, true)
+                                or t:find("dead screen", 1, true) or t:find("respawn", 1, true) then
+                                return d
+                            end
+                        end
+                    end
+                    node = node.Parent
+                    hops = hops + 1
+                end
+            end
+        end
+    end
+
+    -- 3) последний шанс: пока мы мертвы, подходит любая видимая кнопка SKIP
+    if not Automation.AutoRespawn.IsDead() then return nil end
+    scanned = 0
+    for _, d in ipairs(pg:GetDescendants()) do
+        scanned = scanned + 1
+        if scanned > 800 then break end
+        if d:IsA("GuiButton") and Automation.AutoRespawn.GuiVisible(d) then
+            local t = string.lower(Automation.AutoRespawn.ButtonText(d))
+            if t:find("skip", 1, true) or t:find("play again", 1, true) then return d end
+        end
+    end
+    return nil
+end
+
+function Automation.AutoRespawn.Click(btn)
+    if not btn then return false end
+    local fired = false
+
+    if getconnections then
+        for _, evName in ipairs({ "Activated", "MouseButton1Click" }) do
+            pcall(function()
+                local sig = btn[evName]
+                if sig then
+                    for _, c in ipairs(getconnections(sig)) do
+                        if type(c.Fire) == "function" then
+                            c:Fire()
+                            fired = true
+                        elseif type(c.Function) == "function" then
+                            c.Function()
+                            fired = true
+                        end
+                    end
                 end
             end)
-            if not success then task.wait(1) end
         end
-        local char = Core.LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.PlatformStand = false end
-        _G.Log("War Tycoon Farm: Stopped", Color3.fromRGB(255, 50, 50))
+    end
+
+    if not fired and type(firesignal) == "function" then
+        pcall(function()
+            firesignal(btn.MouseButton1Click)
+            fired = true
+        end)
+    end
+
+    if not fired then
+        pcall(function()
+            local vim = Core.Services.VirtualInputManager or game:GetService("VirtualInputManager")
+            local cx = btn.AbsolutePosition.X + btn.AbsoluteSize.X * 0.5
+            local cy = btn.AbsolutePosition.Y + btn.AbsoluteSize.Y * 0.5
+            vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+            task.wait(0.04)
+            vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+            fired = true
+        end)
+    end
+    return fired
+end
+
+function Automation.AutoRespawn.IsDead()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    if not char then return true end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return true end
+    return (hum.Health or 0) <= 0
+end
+
+function Automation.AutoRespawn.Tick()
+    local cfg = Automation.AutoRespawn.Cfg()
+    local now = tick()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    -- 1) AUTO DEATH
+    if cfg.Death then
+        local downedSelf = false
+        if cfg.DeathSelf and char and hum then
+            downedSelf = Automation.AutoRespawn.IsDowned(char, hum)
+        end
+        local targets = {}
+        if cfg.DeathRadius > 0 then
+            targets = Automation.AutoRespawn.FindDowned(cfg.DeathRadius)
+        end
+
+        if downedSelf or #targets > 0 then
+            if Automation.AutoRespawn._episodeStart == 0 then
+                Automation.AutoRespawn._episodeStart = now
+                Automation.AutoRespawn._pressCount = 0
+            end
+            local elapsed = now - Automation.AutoRespawn._episodeStart
+            if elapsed <= cfg.DeathSeconds then
+                if now - Automation.AutoRespawn._lastPress >= 0.12 then
+                    Automation.AutoRespawn._lastPress = now
+                    Automation.AutoRespawn.PressKey(cfg.DeathKey)
+                    Automation.AutoRespawn._pressCount = Automation.AutoRespawn._pressCount + 1
+                end
+                Automation.AutoRespawn.Status = string.format("%s pressed %dx (%.1f / %.0f s)",
+                    cfg.DeathKey, Automation.AutoRespawn._pressCount, elapsed, cfg.DeathSeconds)
+                Automation.AutoRespawn.StatusOk = true
+            else
+                Automation.AutoRespawn.Status = "downed too long - waiting"
+                Automation.AutoRespawn.StatusOk = false
+            end
+        else
+            Automation.AutoRespawn._episodeStart = 0
+            Automation.AutoRespawn._pressCount = 0
+            if not cfg.Skip then
+                Automation.AutoRespawn.Status = "waiting for a downed player"
+                Automation.AutoRespawn.StatusOk = true
+            end
+        end
+    end
+
+    -- 2) AUTO SKIP
+    if cfg.Skip then
+        if Automation.AutoRespawn.IsDead() then
+            if now - Automation.AutoRespawn._lastSkip >= cfg.SkipInterval then
+                Automation.AutoRespawn._lastSkip = now
+                local btn = Automation.AutoRespawn.FindSkipButton(cfg)
+                if btn then
+                    Automation.AutoRespawn.Click(btn)
+                    Automation.AutoRespawn.Status = "SKIP clicked"
+                    Automation.AutoRespawn.StatusOk = true
+                    print("[AUTO-SKIP] clicked: " .. btn:GetFullName())
+                else
+                    Automation.AutoRespawn.Status = "dead - looking for SKIP"
+                    Automation.AutoRespawn.StatusOk = true
+                end
+            end
+        elseif not cfg.Death then
+            Automation.AutoRespawn.Status = "alive"
+            Automation.AutoRespawn.StatusOk = true
+        end
+    end
+end
+
+function Automation.AutoRespawn.Start()
+    if Automation.AutoRespawn._loopActive then return end
+    Automation.AutoRespawn._loopActive = true
+
+    task.spawn(function()
+        while Automation.AutoRespawn._loopActive and not State.Unloading and IsCurrentInstance() do
+            local cfg = Automation.AutoRespawn.Cfg()
+            if not (cfg.Death or cfg.Skip) then break end
+            pcall(Automation.AutoRespawn.Tick)
+            task.wait(0.1)
+        end
+        Automation.AutoRespawn._loopActive = false
+        Automation.AutoRespawn.Status = "off"
+        Automation.AutoRespawn.StatusOk = true
     end)
 end
 
@@ -18900,18 +19819,106 @@ end, function(p)
 end)
 
 -- FUN (empty)
-createModule("War Tycoon Farm", "Auto fly to coordinates after rising", "Auto farming", Config.WarTycoonFarm.Enabled, function(v)
+createModule("War Tycoon Farm", "Teleports the character to the target CFrame (no flying). Auto Death finishes downed players; Auto Skip leaves the death screen.", "Auto farming", Config.WarTycoonFarm.Enabled, function(v)
     Config.WarTycoonFarm.Enabled = v
     if v then Automation.WarTycoonFarmLoop() end
 end, function(p)
+    local cfg = Automation.WT.Cfg()
     local sub = Internal.createSubCard(p)
-    Internal.createStringInput(sub, "Target CFrame:", Config.WarTycoonFarm.TargetCFrameStr, function(v) Config.WarTycoonFarm.TargetCFrameStr = v end)
-    Internal.createSlider(sub, "Flight Speed", 1, 1000, Config.WarTycoonFarm.Speed, function(v) Config.WarTycoonFarm.Speed = v end, { Step = 0.1, Curve = 2 })
-    local row = Internal.createSettingRow(sub, "Noclip")
-    Internal.createiOSSwitch(row, Config.WarTycoonFarm.Noclip, function(val)
-        Config.WarTycoonFarm.Noclip = val
-    end, row:FindFirstChild("TextLabel"), nil, true)
-end)
+
+    Internal.createSectionHeader(sub, "Teleport farm")
+
+    local _, targetBox = Internal.createStringInput(sub, "Target CFrame", cfg.TargetCFrameStr, function(v)
+        Config.WarTycoonFarm.TargetCFrameStr = v
+    end, "Where the character is teleported. Use CFrame.new(x, y, z) or the full 12-number CFrame. 'USE MY POSITION' fills it with where you stand now.")
+
+    local statusStrip, setStatus = Internal.createStatusStrip(sub, "idle")
+    task.spawn(function()
+        while statusStrip.Parent and not State.Unloading and IsCurrentInstance() do
+            local ok = Automation.WT.LastOk ~= false
+            setStatus(tostring(Automation.WT.LastStatus or "idle"),
+                ok and Color3.fromRGB(0, 220, 160) or Color3.fromRGB(255, 110, 110))
+            task.wait(0.35)
+        end
+    end)
+
+    local btnRow = Instance.new("Frame")
+    btnRow.Size = UDim2.new(1, 0, 0, 30)
+    btnRow.BackgroundTransparency = 1
+    btnRow.Parent = sub
+
+    local tpNow = Internal.createActionButton(btnRow, "TP NOW", {
+        Size = UDim2.new(0.6, -3, 0, 28),
+        Position = UDim2.new(0, 0, 0, 1),
+        Color = Color3.fromRGB(28, 92, 72),
+        HoverColor = Color3.fromRGB(36, 122, 95),
+        Stroke = Color3.fromRGB(52, 160, 122),
+        Tip = "Teleports the character to the target CFrame right now.",
+    })
+    local grabBtn = Internal.createActionButton(btnRow, "USE MY POSITION", {
+        Size = UDim2.new(0.4, -3, 0, 28),
+        Position = UDim2.new(0.6, 3, 0, 1),
+        Color = Color3.fromRGB(40, 42, 60),
+        HoverColor = Color3.fromRGB(52, 54, 76),
+        Tip = "Copies your current position and rotation into the target CFrame.",
+    })
+
+    tpNow.MouseButton1Click:Connect(function()
+        local target = Automation.StringToCFrame(Config.WarTycoonFarm.TargetCFrameStr)
+        if not target then
+            _G.Log("War Tycoon: invalid CFrame", Color3.fromRGB(255, 80, 80))
+            return
+        end
+        task.spawn(function()
+            local ok, err = Automation.WT.Jump(target)
+            Automation.WT.LastOk = ok
+            Automation.WT.LastStatus = ok and "manual TP: arrived" or ("manual TP: " .. tostring(err))
+            _G.Log(Automation.WT.LastStatus, ok and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 80, 80))
+        end)
+    end)
+
+    grabBtn.MouseButton1Click:Connect(function()
+        local char = Core.LocalPlayer and Core.LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            _G.Log("War Tycoon: character not found", Color3.fromRGB(255, 80, 80))
+            return
+        end
+        local s = string.format("CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f)",
+            hrp.CFrame:GetComponents())
+        Config.WarTycoonFarm.TargetCFrameStr = s
+        if targetBox then targetBox.Text = s end
+        _G.Log("War Tycoon: target saved from your position", Color3.fromRGB(0, 255, 150))
+    end)
+
+    Internal.createSlider(sub, "Trigger distance", 1, 200, cfg.TpThreshold, function(v)
+        Config.WarTycoonFarm.TpThreshold = v
+    end, { Unit = "st", Desc = "Teleport only when the character is farther than this from the target. Small values keep correcting the position; large values skip small corrections." })
+
+    Internal.createSlider(sub, "Height offset", -20, 60, cfg.TpOffset, function(v)
+        Config.WarTycoonFarm.TpOffset = v
+    end, { Unit = "st", Desc = "Extra height added to the landing spot. Negative values put the character lower, positive values keep it above the ground." })
+
+    Internal.createSlider(sub, "Attempts", 1, 10, cfg.TpAttempts, function(v)
+        Config.WarTycoonFarm.TpAttempts = v
+    end, { Unit = "x", Desc = "How many times the teleport retries when the server moves the character back." })
+
+    Internal.createSlider(sub, "Repeat delay", 0.2, 5, cfg.RepeatDelay, function(v)
+        Config.WarTycoonFarm.RepeatDelay = v
+    end, { Step = 0.1, Unit = "s", Desc = "Pause after each teleport before the script checks the distance again." })
+
+    local surfaceRow = Internal.createSettingRow(sub, "Drop to ground",
+        "Raycasts under the target and puts the character on the surface instead of the raw CFrame height.")
+    Internal.createiOSSwitch(surfaceRow, cfg.TpSurface, function(v) Config.WarTycoonFarm.TpSurface = v end,
+        surfaceRow:FindFirstChild("TextLabel"), nil, true)
+
+    local anchorRow = Internal.createSettingRow(sub, "Anchor while teleporting",
+        "Freezes the HumanoidRootPart for a few frames so physics and falling cannot drag the character off the target.")
+    Internal.createiOSSwitch(anchorRow, cfg.TpAnchor, function(v) Config.WarTycoonFarm.TpAnchor = v end,
+        anchorRow:FindFirstChild("TextLabel"), nil, true)
+
+    Internal.createAutoRespawnSection(sub)
+end, nil, "War Tycoon")
 
 createModule("Fly Hack", "Fly freely through the air", "Movement", Config.Cheat.Flying, function(v)
     Config.Cheat.Flying = v
@@ -19771,7 +20778,7 @@ end, function(p)
     Internal.createiOSSwitch(rowDump, false, function(v) if v then Automation.WarTycoonAutoBuildDump() end end, rowDump:FindFirstChild("TextLabel"), nil, true)
 end, nil, "War Tycoon")
 
-createModule("Vehicles Farm Helper", "Vehicles farm helper (War Tycoon)\nStep 1: teleport to the vehicle spawn.\nAuto-spawn the selected vehicle.", "Auto farming", Config.VehiclesFarm.Enabled, function(v)
+createModule("Vehicles Farm Helper", "Vehicles farm helper (War Tycoon)\nTeleports to the vehicle spawn and auto-spawns the selected vehicle. Auto Death finishes downed players; Auto Skip leaves the death screen.", "Auto farming", Config.VehiclesFarm.Enabled, function(v)
     Config.VehiclesFarm.Enabled = v
     if v then
         Automation.VehiclesFarmLoop()
@@ -19780,16 +20787,16 @@ createModule("Vehicles Farm Helper", "Vehicles farm helper (War Tycoon)\nStep 1:
 end, function(p)
     local sub = Internal.createSubCard(p)
 
+    Internal.createSectionHeader(sub, "Vehicle spawn")
+
     -- Instant Spawn Button
-    local spawnNowBtn = Instance.new("TextButton")
-    spawnNowBtn.Size = UDim2.new(1, 0, 0, 30)
-    spawnNowBtn.BackgroundColor3 = Color3.fromRGB(0, 180, 100)
-    spawnNowBtn.Text = "⚡ Spawn Selected Vehicle Now"
-    spawnNowBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    spawnNowBtn.TextSize = 11
-    spawnNowBtn.Font = Theme.FontBold
-    spawnNowBtn.Parent = sub
-    Instance.new("UICorner", spawnNowBtn).CornerRadius = UDim.new(0, 6)
+    local spawnNowBtn = Internal.createActionButton(sub, "Spawn selected vehicle now", {
+        Height = 30,
+        Color = Color3.fromRGB(0, 150, 92),
+        HoverColor = Color3.fromRGB(0, 180, 110),
+        Stroke = Color3.fromRGB(0, 220, 150),
+        Tip = "Spawns the selected vehicle immediately, without waiting for the auto-spawn loop.",
+    })
 
     spawnNowBtn.MouseButton1Click:Connect(function()
         _G.Log("Instant Spawn Triggered!", Color3.fromRGB(0, 255, 150))
@@ -19798,7 +20805,8 @@ end, function(p)
     end)
 
     -- Auto Spawn Toggle
-    local spawnToggleRow = Internal.createSettingRow(sub, "Auto Spawn Engine")
+    local spawnToggleRow = Internal.createSettingRow(sub, "Auto Spawn Engine",
+        "Automatically spawns the selected vehicle in a loop while the module is enabled.")
     Internal.createiOSSwitch(spawnToggleRow, Config.VehiclesFarm.AutoSpawn, function(val)
         Config.VehiclesFarm.AutoSpawn = val
     end, spawnToggleRow:FindFirstChild("TextLabel"), nil, true)
@@ -19925,8 +20933,8 @@ end, function(p)
 
     -- строка с раскрывающимся ВНУТРИ неё списком (не перекрывает соседей)
     local ROW_H = 36
-    local function makeExpandRow(labelText, btnText)
-        local row = Internal.createSettingRow(sub, labelText)
+    local function makeExpandRow(labelText, btnText, desc)
+        local row = Internal.createSettingRow(sub, labelText, desc)
         local label = row:FindFirstChildOfClass("TextLabel")
         if label then
             label.Size = UDim2.new(1, -145, 0, 26)
@@ -20003,8 +21011,10 @@ end, function(p)
         return btn, collapse, expand
     end
 
-    local typeBtn, collapseTypes, expandTypes = makeExpandRow("Vehicle type:", ALL_TYPES)
-    local vBtn, collapseVehicles, expandVehicles = makeExpandRow("Vehicle:", tostring(Config.VehiclesFarm.Vehicle))
+    local typeBtn, collapseTypes, expandTypes = makeExpandRow("Vehicle type:", ALL_TYPES,
+        "Filters the vehicle list by mount type: vehicles, helicopters, planes, boats, tanks, submarines.")
+    local vBtn, collapseVehicles, expandVehicles = makeExpandRow("Vehicle:", tostring(Config.VehiclesFarm.Vehicle),
+        "Vehicle to spawn. The list is read from your owned mounts in game.")
 
     vBtn.MouseButton1Click:Connect(function()
         collapseTypes()
@@ -20061,7 +21071,8 @@ end, function(p)
     end)
 
     -- [ v48 ] TP AFTER SPAWN
-    local tpToggleRow = Internal.createSettingRow(sub, "TP After Spawn")
+    local tpToggleRow = Internal.createSettingRow(sub, "TP After Spawn",
+        "After a successful spawn, teleport the vehicle to the TP coordinates below.")
     Internal.createiOSSwitch(tpToggleRow, Config.VehiclesFarm.TpAfterSpawn == true, function(val)
         Config.VehiclesFarm.TpAfterSpawn = val
         if val then
@@ -20075,7 +21086,8 @@ end, function(p)
         end
     end, tpToggleRow:FindFirstChild("TextLabel"), nil, true)
 
-    local tpCoordsRow = Internal.createSettingRow(sub, "TP coordinates:")
+    local tpCoordsRow = Internal.createSettingRow(sub, "TP coordinates:",
+        "Where the spawned vehicle is teleported. Use Now to capture your position, Clipboard to paste a CFrame, or type it in the box below.")
     local tpCoordsLabel = tpCoordsRow:FindFirstChildOfClass("TextLabel")
     if tpCoordsLabel then
         tpCoordsLabel.Size = UDim2.new(1, -206, 0, 26)
@@ -20083,7 +21095,7 @@ end, function(p)
         tpCoordsLabel.TextSize = 11
     end
 
-    local function tpSmallBtn(text, xOff, w, color)
+    local function tpSmallBtn(text, xOff, w, color, tip)
         local b = Instance.new("TextButton")
         b.Size = UDim2.new(0, w, 0, 26)
         b.Position = UDim2.new(1, xOff, 0, 5)
@@ -20095,12 +21107,13 @@ end, function(p)
         b.Parent = tpCoordsRow
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         Instance.new("UIStroke", b).Color = Theme.Separator
+        if tip and Internal.AttachTip then Internal.AttachTip(b, tip) end
         return b
     end
 
-    local tpNowBtn = tpSmallBtn("Now", -64, 60)
-    local tpClipBtn = tpSmallBtn("Clipboard", -128, 60, Color3.fromRGB(45, 38, 60))
-    local tpTestBtn = tpSmallBtn("Test TP", -196, 64, Color3.fromRGB(28, 92, 72))
+    local tpNowBtn = tpSmallBtn("Now", -64, 60, nil, "Captures your current position into the TP coordinates.")
+    local tpClipBtn = tpSmallBtn("Clipboard", -128, 60, Color3.fromRGB(45, 38, 60), "Pastes a CFrame from the clipboard.")
+    local tpTestBtn = tpSmallBtn("Test TP", -196, 64, Color3.fromRGB(28, 92, 72), "Teleports once to check the coordinates before enabling the loop.")
 
     local tpBoxRow = Instance.new("Frame")
     tpBoxRow.Size = UDim2.new(1, 0, 0, 30)
@@ -20174,36 +21187,41 @@ end, function(p)
         end
     end)
 
+    Internal.createSectionHeader(sub, "Teleport")
+
     -- [ v82 ] UNIVERSAL TP: тип техники и посадка на поверхность
     local tpCfg = Automation.VT.Cfg()
     Internal.createLabel(sub, "Universal teleport: car, tank, helicopter, plane, boat, submarine")
     Internal.createSelector(sub, "TP vehicle type", Automation.VT.KindOrder, tpCfg.TpType, function(v)
         Config.VehiclesFarm.TpType = v
         _G.Log("TP: vehicle type " .. tostring(v), Color3.fromRGB(0, 220, 190))
-    end)
+    end, "Auto detects car / tank / helicopter / plane / boat / submarine. Override it only if the detected type is wrong.")
 
-    local surfaceRow = Internal.createSettingRow(sub, "Drop to ground / water")
+    local surfaceRow = Internal.createSettingRow(sub, "Drop to ground / water",
+        "Places the vehicle on the surface under the target instead of the raw CFrame height. Works for land and water.")
     Internal.createiOSSwitch(surfaceRow, tpCfg.TpSurface, function(v) Config.VehiclesFarm.TpSurface = v end,
         surfaceRow:FindFirstChild("TextLabel"), nil, true)
-    local levelRow = Internal.createSettingRow(sub, "Level vehicle (yaw only)")
+    local levelRow = Internal.createSettingRow(sub, "Level vehicle (yaw only)",
+        "Removes roll and pitch so the vehicle lands flat; only its rotation around the vertical axis is kept.")
     Internal.createiOSSwitch(levelRow, tpCfg.TpLevel, function(v) Config.VehiclesFarm.TpLevel = v end,
         levelRow:FindFirstChild("TextLabel"), nil, true)
-    local anchorRow = Internal.createSettingRow(sub, "Anchor during TP")
+    local anchorRow = Internal.createSettingRow(sub, "Anchor during TP",
+        "Freezes the vehicle for a few frames so suspension and leftover velocity cannot drag it off the target.")
     Internal.createiOSSwitch(anchorRow, tpCfg.TpAnchor, function(v) Config.VehiclesFarm.TpAnchor = v end,
         anchorRow:FindFirstChild("TextLabel"), nil, true)
 
     Internal.createSlider(sub, "Height offset", -20, 40, tpCfg.TpOffset, function(v)
         Config.VehiclesFarm.TpOffset = v
-    end, { Unit = "st" })
+    end, { Unit = "st", Desc = "Extra height above the surface. Negative values sink the vehicle, positive values keep it above the ground." })
     Internal.createSlider(sub, "Air clearance (heli / plane)", 0, 60, tpCfg.TpAir, function(v)
         Config.VehiclesFarm.TpAir = v
-    end, { Unit = "st" })
+    end, { Unit = "st", Desc = "How far above the ground helicopters and planes are placed." })
     Internal.createSlider(sub, "Dive depth (submarine)", 0, 60, tpCfg.TpDepth, function(v)
         Config.VehiclesFarm.TpDepth = v
-    end, { Unit = "st" })
+    end, { Unit = "st", Desc = "How deep submarines are placed under the water surface." })
     Internal.createSlider(sub, "Attempts", 1, 10, tpCfg.TpAttempts, function(v)
         Config.VehiclesFarm.TpAttempts = v
-    end, { Unit = "x" })
+    end, { Unit = "x", Desc = "How many times the teleport retries when the server rolls the vehicle back." })
 
     local tpBtnRow = Instance.new("Frame")
     tpBtnRow.Size = UDim2.new(1, 0, 0, 30)
@@ -20220,6 +21238,7 @@ end, function(p)
     tpGoBtn.Parent = tpBtnRow
     tpGoBtn.Position = UDim2.new(0, 0, 0, 2)
     Instance.new("UICorner", tpGoBtn).CornerRadius = UDim.new(0, 6)
+    if Internal.AttachTip then Internal.AttachTip(tpGoBtn, "Teleports the vehicle to the saved coordinates right now.") end
 
     local tpDiagBtn = Instance.new("TextButton")
     tpDiagBtn.Size = UDim2.new(0.4, -4, 0, 26)
@@ -20231,6 +21250,7 @@ end, function(p)
     tpDiagBtn.Parent = tpBtnRow
     tpDiagBtn.Position = UDim2.new(0.6, 4, 0, 2)
     Instance.new("UICorner", tpDiagBtn).CornerRadius = UDim.new(0, 6)
+    if Internal.AttachTip then Internal.AttachTip(tpDiagBtn, "Prints the detected vehicle type, size and surface under it to F9.") end
 
     tpGoBtn.MouseButton1Click:Connect(function()
         if (Config.VehiclesFarm.TpCoords or "") == "" then
@@ -20250,6 +21270,8 @@ end, function(p)
         _G.Log(string.format("TP diag: %s, bottom %.1f", tostring(kind), metrics and metrics.bottom or 0),
             Color3.fromRGB(0, 220, 190))
     end)
+
+    Internal.createAutoRespawnSection(sub)
 
     refreshVehicles()
     vBtn.Text = tostring(Config.VehiclesFarm.Vehicle)
@@ -22020,6 +23042,11 @@ pcall(function()
         task.wait(1)
         if isfile and isfile("Overmind/Configs/default.json") then
             LoadConfig("default")
+        end
+        -- [ v83 ] Auto Death / Auto Skip могли быть включены в сохранённом конфиге
+        if Automation.AutoRespawn and Automation.AutoRespawn.Cfg then
+            local ar = Automation.AutoRespawn.Cfg()
+            if ar.Death or ar.Skip then Automation.AutoRespawn.Start() end
         end
     end)
 end)
