@@ -2672,7 +2672,7 @@ Internal.createAutoRespawnSection = function(parent)
     Internal.createSectionHeader(parent, "Death handler", Color3.fromRGB(255, 120, 120))
 
     local deathRow = Internal.createSettingRow(parent, "Auto Death (finish downed)",
-        "Presses the chosen key while a downed player is near you, or while you are downed yourself. Stops after the time limit.")
+        "Holds the chosen key while a downed player is near you, or while you are downed yourself. Repeats in short bursts.")
     Internal.createiOSSwitch(deathRow, cfg.Death, function(v)
         Config.AutoRespawn.Death = v
         if v then
@@ -2686,10 +2686,9 @@ Internal.createAutoRespawnSection = function(parent)
     Internal.createSelector(parent, "Auto Death key", Automation.AutoRespawn.KeyNames, cfg.DeathKey, function(v)
         Config.AutoRespawn.DeathKey = v
     end, "Key sent while a player is downed. X is used in War Tycoon; other common keys are in the list.")
-
     Internal.createSlider(parent, "Press for at most", 1, 20, cfg.DeathSeconds, function(v)
         Config.AutoRespawn.DeathSeconds = v
-    end, { Unit = "s", Desc = "How long the key keeps being pressed for one downed player before the script waits again." })
+    end, { Unit = "s", Desc = "How long one hold burst lasts for a downed target before a short pause." })
 
     Internal.createSlider(parent, "Downed search radius", 0, 200, cfg.DeathRadius, function(v)
         Config.AutoRespawn.DeathRadius = v
@@ -7984,6 +7983,34 @@ task.spawn(function()
     end
 end)
 
+-- [ v85 ] NO FALL DAMAGE (War Tycoon): одного FallenDown/Ragdoll мало —
+-- игра считает падение по Freefall/таймеру состояния. Отключаем Freefall, сбрасываем
+-- таймер коротким Running и ограничиваем скорость приземления до скорости прыжка.
+Automation.NoFall = Automation.NoFall or { LastReset = 0 }
+
+function Automation.NoFall.Tick(char, hum, hrp)
+    local nf = Automation.NoFall
+    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
+    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false) end)
+    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false) end)
+    if hum.SeatPart or Config.Cheat.Flying then return end
+
+    local v = hrp.AssemblyLinearVelocity
+    if v.Y >= -45 then return end
+
+    local now = tick()
+    local state = hum:GetState()
+    if (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown)
+        and now - (nf.LastReset or 0) >= 0.15 then
+        nf.LastReset = now
+        -- короткий Running обнуляет Freefall-таймер, по которому War Tycoon считает урон
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    end
+
+    -- терминальная скорость: удар о землю не быстрее обычного прыжка
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(v.X, -45, v.Z) end)
+end
+
 -- Global Optimization Loop for Targets
 task.spawn(function()
     while ScreenGui and ScreenGui.Parent and not State.Unloading and IsCurrentInstance() do
@@ -7999,8 +8026,7 @@ task.spawn(function()
 
             -- No Fall Damage
             if Config.Cheat.NoFallDamage then
-                hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-                hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+                Automation.NoFall.Tick(lchar, hum, hrp)
             end
         end)
     end
@@ -10328,11 +10354,15 @@ Automation.AutoRespawn._loopActive = false
 Automation.AutoRespawn._lastPress = 0
 Automation.AutoRespawn._pressCount = 0
 Automation.AutoRespawn._episodeStart = 0
+Automation.AutoRespawn._pauseUntil = 0
 Automation.AutoRespawn._lastSkip = 0
+Automation.AutoRespawn._heldKey = nil
 
+-- [ v85 ] DBNO/ранения: у FORTLINE состояние “лежит” висит и на Humanoid
 Automation.AutoRespawn._DownedAttributes = {
-    "Knocked", "KnockedOut", "Downed", "IsDowned", "IsKnocked", "Down", "IsDown",
-    "Ragdoll", "Ragdolled", "Incapacitated", "BleedOut", "Fallen", "IsFallen", "Surrendered",
+    "Knocked", "KnockedOut", "KnockedDown", "Downed", "IsDowned", "IsKnocked", "Knock",
+    "Down", "IsDown", "DBNO", "IsDBNO", "Ragdoll", "Ragdolled", "Incapacitated",
+    "IsIncapacitated", "BleedOut", "BleedingOut", "Fallen", "IsFallen", "Surrendered",
 }
 
 Automation.AutoRespawn._DownedStates = (function()
@@ -10367,13 +10397,25 @@ function Automation.AutoRespawn.IsDowned(char, hum)
     if not char or not hum then return false end
     if (hum.Health or 0) <= 0 then return false end
 
+    local pl = Core.Services.Players:GetPlayerFromCharacter(char)
     for _, key in ipairs(Automation.AutoRespawn._DownedAttributes) do
         local okA, value = pcall(function() return char:GetAttribute(key) end)
         if okA and value == true then return true end
-        local pl = Core.Services.Players:GetPlayerFromCharacter(char)
+        local okH, hv = pcall(function() return hum:GetAttribute(key) end)
+        if okH and hv == true then return true end
         if pl then
             local okP, pv = pcall(function() return pl:GetAttribute(key) end)
             if okP and pv == true then return true end
+        end
+        -- старые игры хранят флаг не в атрибуте, а в BoolValue/NumberValue внутри персонажа
+        local child = char:FindFirstChild(key)
+        if child then
+            local okC, flag = pcall(function()
+                if child:IsA("BoolValue") then return child.Value == true end
+                if child:IsA("NumberValue") then return child.Value > 0 end
+                return false
+            end)
+            if okC and flag then return true end
         end
     end
 
@@ -10399,17 +10441,21 @@ function Automation.AutoRespawn.FindDowned(radius)
         if pl ~= lp then
             local c = pl.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
-            if h and Automation.AutoRespawn.IsDowned(c, h) then
+            local chp = c and c:FindFirstChild("HumanoidRootPart")
+            -- сначала дистанция: список атрибутов у чужих персонажей читаем только рядом
+            if h and chp and (radius <= 0 or (chp.Position - hrp.Position).Magnitude <= radius) then
                 local ally = false
                 if isCharacterAlly then
                     local okAlly, value = pcall(isCharacterAlly, c)
                     ally = okAlly and value == true
                 end
                 if not ally then
-                    local chp = c:FindFirstChild("HumanoidRootPart")
-                    if chp and (radius <= 0 or (chp.Position - hrp.Position).Magnitude <= radius) then
-                        out[#out + 1] = c
+                    local downed = Automation.AutoRespawn.IsDowned(c, h)
+                    -- [ v85 ] у лежачего игрока над головой может висеть плашка DOWNED
+                    if not downed then
+                        downed = Automation.AutoRespawn.TextHint(c, { "downed", "knocked", "bleeding out" }, 80)
                     end
+                    if downed then out[#out + 1] = c end
                 end
             end
         end
@@ -10417,34 +10463,52 @@ function Automation.AutoRespawn.FindDowned(radius)
     return out
 end
 
-function Automation.AutoRespawn.PressKey(name)
-    local okCode, code = pcall(function() return Enum.KeyCode[name] end)
-    if not okCode or not code then code = Enum.KeyCode.X end
+-- [ v85 ] настоящее удержание: keypress = нажатие, keyrelease = отпускание
+function Automation.AutoRespawn.SendKey(value, down)
+    local code = value
+    if type(value) == "string" then
+        local okCode, resolved = pcall(function() return Enum.KeyCode[value] end)
+        if not okCode or not resolved then resolved = Enum.KeyCode.X end
+        code = resolved
+    end
+    if not code then return nil end
 
     local sent = false
-    if type(keypress) == "function" then
-        pcall(function()
-            keypress(code)
-            sent = true
-        end)
-        task.wait(0.03)
-        if type(keyrelease) == "function" then pcall(function() keyrelease(code) end) end
+    if down and type(keypress) == "function" then
+        pcall(function() keypress(code); sent = true end)
+    elseif not down and type(keyrelease) == "function" then
+        pcall(function() keyrelease(code); sent = true end)
     end
     if not sent then
         pcall(function()
             local vim = Core.Services.VirtualInputManager or game:GetService("VirtualInputManager")
-            vim:SendKeyEvent(true, code, false, game)
-            task.wait(0.03)
-            vim:SendKeyEvent(false, code, false, game)
+            vim:SendKeyEvent(down == true, code, false, game)
         end)
     end
     return code
 end
 
+function Automation.AutoRespawn.HoldKey(name)
+    local code = Automation.AutoRespawn.SendKey(name, true)
+    Automation.AutoRespawn._heldKey = code
+    return code
+end
+
+function Automation.AutoRespawn.ReleaseKey()
+    local code = Automation.AutoRespawn._heldKey
+    Automation.AutoRespawn._heldKey = nil
+    if code then Automation.AutoRespawn.SendKey(code, false) end
+end
+
 function Automation.AutoRespawn.GuiVisible(obj)
-    if not obj or not obj:IsA("GuiObject") then return false end
-    local size = obj.AbsoluteSize
-    if size.X < 6 or size.Y < 6 then return false end
+    if not obj then return false end
+    local isGuiObject = obj:IsA("GuiObject")
+    -- [ v85 ] ScreenGui — это LayerCollector, а не GuiObject: старый фильтр отсекал его сразу
+    if not (isGuiObject or obj:IsA("LayerCollector")) then return false end
+    if isGuiObject then
+        local size = obj.AbsoluteSize
+        if size.X < 6 or size.Y < 6 then return false end
+    end
     local cur = obj
     local hops = 0
     while cur and cur ~= game and hops < 12 do
@@ -10478,6 +10542,76 @@ function Automation.AutoRespawn.MatchesKeywords(text, words)
     return false
 end
 
+-- [ v85 ] корни интерфейса игры: PlayerGui + скрытый контейнер executor'а
+function Automation.AutoRespawn.GuiRoots()
+    local roots, seen = {}, {}
+    local lp = Core.LocalPlayer
+    local pg = lp and lp:FindFirstChild("PlayerGui")
+    if pg then
+        roots[#roots + 1] = pg
+        seen[pg] = true
+    end
+    if type(gethui) == "function" then
+        local ok, host = pcall(gethui)
+        if ok and host and not seen[host] then
+            roots[#roots + 1] = host
+            seen[host] = true
+        end
+    end
+    local cg = Core.Services.CoreGui
+    if cg and not seen[cg] then roots[#roots + 1] = cg end
+    return roots
+end
+
+-- есть ли в obj видимый текст с одной из фраз (своё меню пропускаем)
+function Automation.AutoRespawn.TextHint(obj, phrases, maxScan)
+    if not obj then return false end
+    local scanned = 0
+    local ok, found = pcall(function()
+        for _, d in ipairs(obj:GetDescendants()) do
+            scanned = scanned + 1
+            if scanned > (maxScan or 1200) then break end
+            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                if not (ScreenGui and d:IsDescendantOf(ScreenGui)) then
+                    local text = string.lower(tostring(d.Text or ""))
+                    if text ~= "" then
+                        for _, phrase in ipairs(phrases) do
+                            if string.find(text, phrase, 1, true) then
+                                if Automation.AutoRespawn.GuiVisible(d) then return true end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    return ok and found == true
+end
+
+Automation.AutoRespawn._DownedHints = {
+    "downed", "knocked", "knockout", "bleeding out", "incapacitated",
+    "you are down", "hold x", "press x",
+}
+
+function Automation.AutoRespawn.ScreenDownedHint()
+    local now = tick()
+    if Automation.AutoRespawn._hintCache ~= nil and now - (Automation.AutoRespawn._hintAt or 0) < 0.3 then
+        return Automation.AutoRespawn._hintCache
+    end
+    Automation.AutoRespawn._hintAt = now
+    local found = false
+    for _, root in ipairs(Automation.AutoRespawn.GuiRoots()) do
+        if Automation.AutoRespawn.TextHint(root, Automation.AutoRespawn._DownedHints, 900) then
+            found = true
+            break
+        end
+    end
+    Automation.AutoRespawn._hintCache = found
+    return found
+end
+
 function Automation.AutoRespawn.DeadScreenName(name)
     name = string.lower(tostring(name or ""))
     return (name:find("death", 1, true) ~= nil) or (name:find("dead", 1, true) ~= nil)
@@ -10485,89 +10619,72 @@ function Automation.AutoRespawn.DeadScreenName(name)
         or (name:find("spectat", 1, true) ~= nil) or (name:find("killed", 1, true) ~= nil)
 end
 
--- текст кнопки: сам TextButton или вложенный TextLabel (у ImageButton текст часто внутри)
+-- текст кнопки: сам TextButton, вложенные TextLabel (у ImageButton текст обычно внутри) и имя
 function Automation.AutoRespawn.ButtonText(btn)
     if not btn then return "" end
     local parts = { tostring(btn.Text or "") }
-    for _, child in ipairs(btn:GetChildren()) do
-        if child:IsA("TextLabel") then parts[#parts + 1] = tostring(child.Text or "") end
+    for _, child in ipairs(btn:GetDescendants()) do
+        if #parts >= 8 then break end
+        if child:IsA("TextLabel") or child:IsA("TextButton") then
+            parts[#parts + 1] = tostring(child.Text or "")
+        end
     end
     return table.concat(parts, " ")
 end
 
--- текст кнопки: сам TextButton или вложенный TextLabel (у ImageButton текст часто внутри)
-function Automation.AutoRespawn.ButtonText(btn)
-    if not btn then return "" end
-    local parts = { tostring(btn.Text or "") }
-    for _, child in ipairs(btn:GetChildren()) do
-        if child:IsA("TextLabel") then parts[#parts + 1] = tostring(child.Text or "") end
-    end
-    return table.concat(parts, " ")
+-- [ v85 ] экран смерти ищем по содержимому, а не только по Health <= 0:
+-- в большинстве игр персонаж уже спектатор/жив, пока открыт ELIMINATED
+Automation.AutoRespawn._DeathMarkers = {
+    "eliminated", "you were killed", "you died", "dead screen", "killed by",
+    "return to lobby", "respawn", "spectating",
+}
+
+function Automation.AutoRespawn.DeathScreenGui(gui)
+    if not gui or not gui:IsA("LayerCollector") then return false end
+    if not Automation.AutoRespawn.GuiVisible(gui) then return false end
+    return Automation.AutoRespawn.TextHint(gui, Automation.AutoRespawn._DeathMarkers, 1600)
 end
 
 function Automation.AutoRespawn.FindSkipButton(cfg)
     local words = Automation.AutoRespawn.Keywords(cfg)
-    local lp = Core.LocalPlayer
-    local pg = lp and lp:FindFirstChild("PlayerGui")
-    if not pg then return nil end
+    local roots = Automation.AutoRespawn.GuiRoots()
 
-    -- 1) экран смерти по имени корня (DeathScreen, EliminatedGui, ...)
-    for _, gui in ipairs(pg:GetChildren()) do
-        if Automation.AutoRespawn.DeadScreenName(gui.Name) and gui:IsA("LayerCollector") then
-            if Automation.AutoRespawn.GuiVisible(gui) then
-                for _, d in ipairs(gui:GetDescendants()) do
-                    if d:IsA("GuiButton")
-                        and Automation.AutoRespawn.GuiVisible(d)
-                        and Automation.AutoRespawn.MatchesKeywords(Automation.AutoRespawn.ButtonText(d), words) then
-                        return d
+    local function match(btn)
+        if not (btn and btn:IsA("GuiButton")) then return false end
+        if ScreenGui and btn:IsDescendantOf(ScreenGui) then return false end
+        if not Automation.AutoRespawn.GuiVisible(btn) then return false end
+        local text = Automation.AutoRespawn.ButtonText(btn) .. " " .. btn.Name
+        return Automation.AutoRespawn.MatchesKeywords(text, words)
+    end
+
+    -- 1) любой видимый экран с текстом ELIMINATED / KILLED BY / DEAD SCREEN
+    for _, root in ipairs(roots) do
+        local ok, found = pcall(function()
+            for _, gui in ipairs(root:GetChildren()) do
+                if gui ~= ScreenGui and Automation.AutoRespawn.DeathScreenGui(gui) then
+                    for _, d in ipairs(gui:GetDescendants()) do
+                        if match(d) then return d end
                     end
                 end
             end
-        end
+            return nil
+        end)
+        if ok and found then return found end
     end
 
-    -- 2) запасной путь: кнопка с ключевым словом рядом с надписью ELIMINATED
-    local scanned = 0
-    for _, d in ipairs(pg:GetDescendants()) do
-        scanned = scanned + 1
-        if scanned > 800 then break end
-        if d:IsA("GuiButton") and Automation.AutoRespawn.GuiVisible(d)
-            and Automation.AutoRespawn.MatchesKeywords(Automation.AutoRespawn.ButtonText(d), words) then
-            local holder = d.Parent
-            if holder then
-                if Automation.AutoRespawn.DeadScreenName(holder.Name) then return d end
-                local hops = 0
-                local node = holder
-                while node and node ~= pg and hops < 4 do
-                    local siblings = node:GetChildren()
-                    for i = 1, math.min(#siblings, 40) do
-                        local sib = siblings[i]
-                        if sib:IsA("TextLabel") then
-                            local t = string.lower(tostring(sib.Text or ""))
-                            if t:find("eliminated", 1, true) or t:find("you were killed", 1, true)
-                                or t:find("dead screen", 1, true) or t:find("respawn", 1, true) then
-                                return d
-                            end
-                        end
-                    end
-                    node = node.Parent
-                    hops = hops + 1
+    -- 2) Health <= 0 (или персонажа уже нет): ищем кнопку по всему интерфейсу игры
+    if Automation.AutoRespawn.IsDead() then
+        for _, root in ipairs(roots) do
+            local ok, found = pcall(function()
+                for _, d in ipairs(root:GetDescendants()) do
+                    if match(d) then return d end
                 end
-            end
+                return nil
+            end)
+            if ok and found then return found end
         end
     end
 
-    -- 3) последний шанс: пока мы мертвы, подходит любая видимая кнопка SKIP
-    if not Automation.AutoRespawn.IsDead() then return nil end
-    scanned = 0
-    for _, d in ipairs(pg:GetDescendants()) do
-        scanned = scanned + 1
-        if scanned > 800 then break end
-        if d:IsA("GuiButton") and Automation.AutoRespawn.GuiVisible(d) then
-            local t = string.lower(Automation.AutoRespawn.ButtonText(d))
-            if t:find("skip", 1, true) or t:find("play again", 1, true) then return d end
-        end
-    end
     return nil
 end
 
@@ -10575,30 +10692,35 @@ function Automation.AutoRespawn.Click(btn)
     if not btn then return false end
     local fired = false
 
-    if getconnections then
-        for _, evName in ipairs({ "Activated", "MouseButton1Click" }) do
+    -- firesignal дергает все обработчики кнопки, а не только Activated
+    if type(firesignal) == "function" then
+        for _, evName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
             pcall(function()
                 local sig = btn[evName]
                 if sig then
-                    for _, c in ipairs(getconnections(sig)) do
-                        if type(c.Fire) == "function" then
-                            c:Fire()
-                            fired = true
-                        elseif type(c.Function) == "function" then
-                            c.Function()
-                            fired = true
-                        end
-                    end
+                    firesignal(sig)
+                    fired = true
                 end
             end)
         end
     end
 
-    if not fired and type(firesignal) == "function" then
-        pcall(function()
-            firesignal(btn.MouseButton1Click)
-            fired = true
-        end)
+    if not fired and type(getconnections) == "function" then
+        for _, evName in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+            pcall(function()
+                local sig = btn[evName]
+                if not sig then return end
+                for _, c in ipairs(getconnections(sig)) do
+                    if type(c.Fire) == "function" then
+                        c:Fire()
+                        fired = true
+                    elseif type(c.Function) == "function" then
+                        c.Function()
+                        fired = true
+                    end
+                end
+            end)
+        end
     end
 
     if not fired then
@@ -10624,72 +10746,92 @@ function Automation.AutoRespawn.IsDead()
     return (hum.Health or 0) <= 0
 end
 
+function Automation.AutoRespawn.SelfDowned(char, hum)
+    if not char or not hum then return false end
+    if Automation.AutoRespawn.IsDowned(char, hum) then return true end
+    -- [ v85 ] своя плашка DOWNED / "hold X": персонаж может лежать без ragdoll-состояния
+    return Automation.AutoRespawn.ScreenDownedHint()
+end
+
 function Automation.AutoRespawn.Tick()
-    local cfg = Automation.AutoRespawn.Cfg()
+    local ar = Automation.AutoRespawn
+    local cfg = ar.Cfg()
     local now = tick()
     local lp = Core.LocalPlayer
     local char = lp and lp.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-    -- 1) AUTO DEATH
+    -- 1) AUTO DEATH: держим клавишу, пока цель лежит (серии по DeathSeconds)
     if cfg.Death then
-        local downedSelf = false
-        if cfg.DeathSelf and char and hum then
-            downedSelf = Automation.AutoRespawn.IsDowned(char, hum)
-        end
+        local downedSelf = cfg.DeathSelf and ar.SelfDowned(char, hum) or false
         local targets = {}
         if cfg.DeathRadius > 0 then
-            targets = Automation.AutoRespawn.FindDowned(cfg.DeathRadius)
+            targets = ar.FindDowned(cfg.DeathRadius)
         end
 
         if downedSelf or #targets > 0 then
-            if Automation.AutoRespawn._episodeStart == 0 then
-                Automation.AutoRespawn._episodeStart = now
-                Automation.AutoRespawn._pressCount = 0
-            end
-            local elapsed = now - Automation.AutoRespawn._episodeStart
-            if elapsed <= cfg.DeathSeconds then
-                if now - Automation.AutoRespawn._lastPress >= 0.12 then
-                    Automation.AutoRespawn._lastPress = now
-                    Automation.AutoRespawn.PressKey(cfg.DeathKey)
-                    Automation.AutoRespawn._pressCount = Automation.AutoRespawn._pressCount + 1
-                end
-                Automation.AutoRespawn.Status = string.format("%s pressed %dx (%.1f / %.0f s)",
-                    cfg.DeathKey, Automation.AutoRespawn._pressCount, elapsed, cfg.DeathSeconds)
-                Automation.AutoRespawn.StatusOk = true
+            if now < (ar._pauseUntil or 0) then
+                ar.Status = "downed too long - waiting"
+                ar.StatusOk = false
             else
-                Automation.AutoRespawn.Status = "downed too long - waiting"
-                Automation.AutoRespawn.StatusOk = false
+                if ar._episodeStart == 0 then
+                    ar._episodeStart = now
+                    ar._pressCount = 0
+                    ar._lastPress = 0
+                end
+                local elapsed = now - ar._episodeStart
+                if elapsed <= cfg.DeathSeconds then
+                    -- [ v85 ] именно удержание: keydown живёт до keyup, раз в 0.6 s пере-нажатие
+                    if now - ar._lastPress >= 0.6 then
+                        ar._lastPress = now
+                        ar.ReleaseKey()
+                        ar.HoldKey(cfg.DeathKey)
+                        ar._pressCount = ar._pressCount + 1
+                    end
+                    ar.Status = string.format("%s held %dx (%.1f / %.0f s)",
+                        cfg.DeathKey, ar._pressCount, elapsed, cfg.DeathSeconds)
+                    ar.StatusOk = true
+                else
+                    ar.ReleaseKey()
+                    ar._episodeStart = 0
+                    ar._pressCount = 0
+                    ar._pauseUntil = now + 0.8
+                    ar.Status = "downed too long - waiting"
+                    ar.StatusOk = false
+                end
             end
         else
-            Automation.AutoRespawn._episodeStart = 0
-            Automation.AutoRespawn._pressCount = 0
+            ar.ReleaseKey()
+            ar._episodeStart = 0
+            ar._pressCount = 0
+            ar._lastPress = 0
+            ar._pauseUntil = 0
             if not cfg.Skip then
-                Automation.AutoRespawn.Status = "waiting for a downed player"
-                Automation.AutoRespawn.StatusOk = true
+                ar.Status = "waiting for a downed player"
+                ar.StatusOk = true
             end
         end
+    else
+        ar.ReleaseKey()
     end
 
-    -- 2) AUTO SKIP
+    -- 2) AUTO SKIP: экран смерти ищем по тексту, а не только по Health <= 0
     if cfg.Skip then
-        if Automation.AutoRespawn.IsDead() then
-            if now - Automation.AutoRespawn._lastSkip >= cfg.SkipInterval then
-                Automation.AutoRespawn._lastSkip = now
-                local btn = Automation.AutoRespawn.FindSkipButton(cfg)
-                if btn then
-                    Automation.AutoRespawn.Click(btn)
-                    Automation.AutoRespawn.Status = "SKIP clicked"
-                    Automation.AutoRespawn.StatusOk = true
-                    print("[AUTO-SKIP] clicked: " .. btn:GetFullName())
-                else
-                    Automation.AutoRespawn.Status = "dead - looking for SKIP"
-                    Automation.AutoRespawn.StatusOk = true
-                end
+        if now - ar._lastSkip >= cfg.SkipInterval then
+            ar._lastSkip = now
+            local btn = ar.FindSkipButton(cfg)
+            if btn then
+                ar.Click(btn)
+                ar.Status = "SKIP clicked"
+                ar.StatusOk = true
+                print("[AUTO-SKIP] clicked: " .. btn:GetFullName())
+            elseif ar.IsDead() then
+                ar.Status = "dead - looking for SKIP"
+                ar.StatusOk = true
+            elseif not cfg.Death then
+                ar.Status = "alive - no death screen"
+                ar.StatusOk = true
             end
-        elseif not cfg.Death then
-            Automation.AutoRespawn.Status = "alive"
-            Automation.AutoRespawn.StatusOk = true
         end
     end
 end
@@ -10705,6 +10847,7 @@ function Automation.AutoRespawn.Start()
             pcall(Automation.AutoRespawn.Tick)
             task.wait(0.1)
         end
+        Automation.AutoRespawn.ReleaseKey()
         Automation.AutoRespawn._loopActive = false
         Automation.AutoRespawn.Status = "off"
         Automation.AutoRespawn.StatusOk = true
@@ -20568,8 +20711,22 @@ end, function(p)
     end, spRow:FindFirstChild("TextLabel"), nil, true)
 end, nil, nil, "Blox Strike")
 
-createModule("No Fall Damage", "Prevents falling damage states", "Movement", Config.Cheat.NoFallDamage, function(v)
+createModule("No Fall Damage", "War Tycoon: disables fall/ragdoll/freefall states, resets the fall timer and caps landing speed", "Movement", Config.Cheat.NoFallDamage, function(v)
     Config.Cheat.NoFallDamage = v
+    if v and Automation.NoFall then Automation.NoFall.LastReset = 0 end
+    if not v then
+        -- возвращаем стоковые состояния, когда фича выключена
+        pcall(function()
+            local char = Core.LocalPlayer and Core.LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hum then return end
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+        end)
+    end
+    _G.Log(v and "No Fall Damage: ON" or "No Fall Damage: OFF",
+        v and Color3.fromRGB(0, 255, 150) or Color3.fromRGB(255, 120, 120))
 end)
 
 createModule("Noclip", "Walk through walls and objects. Collisions are restored when turned off.", "Movement", Config.Cheat.Noclip, function(v)
