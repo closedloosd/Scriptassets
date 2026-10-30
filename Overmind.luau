@@ -12031,6 +12031,33 @@ end
 -- Evaluate one part. A purchase pad now requires a parsed CASH price; bare
 -- numbers, Robux prices and product ids are rejected. Returns nil, reason for
 -- anything that must not be teleported to.
+-- [ v90 ] An occupied pad is not a purchase pad. A building that already
+-- stands on it has a substantial collidable part starting at the pad top.
+-- Narrow signs and high roofs are ignored.
+function Automation.WarTycoonAutoBuildHasBuildingOn(pad, base)
+    if not pad or not pad.Parent or not base then return false, nil end
+    local top = pad.Position.Y + pad.Size.Y * 0.5
+    for _, d in ipairs(base:GetDescendants()) do
+        if d:IsA("BasePart") and d ~= pad and not d:IsDescendantOf(pad)
+            and d.CanCollide ~= false then
+            local s = d.Size
+            if s.Y >= 2 and s.X >= 3 and s.Z >= 3 then
+                local bottom = d.Position.Y - s.Y * 0.5
+                if bottom >= top - 1 and bottom <= top + 10
+                    and math.abs(d.Position.X - pad.Position.X) <= pad.Size.X * 0.5
+                    and math.abs(d.Position.Z - pad.Position.Z) <= pad.Size.Z * 0.5 then
+                    local n = string.lower(d.Name)
+                    if not (n:find("sign", 1, true) or n:find("label", 1, true)
+                        or n:find("billboard", 1, true) or n:find("text", 1, true)) then
+                        return true, d
+                    end
+                end
+            end
+        end
+    end
+    return false, nil
+end
+
 function Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
     if not obj or not obj.Parent or not obj:IsA("BasePart") then return nil, "no part" end
     if not obj:IsDescendantOf(workspace) then return nil, "not in workspace" end
@@ -12067,10 +12094,10 @@ function Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
     -- A bare "BUY"/price-only pad is the usual Robux/donation button, so it is
     -- skipped instead of being teleported to.
     if Automation.WarTycoonAutoBuildCategory(nameLow .. " " .. modelLow .. " " .. labelLow) == "other" then
-        local generic = labelLow == "" or labelLow == "buy" or labelLow == "purchase"
+        local generic = labelLow == "buy" or labelLow == "purchase"
             or labelLow == "buy now" or labelLow == "purchase now" or labelLow == "unlock"
-            or labelLow == "press" or labelLow == "use" or labelLow:find("^%$?%d") ~= nil
-        if generic then return nil, "unlabeled pad" end
+            or labelLow == "press" or labelLow == "use"
+        if generic then return nil, "generic buy button" end
     end
 
     local click = Automation.WarTycoonAutoBuildHasClick(obj)
@@ -12082,9 +12109,10 @@ function Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
         or (scope and scope ~= obj and Automation.WarTycoonAutoBuildHasVisibleSign(scope, nil))
     local flat = Automation.WarTycoonAutoBuildIsFlatDisc(obj)
     local buyText = Automation.WarTycoonAutoBuildHasWords(combined, Automation.WarTycoonAutoBuildBuyWords)
-    -- Only the pad's own title/name can make it a display board. A normal
-    -- extractor sign may also contain "Income $5/s": that must not hide it.
-    local displayName = nameLow .. " " .. modelLow .. " " .. labelLow
+    -- Only the pad's own part/model name can make it a display board. A normal
+    -- extractor sign may also contain "Income $5/s" next to its cash price;
+    -- that income label must not hide a real oil pad.
+    local displayName = nameLow .. " " .. modelLow
     if Automation.WarTycoonAutoBuildHasDisplayHint(displayName) and not buyText then
         return nil, "display, not a pad"
     end
@@ -12138,7 +12166,7 @@ function Automation.WarTycoonAutoBuildScanPads(base)
     local ignoreShield = Config.WarTycoonBuild.IgnoreShield ~= false
     local badHints = {
         "spawner", "spawnpad", "spawn pad", "spawnpoint", "prompt", "seat",
-        "collector", "atm", "rebirth", "donat", "tip jar", "tips", "support",
+        "collect", "collector", "atm", "cash to collect", "rebirth", "donat", "tip jar", "tips", "support",
         "robux", "gamepass", "game pass", "premium", "daily", "reward", "spin", "wheel",
         "crate", "lucky", "offer", "bundle", "gift", "cash pack", "money pack",
         "cash shop", "robux shop", "gamepass shop", "premium shop", "donation shop",
@@ -12239,6 +12267,15 @@ function Automation.WarTycoonAutoBuildScanPads(base)
         return best
     end
 
+    -- The green plate under the Cash Collector is not a purchase pad. Without
+    -- this check the ATM screen price made Auto Build stand on the collector.
+    local collector = Automation.WarTycoonAutoBuildFindCollector(base)
+    local function isCollectorPad(obj)
+        if not collector or not collector.Parent then return false end
+        if obj == collector then return true end
+        return (obj.Position - collector.Position).Magnitude <= 8
+    end
+
     local units, byKey, skipped, skipSeen = {}, {}, {}, {}
     for _, obj in ipairs(base:GetDescendants()) do
         if obj:IsA("BasePart") and Automation.WarTycoonAutoBuildIsFlatDisc(obj) then
@@ -12264,7 +12301,7 @@ function Automation.WarTycoonAutoBuildScanPads(base)
             -- [ v90 ] A big "Purchases" model is not one pad. Pair this floor
             -- pad with its nearest visible sign; never borrow a price from a
             -- bare/Robux sign in the same model.
-            if scope == obj and info.price == nil and not info.robux
+            if info.price == nil and not info.robux
                 and not Automation.WarTycoonAutoBuildHasBarePrice(info.texts) then
                 local near = nearestSignInfo(obj)
                 if near then
@@ -12273,6 +12310,35 @@ function Automation.WarTycoonAutoBuildScanPads(base)
                 end
             end
             local eval, reason = Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
+            if eval and isCollectorPad(obj) then
+                if not skipSeen[key] then
+                    skipSeen[key] = true
+                    skipped[#skipped + 1] = {
+                        label = eval.label or obj.Name,
+                        part = obj,
+                        model = model,
+                        name = (model and model:GetFullName() or obj:GetFullName()),
+                        reason = "cash collector",
+                    }
+                end
+                eval = nil
+            end
+            if eval then
+                local occupied, blocker = Automation.WarTycoonAutoBuildHasBuildingOn(obj, base)
+                if occupied then
+                    if not skipSeen[key] then
+                        skipSeen[key] = true
+                        skipped[#skipped + 1] = {
+                            label = eval.label or obj.Name,
+                            part = obj,
+                            model = model,
+                            name = (model and model:GetFullName() or obj:GetFullName()),
+                            reason = "occupied (" .. tostring(blocker and blocker.Name or "object") .. ")",
+                        }
+                    end
+                    eval = nil
+                end
+            end
             if eval then
                 local nameLow = string.lower(obj.Name)
                 local modelLow = (model and model ~= base) and string.lower(model.Name) or ""
@@ -12320,7 +12386,7 @@ function Automation.WarTycoonAutoBuildScanPads(base)
             elseif reason == "robux/donation" or reason == "sold/owned/locked"
                 or reason == "invisible" or reason == "display, not a pad"
                 or reason == "bare price (possible Robux)" or reason == "cash offer"
-                or reason == "tiny price (donation?)" or reason == "unlabeled pad" then
+                or reason == "tiny price (donation?)" or reason == "generic buy button" then
                 if not skipSeen[key] then
                     skipSeen[key] = true
                     skipped[#skipped + 1] = {
@@ -12787,7 +12853,7 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
             cooldown = math.huge
         elseif reason == "sold/owned/locked" or reason == "bare price (possible Robux)"
             or reason == "cash offer" or reason == "tiny price (donation?)"
-            or reason == "unlabeled pad" then
+            or reason == "generic buy button" then
             cooldown = 120
         elseif reason == "invisible" or reason == "display, not a pad" or reason == "no cash price" then
             cooldown = 60
@@ -12798,6 +12864,16 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
                 .. tostring(unit.label or unit.part.Name), Color3.fromRGB(255, 170, 0))
         end
         Automation._wtPads = nil
+        return false
+    end
+    local occupied, blocker = Automation.WarTycoonAutoBuildHasBuildingOn(anchor, base)
+    if occupied then
+        Automation._wtDonePads[unit.key] = tick() + 120
+        Automation._wtPads = nil
+        Automation.WarTycoonAutoBuildLog("skipped occupied pad: "
+            .. tostring(unit.label or unit.part.Name)
+            .. " (" .. tostring(blocker and blocker.Name or "object") .. ")",
+            Color3.fromRGB(255, 170, 0))
         return false
     end
     if eval.trigger and eval.trigger.Parent and eval.trigger:IsDescendantOf(base) then
@@ -13165,6 +13241,34 @@ function Automation.WarTycoonAutoBuildDump()
                 i, tostring(s.reason or "excluded"), tostring(s.label or ""), tostring(s.name or "-")))
         end
     end
+    -- [ v90 ] When 0 pads are found, explain every flat floor part: missing
+    -- cash price, sign-only, collision name, or an object already on the pad.
+    local flatCount, shown = 0, 0
+    for _, d in ipairs(base:GetDescendants()) do
+        if d:IsA("BasePart") and Automation.WarTycoonAutoBuildIsFlatDisc(d) then
+            flatCount = flatCount + 1
+            if shown < 40 then
+                local model = d:FindFirstAncestorOfClass("Model")
+                if model and not model:IsDescendantOf(base) then model = nil end
+                local scope = d
+                if model and model ~= base and #model:GetChildren() <= 40 then scope = model end
+                local label, price, robux, texts = Automation.WarTycoonAutoBuildPadInfo(scope)
+                local info = {
+                    label = label, price = price, robux = robux, texts = texts,
+                    product = Automation.WarTycoonAutoBuildHasProductSignal(scope), scope = scope,
+                }
+                local eval, reason = Automation.WarTycoonAutoBuildPadEval(d, model, scope, info, base)
+                local occupied, blocker = Automation.WarTycoonAutoBuildHasBuildingOn(d, base)
+                print(string.format(
+                    "[AUTO-BUILD] flat '%s' label='%s' price=%s eval=%s occupied=%s",
+                    d:GetFullName(), tostring(eval and eval.label or label or ""),
+                    tostring(price), eval and "yes" or tostring(reason),
+                    occupied and ("yes (" .. tostring(blocker and blocker.Name or "?") .. ")") or "no"))
+                shown = shown + 1
+            end
+        end
+    end
+    Automation.WarTycoonAutoBuildLog("dump: flat floor parts " .. flatCount)
     local coll = Automation.WarTycoonAutoBuildFindCollector(base)
     print("[AUTO-BUILD] collector: " .. tostring(coll and coll:GetFullName() or "NOT FOUND"))
     local names = {}
