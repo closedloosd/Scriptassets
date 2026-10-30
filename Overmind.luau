@@ -888,6 +888,14 @@ Config = {
         StopAfterRebirths = 0,  -- stop after N rebirths (0 = unlimited)
         ReportFile = true,  -- write a session report to Overmind/logs/
     },
+    -- [ v88 ] War Tycoon AFK bypass: the game moves idle players to a separate AFK place
+    WarTycoonAntiAFK = {
+        Enabled = false,
+        Interval = 45,  -- seconds between activity pulses
+        Move = true,  -- small step + jump so the server sees real movement
+        BlockTeleport = true,  -- cancel a client-side AFK teleport while idle
+        ClickPrompts = true,  -- click I'M HERE / STAY on an AFK countdown
+    },
     SpawnSniffer = false,
     -- [ v54 ] Community badge (see Server/badge/)
     Badge = {
@@ -2672,7 +2680,7 @@ Internal.createAutoRespawnSection = function(parent)
     Internal.createSectionHeader(parent, "Death handler", Color3.fromRGB(255, 120, 120))
 
     local deathRow = Internal.createSettingRow(parent, "Auto Death (finish downed)",
-        "Holds the chosen key while a downed player is near you, or while you are downed yourself. Repeats in short bursts.")
+        "Holds the chosen key continuously while a downed player is near you, or while you are downed yourself.")
     Internal.createiOSSwitch(deathRow, cfg.Death, function(v)
         Config.AutoRespawn.Death = v
         if v then
@@ -2688,7 +2696,7 @@ Internal.createAutoRespawnSection = function(parent)
     end, "Key sent while a player is downed. X is used in War Tycoon; other common keys are in the list.")
     Internal.createSlider(parent, "Press for at most", 1, 20, cfg.DeathSeconds, function(v)
         Config.AutoRespawn.DeathSeconds = v
-    end, { Unit = "s", Desc = "How long one hold burst lasts for a downed target before a short pause." })
+    end, { Unit = "s", Desc = "Maximum continuous hold for one target before a short pause. The key is not re-pressed while the target stays downed." })
 
     Internal.createSlider(parent, "Downed search radius", 0, 200, cfg.DeathRadius, function(v)
         Config.AutoRespawn.DeathRadius = v
@@ -7285,6 +7293,7 @@ Internal.ResetModuleConfig = function(modName)
             ["War Tycoon Farm"] = {"WarTycoonFarm"},
             ["Vehicles Farm Helper"] = {"VehiclesFarm"},
             ["Auto Build"] = {"WarTycoonBuild"},
+            ["Anti-AFK (War Tycoon)"] = {"WarTycoonAntiAFK"},
             ["Interface Settings"] = {"Theme"},
             ["Dynamic Island"] = {"Island"},
         }
@@ -7607,6 +7616,7 @@ local function LoadConfig(name)
                         ["Auto Farm CC2"] = Config.CarCrushers.AutoFarm,
                         ["Vehicles Farm Helper"] = Config.VehiclesFarm.Enabled,
                         ["Auto Build"] = Config.WarTycoonBuild.Enabled,
+                        ["Anti-AFK (War Tycoon)"] = (Config.WarTycoonAntiAFK ~= nil and Config.WarTycoonAntiAFK.Enabled == true),
                         ["Path System"] = Config.PathSystem.Playing,
                         ["Debug Console"] = Config.Island.DebugConsole
                     }
@@ -7983,32 +7993,45 @@ task.spawn(function()
     end
 end)
 
--- [ v85 ] NO FALL DAMAGE (War Tycoon): одного FallenDown/Ragdoll мало —
--- игра считает падение по Freefall/таймеру состояния. Отключаем Freefall, сбрасываем
--- таймер коротким Running и ограничиваем скорость приземления до скорости прыжка.
+-- [ v86 ] NO FALL DAMAGE (War Tycoon): урон отсекаем состояниями, а не постоянным
+-- лимитом скорости. Freefall/FallingDown/Ragdoll выключены — игра не видит падения.
+-- Скорость гасим только у самой земли (мягкое приземление), поэтому само падение быстрое.
 Automation.NoFall = Automation.NoFall or { LastReset = 0 }
 
+-- Write a state only when it is not already off. GetStateEnabled is a read: the old
+-- version issued three property writes on every render frame, 60 times a second.
+function Automation.NoFall.DisableState(hum, state)
+    local ok, enabled = pcall(function() return hum:GetStateEnabled(state) end)
+    if ok and enabled == false then return end
+    pcall(function() hum:SetStateEnabled(state, false) end)
+end
+
 function Automation.NoFall.Tick(char, hum, hrp)
-    local nf = Automation.NoFall
-    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
-    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false) end)
-    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false) end)
+    Automation.NoFall.DisableState(hum, Enum.HumanoidStateType.FallingDown)
+    Automation.NoFall.DisableState(hum, Enum.HumanoidStateType.Ragdoll)
+    Automation.NoFall.DisableState(hum, Enum.HumanoidStateType.Freefall)
     if hum.SeatPart or Config.Cheat.Flying then return end
 
     local v = hrp.AssemblyLinearVelocity
-    if v.Y >= -45 then return end
+    if v.Y > -35 then return end
 
-    local now = tick()
-    local state = hum:GetState()
-    if (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown)
-        and now - (nf.LastReset or 0) >= 0.15 then
-        nf.LastReset = now
-        -- короткий Running обнуляет Freefall-таймер, по которому War Tycoon считает урон
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    -- [ v86 ] два порога: сначала снимаем большую скорость, у земли — до безопасной.
+    -- Ставим скорость один раз за порог, а не каждый кадр, поэтому нет «парашюта».
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { char }
+    local hit = workspace:Raycast(hrp.Position, Vector3.new(0, -24, 0), params)
+    if not hit then return end
+
+    local safe
+    if hit.Distance <= 9 then
+        safe = -35
+    elseif hit.Distance <= 22 then
+        safe = -110
     end
+    if not safe or v.Y >= safe then return end
 
-    -- терминальная скорость: удар о землю не быстрее обычного прыжка
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(v.X, -45, v.Z) end)
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(v.X, safe, v.Z) end)
 end
 
 -- Global Optimization Loop for Targets
@@ -10357,6 +10380,7 @@ Automation.AutoRespawn._episodeStart = 0
 Automation.AutoRespawn._pauseUntil = 0
 Automation.AutoRespawn._lastSkip = 0
 Automation.AutoRespawn._heldKey = nil
+Automation.AutoRespawn._lastSeen = 0
 
 -- [ v85 ] DBNO/ранения: у FORTLINE состояние “лежит” висит и на Humanoid
 Automation.AutoRespawn._DownedAttributes = {
@@ -10761,7 +10785,7 @@ function Automation.AutoRespawn.Tick()
     local char = lp and lp.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-    -- 1) AUTO DEATH: держим клавишу, пока цель лежит (серии по DeathSeconds)
+    -- 1) AUTO DEATH: одно непрерывное удержание клавиши, пока цель лежит
     if cfg.Death then
         local downedSelf = cfg.DeathSelf and ar.SelfDowned(char, hum) or false
         local targets = {}
@@ -10770,6 +10794,7 @@ function Automation.AutoRespawn.Tick()
         end
 
         if downedSelf or #targets > 0 then
+            ar._lastSeen = now
             if now < (ar._pauseUntil or 0) then
                 ar.Status = "downed too long - waiting"
                 ar.StatusOk = false
@@ -10777,19 +10802,16 @@ function Automation.AutoRespawn.Tick()
                 if ar._episodeStart == 0 then
                     ar._episodeStart = now
                     ar._pressCount = 0
-                    ar._lastPress = 0
                 end
                 local elapsed = now - ar._episodeStart
                 if elapsed <= cfg.DeathSeconds then
-                    -- [ v85 ] именно удержание: keydown живёт до keyup, раз в 0.6 s пере-нажатие
-                    if now - ar._lastPress >= 0.6 then
-                        ar._lastPress = now
-                        ar.ReleaseKey()
+                    -- [ v86 ] keydown один раз: отпускание/повтор сбрасывают полоску добивания
+                    if ar._heldKey == nil then
                         ar.HoldKey(cfg.DeathKey)
-                        ar._pressCount = ar._pressCount + 1
+                        ar._pressCount = 1
                     end
-                    ar.Status = string.format("%s held %dx (%.1f / %.0f s)",
-                        cfg.DeathKey, ar._pressCount, elapsed, cfg.DeathSeconds)
+                    ar.Status = string.format("%s held (%.1f / %.0f s)",
+                        cfg.DeathKey, elapsed, cfg.DeathSeconds)
                     ar.StatusOk = true
                 else
                     ar.ReleaseKey()
@@ -10801,14 +10823,21 @@ function Automation.AutoRespawn.Tick()
                 end
             end
         else
-            ar.ReleaseKey()
-            ar._episodeStart = 0
-            ar._pressCount = 0
-            ar._lastPress = 0
-            ar._pauseUntil = 0
-            if not cfg.Skip then
-                ar.Status = "waiting for a downed player"
+            -- [ v86 ] цель может мигнуть на кадр: короткая пауза перед keyup,
+            -- иначе полоска добивания обрывается на середине
+            if ar._heldKey ~= nil and now - (ar._lastSeen or 0) < 0.6 then
+                ar.Status = "holding (target lost)"
                 ar.StatusOk = true
+            else
+                ar.ReleaseKey()
+                ar._episodeStart = 0
+                ar._pressCount = 0
+                ar._pauseUntil = 0
+                ar._lastSeen = 0
+                if not cfg.Skip then
+                    ar.Status = "waiting for a downed player"
+                    ar.StatusOk = true
+                end
             end
         end
     else
@@ -10821,10 +10850,12 @@ function Automation.AutoRespawn.Tick()
             ar._lastSkip = now
             local btn = ar.FindSkipButton(cfg)
             if btn then
-                ar.Click(btn)
-                ar.Status = "SKIP clicked"
-                ar.StatusOk = true
-                print("[AUTO-SKIP] clicked: " .. btn:GetFullName())
+                local clicked = ar.Click(btn)
+                ar.Status = clicked and "SKIP clicked" or "SKIP found, click failed"
+                ar.StatusOk = clicked == true
+                if clicked then
+                    print("[AUTO-SKIP] clicked: " .. btn:GetFullName())
+                end
             elseif ar.IsDead() then
                 ar.Status = "dead - looking for SKIP"
                 ar.StatusOk = true
@@ -10852,6 +10883,520 @@ function Automation.AutoRespawn.Start()
         Automation.AutoRespawn.Status = "off"
         Automation.AutoRespawn.StatusOk = true
     end)
+end
+
+-- [ v88 ] ANTI-AFK (War Tycoon)
+-- The game moves players that stay still for ~10-15 minutes to a separate AFK place.
+-- Three layers: a real activity pulse, an answer to an AFK countdown, and a guard for
+-- the client-side TeleportService call that sends the player away.
+Automation.WTAFK = Automation.WTAFK or {}
+local WTAFK = Automation.WTAFK
+
+WTAFK.Status = "idle"
+WTAFK.StatusOk = true
+WTAFK.Pulses = 0
+WTAFK.Blocked = 0
+WTAFK.LastPulse = 0
+WTAFK.NextPulse = 0
+WTAFK.LastRealInput = os.clock()
+WTAFK.PulseUntil = 0
+WTAFK.AllowTeleport = false
+WTAFK._loopActive = false
+WTAFK._token = 0
+WTAFK._guard = nil
+WTAFK._lastPos = nil
+WTAFK._lastLog = 0
+WTAFK._firstPulseDone = false
+WTAFK.TeleportMethods = {
+    Teleport = true,
+    TeleportAsync = true,
+    TeleportToPlaceInstance = true,
+    TeleportToPrivateServer = true,
+    TeleportPartyAsync = true,
+}
+
+function WTAFK.Enabled()
+    local c = Config.WarTycoonAntiAFK
+    return type(c) == "table" and c.Enabled == true
+end
+
+function WTAFK.Cfg()
+    local c = Config.WarTycoonAntiAFK
+    if type(c) ~= "table" then
+        c = {}
+        Config.WarTycoonAntiAFK = c
+    end
+    local interval = tonumber(c.Interval)
+    if not interval or interval ~= interval then interval = 45 end
+    c.Interval = math.clamp(interval, 15, 120)
+    c.Move = (c.Move ~= false)
+    c.BlockTeleport = (c.BlockTeleport ~= false)
+    c.ClickPrompts = (c.ClickPrompts ~= false)
+    return c
+end
+
+function WTAFK.SetStatus(text, ok)
+    WTAFK.Status = tostring(text or "idle")
+    WTAFK.StatusOk = (ok ~= false)
+    local now = os.clock()
+    if _G.Log and now - (WTAFK._lastLog or 0) > 2 then
+        WTAFK._lastLog = now
+        pcall(_G.Log, "[Anti-AFK] " .. WTAFK.Status,
+            WTAFK.StatusOk and Color3.fromRGB(0, 220, 160) or Color3.fromRGB(255, 160, 80))
+    end
+end
+
+function WTAFK.NoteInput(input, gameProcessed)
+    -- Our own synthetic pulses must not look like a real player. The one exception is
+    -- a mouse/touch click consumed by a GUI (for example JOIN in the friend list): it
+    -- is real, and it may happen while a pulse is running.
+    if os.clock() < WTAFK.PulseUntil then
+        local realClick = gameProcessed == true and input ~= nil
+            and (input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch)
+        if not realClick then return end
+    end
+    WTAFK.LastRealInput = os.clock()
+end
+
+function WTAFK.RefreshInput()
+    -- A held key/mouse button produces no new InputBegan events. Without this check a
+    -- player who has been holding W for 2+ minutes would look idle to the teleport guard.
+    if os.clock() < WTAFK.PulseUntil then return end
+    local active = false
+    pcall(function()
+        local keys = Core.UserInputService:GetKeysPressed()
+        if keys and #keys > 0 then active = true end
+    end)
+    if not active then
+        pcall(function()
+            local uis = Core.UserInputService
+            if uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                or uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+                or uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton3) then
+                active = true
+            end
+        end)
+    end
+    if active then WTAFK.LastRealInput = os.clock() end
+end
+
+function WTAFK.SendKey(code, down)
+    -- Reuse the Auto Death key sender instead of keeping a second copy of the
+    -- executor keypress / VirtualInputManager fallback.
+    local ar = Automation.AutoRespawn
+    if ar and ar.SendKey then
+        return ar.SendKey(code, down) ~= nil
+    end
+    return false
+end
+
+-- A short step forward and back: the server sees a real position change without drifting.
+function WTAFK.StepCharacter()
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and hrp) then return false end
+    if (hum.Health or 0) <= 0 or hum.SeatPart or hum.PlatformStand then return false end
+
+    local before = hrp.Position
+    local look = hrp.CFrame.LookVector
+    local dir = Vector3.new(look.X, 0, look.Z)
+    if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
+    dir = dir.Unit
+
+    pcall(function() hum:Move(dir, false) end)
+    task.wait(0.16)
+    local peak = 0
+    pcall(function() peak = (hrp.Position - before).Magnitude end)
+    pcall(function() hum:Move(-dir, false) end)
+    task.wait(0.16)
+    pcall(function() hum:Move(Vector3.zero, false) end)
+    pcall(function() peak = math.max(peak, (hrp.Position - before).Magnitude) end)
+
+    -- A jump is a second, longer activity signal. It also covers WalkSpeed 0 and walls.
+    pcall(function()
+        local state = hum:GetState()
+        if state ~= Enum.HumanoidStateType.Jumping and state ~= Enum.HumanoidStateType.Freefall then
+            hum.Jump = true
+        end
+    end)
+    return peak > 0.15
+end
+
+WTAFK._AfkMarkers = {
+    "you are afk", "you're afk", "youre afk", "afk detected", "afk warning",
+    "afk timeout", "away from keyboard", "are you still there", "are you still playing",
+    "inactive for", "inactive", "idle for", "kicked for inactivity", "you will be kicked",
+}
+WTAFK._PromptButtons = {
+    "i'm here", "im here", "i am here", "i am still here", "still here", "still playing",
+    "continue", "resume", "return to game", "play again", "keep playing",
+    "stay in game", "stay", "yes, i'm here", "yes",
+}
+
+function WTAFK.CheckPrompt()
+    local ar = Automation.AutoRespawn
+    if not (ar and ar.GuiRoots and ar.GuiVisible and ar.TextHint and ar.ButtonText and ar.Click) then return false end
+    if not WTAFK.Cfg().ClickPrompts then return false end
+
+    local roots = ar.GuiRoots()
+
+    local function clickIn(gui)
+        local buttons = {}
+        for _, d in ipairs(gui:GetDescendants()) do
+            if d:IsA("GuiButton") and ar.GuiVisible(d)
+                and not (ScreenGui and d:IsDescendantOf(ScreenGui)) then
+                buttons[#buttons + 1] = {
+                    button = d,
+                    text = string.lower(ar.ButtonText(d) .. " " .. d.Name),
+                }
+            end
+        end
+        -- Strong phrases first: a "STAY" label must not win over "I'M HERE".
+        for _, word in ipairs(WTAFK._PromptButtons) do
+            for _, entry in ipairs(buttons) do
+                if string.find(entry.text, word, 1, true) then
+                    if ar.Click(entry.button) then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    for _, root in ipairs(roots) do
+        local ok, done = pcall(function()
+            for _, gui in ipairs(root:GetChildren()) do
+                if gui ~= ScreenGui and ar.GuiVisible(gui) and ar.TextHint(gui, WTAFK._AfkMarkers, 900) then
+                    if clickIn(gui) then return true end
+                end
+            end
+            return false
+        end)
+        if ok and done then
+            WTAFK.SetStatus("AFK prompt answered", true)
+            return true
+        end
+    end
+
+    -- Some games split the countdown and the button between different GUIs.
+    for _, root in ipairs(roots) do
+        local ok, done = pcall(function()
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("GuiButton") and ar.GuiVisible(d) and not (ScreenGui and d:IsDescendantOf(ScreenGui)) then
+                    local txt = string.lower(ar.ButtonText(d) .. " " .. d.Name)
+                    if string.find(txt, "i'm here", 1, true) or string.find(txt, "im here", 1, true)
+                        or string.find(txt, "still here", 1, true) then
+                        if ar.Click(d) then return true end
+                    end
+                end
+            end
+            return false
+        end)
+        if ok and done then
+            WTAFK.SetStatus("AFK prompt answered", true)
+            return true
+        end
+    end
+    return false
+end
+
+-- Teleports are normally requested by the client; cancel the AFK one while the player is idle.
+function WTAFK.InstallGuard()
+    if WTAFK._guard then return true end
+    if not WTAFK.Cfg().BlockTeleport then return false end
+    local ts = Core.Services.TeleportService
+    if not ts then return false end
+    -- Without getnamecallmethod the hook cannot tell which service method was called,
+    -- so installing it would only add overhead while the status claimed a working guard.
+    if type(getnamecallmethod) ~= "function" then return false end
+
+    local old = function() return nil end
+    local function handler(self, ...)
+        -- Check the object first: getnamecallmethod is an executor C call, and calling it
+        -- for every namecall in the game made the hook noticeably more expensive.
+        if self == ts then
+            local method = nil
+            if type(getnamecallmethod) == "function" then
+                local ok, got = pcall(getnamecallmethod)
+                if ok then method = got end
+            end
+            if method and WTAFK.TeleportMethods[method] then
+                local cfg = Config.WarTycoonAntiAFK
+                local idle = os.clock() - (WTAFK.LastRealInput or os.clock())
+                if type(cfg) == "table" and cfg.Enabled and cfg.BlockTeleport
+                    and not WTAFK.AllowTeleport and idle >= 120 then
+                    WTAFK.Blocked = WTAFK.Blocked + 1
+                    local now = os.clock()
+                    WTAFK.Status = "blocked AFK teleport (" .. tostring(method) .. ")"
+                    WTAFK.StatusOk = true
+                    if now - (WTAFK._lastBlockLog or 0) > 10 then
+                        WTAFK._lastBlockLog = now
+                        pcall(function()
+                            if _G.Log then _G.Log("[Anti-AFK] " .. WTAFK.Status, Color3.fromRGB(0, 220, 160)) end
+                        end)
+                    end
+                    return nil
+                end
+            end
+        end
+        return old(self, ...)
+    end
+
+    local hookFn = handler
+    if type(newcclosure) == "function" then
+        local ok, wrapped = pcall(newcclosure, hookFn)
+        if ok and wrapped then hookFn = wrapped end
+    end
+
+    if type(hookmetamethod) == "function" then
+        local ok, prev = pcall(function() return hookmetamethod(game, "__namecall", hookFn) end)
+        if ok and type(prev) == "function" then
+            old = prev
+            WTAFK._guard = { mode = "hookmetamethod", old = prev }
+            return true
+        end
+    end
+
+    if type(getrawmetatable) == "function" then
+        local ok, mt = pcall(getrawmetatable, game)
+        if ok and type(mt) == "table" and type(mt.__namecall) == "function" then
+            local prev = mt.__namecall
+            old = prev
+            local canReadonly = (type(setreadonly) == "function")
+            if canReadonly then pcall(function() setreadonly(mt, false) end) end
+            local assigned = pcall(function() mt.__namecall = hookFn end)
+            if canReadonly then pcall(function() setreadonly(mt, true) end) end
+            -- pcall only says the assignment did not throw; read it back so a read-only
+            -- metatable cannot be reported as a working guard.
+            local active = false
+            pcall(function() active = (mt.__namecall == hookFn) end)
+            if assigned and active then
+                WTAFK._guard = { mode = "metatable", mt = mt, old = prev, readonly = canReadonly }
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function WTAFK.RemoveGuard()
+    local guard = WTAFK._guard
+    WTAFK._guard = nil
+    -- If an executor refuses to restore the hook, the old handler must stop blocking.
+    WTAFK.AllowTeleport = true
+    if not guard then return end
+    if guard.mode == "metatable" and guard.mt then
+        if guard.readonly then pcall(function() setreadonly(guard.mt, false) end) end
+        pcall(function() guard.mt.__namecall = guard.old end)
+        if guard.readonly then pcall(function() setreadonly(guard.mt, true) end) end
+        return
+    end
+    if guard.mode == "hookmetamethod" and type(hookmetamethod) == "function" then
+        local restored = pcall(function() hookmetamethod(game, "__namecall", guard.old) end)
+        if restored then return end
+    end
+    if type(getrawmetatable) == "function" then
+        local ok, mt = pcall(getrawmetatable, game)
+        if ok and type(mt) == "table" then
+            local canReadonly = (type(setreadonly) == "function")
+            if canReadonly then pcall(function() setreadonly(mt, false) end) end
+            pcall(function() mt.__namecall = guard.old end)
+            if canReadonly then pcall(function() setreadonly(mt, true) end) end
+        end
+    end
+end
+
+function WTAFK.Pulse(reason)
+    if State.Unloading or not IsCurrentInstance() then return false end
+    if not WTAFK.Enabled() and reason ~= "manual" then return false end
+    -- Do not nudge a player who is actually playing. The first automatic pulse after
+    -- 90 s of no real input is still far below the game's 10-15 minute AFK timer.
+    if reason == "auto" and WTAFK._firstPulseDone and os.clock() - WTAFK.LastRealInput < 90 then
+        WTAFK.SetStatus("active | waiting for idle", true)
+        return true
+    end
+    local cfg = WTAFK.Cfg()
+    WTAFK.PulseUntil = os.clock() + 1.5
+
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local alive, seated = false, false
+    if hum then
+        local okHealth, health = pcall(function() return hum.Health end)
+        alive = okHealth and (health or 0) > 0
+        local okSeat, seat = pcall(function() return hum.SeatPart end)
+        seated = okSeat and seat ~= nil
+    end
+
+    local alreadyMoving = false
+    if hrp then
+        local okPos, pos = pcall(function() return hrp.Position end)
+        if okPos and pos then
+            if WTAFK._lastPos then
+                alreadyMoving = (pos - WTAFK._lastPos).Magnitude > 2
+            end
+            WTAFK._lastPos = pos
+        end
+    end
+
+    local focused = false
+    pcall(function() focused = Core.UserInputService:GetFocusedTextBox() ~= nil end)
+    local menuOpen = false
+    pcall(function() menuOpen = Internal.MainFrame ~= nil and Internal.MainFrame.Visible == true end)
+
+    -- Roblox's own Idled timer + any client-side input listener. Each call is guarded
+    -- separately: a broken executor method must not stop the remaining activity signals.
+    -- No ClickButton2 here: a click at the screen centre may press a game HUD button.
+    local vu = nil
+    pcall(function() vu = game:GetService("VirtualUser") end)
+    if vu then
+        pcall(function() vu:CaptureController() end)
+        pcall(function() vu:MoveMouse(Vector2.new(math.random(-60, 60), math.random(-40, 40))) end)
+    end
+
+    local moved = false
+    if cfg.Move and alive and not seated and not alreadyMoving and not focused then
+        local stepOk, stepMoved = pcall(WTAFK.StepCharacter)
+        moved = stepOk and stepMoved == true
+    end
+
+    -- If the character cannot walk, synthetic keys still count as input. Do not drive a vehicle
+    -- and do not type into a focused settings textbox.
+    if cfg.Move and alive and not seated and not moved and not alreadyMoving and not focused and not menuOpen then
+        WTAFK.SendKey(Enum.KeyCode.W, true)
+        task.wait(0.08)
+        WTAFK.SendKey(Enum.KeyCode.W, false)
+        task.wait(0.05)
+        WTAFK.SendKey(Enum.KeyCode.S, true)
+        task.wait(0.08)
+        WTAFK.SendKey(Enum.KeyCode.S, false)
+    end
+
+    -- Roblox's Idled timer resets on input, not on position. A Space tap is a real event
+    -- even when the step already worked, and unlike Shift it does not toggle shift-lock.
+    -- Gate it on Move as well: with "Micro-step / jump" off the character must not jump.
+    if cfg.Move and alive and not seated and not focused and not menuOpen then
+        WTAFK.SendKey(Enum.KeyCode.Space, true)
+        task.wait(0.05)
+        WTAFK.SendKey(Enum.KeyCode.Space, false)
+    end
+
+    WTAFK._firstPulseDone = true
+    WTAFK.Pulses = WTAFK.Pulses + 1
+    WTAFK.LastPulse = os.clock()
+    local where = tostring(reason or "auto")
+    if seated then where = where .. ", in vehicle" end
+    if not alive then where = where .. ", no character" end
+    WTAFK.SetStatus(string.format("%s | pulse %d", where, WTAFK.Pulses), true)
+    return true
+end
+
+function WTAFK.Start()
+    if WTAFK._loopActive then return end
+    local cfg = WTAFK.Cfg()
+    WTAFK._token = (WTAFK._token or 0) + 1
+    local token = WTAFK._token
+    WTAFK.LastRealInput = os.clock()
+    WTAFK.PulseUntil = 0
+    WTAFK._lastPos = nil
+    WTAFK._firstPulseDone = false
+    WTAFK.AllowTeleport = false
+
+    local function connect(key, signal, fn)
+        if not signal then return end
+        local oldConn = State.Connections[key]
+        if oldConn then pcall(function() oldConn:Disconnect() end) end
+        local ok, conn = pcall(function() return signal:Connect(fn) end)
+        if ok then State.Connections[key] = conn end
+    end
+
+    connect("WTAFK_InputBegan", Core.UserInputService.InputBegan, WTAFK.NoteInput)
+    connect("WTAFK_InputChanged", Core.UserInputService.InputChanged, WTAFK.NoteInput)
+    connect("WTAFK_InputEnded", Core.UserInputService.InputEnded, WTAFK.NoteInput)
+    pcall(function()
+        connect("WTAFK_Idled", Core.LocalPlayer.Idled, function()
+            if WTAFK.Enabled() then WTAFK.Pulse("idled") end
+        end)
+    end)
+
+    local firstPulseDelay = 5
+    WTAFK.NextPulse = os.clock() + firstPulseDelay
+    local guardOk = false
+    pcall(function() guardOk = WTAFK.InstallGuard() == true end)
+    WTAFK._loopActive = true
+    local guardNote = ""
+    if cfg.BlockTeleport and not guardOk then guardNote = " | teleport guard unavailable" end
+    WTAFK.SetStatus("active, pulse every " .. tostring(cfg.Interval) .. "s" .. guardNote,
+        not (cfg.BlockTeleport and not guardOk))
+
+    task.spawn(function()
+        -- first pulse soon, then the configured interval; enabling late still saves the session
+        local nextPulse = os.clock() + firstPulseDelay
+        local nextPrompt = os.clock() + 5
+        local lastInterval = cfg.Interval
+        while WTAFK.Enabled() and not State.Unloading and IsCurrentInstance() and WTAFK._token == token do
+            local c = WTAFK.Cfg()
+            WTAFK.RefreshInput()
+            local now = os.clock()
+            if c.Interval ~= lastInterval then
+                lastInterval = c.Interval
+                nextPulse = math.min(nextPulse, now + c.Interval)
+            end
+            if now >= nextPulse then
+                local ok, err = pcall(WTAFK.Pulse, "auto")
+                if not ok then WTAFK.SetStatus("pulse error: " .. tostring(err), false) end
+                nextPulse = os.clock() + c.Interval
+            end
+            -- Only scan the GUI when the player is actually idle; the game cannot show a
+            -- legitimate AFK prompt while real input is arriving, and the scan is the most
+            -- expensive part of the loop.
+            if c.ClickPrompts and now >= nextPrompt and (now - WTAFK.LastRealInput) > 30 then
+                pcall(WTAFK.CheckPrompt)
+                nextPrompt = now + 8
+            end
+            WTAFK.NextPulse = nextPulse
+            task.wait(0.5)
+        end
+        if WTAFK._token == token then
+            WTAFK._loopActive = false
+            WTAFK.NextPulse = 0
+            if not State.Unloading and not WTAFK.Enabled() then
+                WTAFK.Stop(true)
+            end
+        end
+    end)
+end
+
+function WTAFK.Stop(silent)
+    WTAFK.Cfg().Enabled = false
+    WTAFK._token = (WTAFK._token or 0) + 1
+    for _, key in ipairs({ "WTAFK_InputBegan", "WTAFK_InputChanged", "WTAFK_InputEnded", "WTAFK_Idled" }) do
+        local conn = State.Connections[key]
+        if conn then pcall(function() conn:Disconnect() end) end
+        State.Connections[key] = nil
+    end
+    WTAFK.RemoveGuard()
+    pcall(function()
+        local char = Core.LocalPlayer and Core.LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum:Move(Vector3.zero, false) end
+    end)
+    WTAFK._loopActive = false
+    WTAFK._lastPos = nil
+    WTAFK.NextPulse = 0
+    -- keep the card switch in sync when the loop stops itself
+    local mod = State.Modules and State.Modules["Anti-AFK (War Tycoon)"]
+    if mod and mod.Set then pcall(function() mod.Set(false, false, true) end) end
+    if not silent then
+        WTAFK.SetStatus("off", true)
+    else
+        WTAFK.Status = "off"
+        WTAFK.StatusOk = true
+    end
 end
 
 -- [ v51 ] AUTO BUILD (War Tycoon)
@@ -10900,6 +11445,7 @@ end
 -- [ v55 ] Self-healing session state
 function Automation.WarTycoonAutoBuildState()
     Automation._wtDonePads = Automation._wtDonePads or {}
+    Automation._wtPadFails = Automation._wtPadFails or {}
     Automation._wtStats = Automation._wtStats or {
         purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = tick(),
     }
@@ -10960,105 +11506,607 @@ function Automation.WarTycoonAutoBuildFindBase()
     local lpId = tostring(lp.UserId)
     local teamName = lp.Team and lp.Team.Name or nil
 
-    local function ownedByMe(obj)
+    -- 2 = explicitly me, 1 = my team (shared plots), 0 = not mine. Exact owner
+    -- wins, so a teammate's plot can never be picked before my own.
+    local function valueRank(v)
+        if v == lp then return 2 end
+        local s = tostring(v)
+        if s == lpId or s:lower() == lpName:lower() then return 2 end
+        if teamName and s:lower() == teamName:lower() then return 1 end
+        return 0
+    end
+
+    local function ownerRank(obj)
+        local best = 0
         for _, attrName in ipairs({ "Owner", "owner", "OwnerId", "ownerId", "OwnerUserId", "UserId", "userId", "Player" }) do
             local a = obj:GetAttribute(attrName)
             if a ~= nil then
-                if a == lp then return true end
-                local s = tostring(a)
-                if s == lpId or s:lower() == lpName:lower() then return true end
+                local rank = valueRank(a)
+                if rank > best then best = rank end
             end
         end
         for _, childName in ipairs({ "Owner", "owner", "OwnerValue", "Player", "TycoonOwner", "OwnerUserId" }) do
             local v = obj:FindFirstChild(childName)
             if v then
+                local rank = 0
                 if v:IsA("ObjectValue") then
-                    if v.Value == lp or v.Value == lp.Character then return true end
+                    if v.Value == lp or v.Value == lp.Character then
+                        rank = 2
+                    else
+                        rank = valueRank(v.Value)
+                    end
                 elseif v:IsA("StringValue") then
-                    local s = tostring(v.Value)
-                    if s:lower() == lpName:lower() or s == lpId or (teamName and s:lower() == teamName:lower()) then return true end
+                    rank = valueRank(v.Value)
                 elseif v:IsA("IntValue") or v:IsA("NumberValue") then
-                    if tostring(v.Value) == lpId then return true end
+                    if tostring(v.Value) == lpId then rank = 2 end
                 end
+                if rank > best then best = rank end
             end
+        end
+        return best
+    end
+
+    local function positionOf(obj)
+        if obj:IsA("Model") then
+            local ok, pos = pcall(function() return obj:GetPivot().Position end)
+            if ok and pos then return pos end
+        elseif obj:IsA("BasePart") then
+            return obj.Position
+        elseif obj:IsA("Folder") then
+            local ok, part = pcall(function() return obj:FindFirstChildWhichIsA("BasePart", true) end)
+            if ok and part then return part.Position end
+        end
+        return nil
+    end
+
+    local origin = Automation._wtHomePos
+    if not origin then
+        local char = lp.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then origin = hrp.Position end
+    end
+    local function distance(obj)
+        if not origin then return 0 end
+        local pos = positionOf(obj)
+        if not pos then return math.huge end
+        return (pos - origin).Magnitude
+    end
+    local function consider(best, obj)
+        local rank = ownerRank(obj)
+        if rank <= 0 then return best end
+        local dist = distance(obj)
+        if not best or rank > best.rank or (rank == best.rank and dist < best.dist) then
+            return { obj = obj, rank = rank, dist = dist }
+        end
+        return best
+    end
+
+    local function hasOwnedAncestor(obj)
+        local p = obj.Parent
+        while p and p ~= workspace do
+            if (p:IsA("Model") or p:IsA("Folder")) and ownerRank(p) > 0 then
+                return true
+            end
+            p = p.Parent
         end
         return false
     end
 
     local containers = { "Tycoons", "Bases", "Plots", "Tycoon", "Base", "PlayerBases" }
+    local best
     for _, contName in ipairs(containers) do
-        local cont = workspace:FindFirstChild(contName, true)
+        local cont = workspace:FindFirstChild(contName)
+        if not cont then cont = workspace:FindFirstChild(contName, true) end
         if cont then
             for _, child in ipairs(cont:GetChildren()) do
-                if (child:IsA("Model") or child:IsA("Folder")) and ownedByMe(child) then
-                    return child
+                if child:IsA("Model") or child:IsA("Folder") then
+                    best = consider(best, child)
                 end
             end
         end
     end
+    if best then return best.obj end
 
+    -- Shallow fallback only: a purchased building nested two levels inside a plot
+    -- has owner values too, and the old fallback could return that building.
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if (obj:IsA("Model") or obj:IsA("Folder")) and obj ~= lp.Character and ownedByMe(obj) and #obj:GetChildren() >= 3 then
-            return obj
+        if (obj:IsA("Model") or obj:IsA("Folder")) and obj ~= lp.Character then
+            local depth, p = 0, obj.Parent
+            while p and p ~= workspace and depth < 4 do
+                depth = depth + 1
+                p = p.Parent
+            end
+            -- depth 1 = plot directly under a container; depth 2 would be a
+            -- purchased building inside that plot, which is not a base.
+            if p == workspace and depth <= 1 and #obj:GetChildren() >= 3
+                and not hasOwnedAncestor(obj) then
+                best = consider(best, obj)
+            end
         end
     end
-    return nil
+    return best and best.obj or nil
 end
 
 function Automation.WarTycoonAutoBuildBase(forceRefresh)
     local now = tick()
     local b = Automation._wtBase
-    if b and b.Parent and not forceRefresh and (now - (Automation._wtBaseAt or 0)) < 20 then
+    if b and b.Parent and not forceRefresh and (now - (Automation._wtBaseAt or 0)) < 6 then
         return b
     end
+    local prev = b
     b = Automation.WarTycoonAutoBuildFindBase()
     Automation._wtBase = b
     Automation._wtBaseAt = now
+    if b ~= prev then
+        -- [ v90 ] a new/removed plot invalidates every cached pad and its cooldown
+        Automation._wtPads = nil
+        Automation._wtPadsBase = nil
+        Automation._wtDonePads = {}
+        Automation._wtPadFails = {}
+        Automation._wtSaveSince = nil
+        Automation._wtSaveKey = nil
+        Automation._wtPadsSeen = false
+    end
     return b
+end
+
+-- [ v87 ] Robux/донат-офферы нельзя покупать автоматически, даже если на кнопке
+-- висит ценник. Проверяем имя, подпись и текст SurfaceGui/BillboardGui.
+Automation.WarTycoonAutoBuildRobuxWords = {
+    "robux", "roblox", "rbx", "donat", "tip jar",
+    "gamepass", "game pass", "devproduct", "dev product", "developer product",
+    "premium", "membership", "subscribe", "subscription", "gift",
+    "battle pass", "season pass", "cash pack", "money pack", "coin pack",
+    "gem pack", "support us", "support the game", "auto rebirth",
+    "auto collect", "auto farm", "2x cash", "double cash",
+}
+
+function Automation.WarTycoonAutoBuildIsRobux(text)
+    local h = string.lower(tostring(text or ""))
+    if h == "" then return false end
+    for _, w in ipairs(Automation.WarTycoonAutoBuildRobuxWords) do
+        if h:find(w, 1, true) then return true end
+    end
+    -- Frontier checks for short words: "Viper"/"multiple"/"Production" must not match.
+    if h:find("%f[%a]r%$") then return true end
+    if h:find("%f[%a]vip%f[%A]") then return true end
+    if h:find("%f[%a]tips?%f[%A]") then return true end
+    if h:find("%f[%a]products?%f[%A]") then return true end
+    if h:find("%f[%a]gifts?%f[%A]") then return true end
+    if h:find("%f[%a]premium%f[%A]") then return true end
+    return false
+end
+
+Automation.WarTycoonAutoBuildProductAttrs = {
+    "ProductId", "productId", "GamePassId", "gamePassId",
+    "DeveloperProductId", "developerProductId",
+    "RobuxPrice", "robuxPrice", "PriceInRobux", "priceInRobux",
+}
+
+-- A product/gamepass id on the pad is the strongest sign of a Robux offer:
+-- such pads often show only a bare number instead of "R$".
+function Automation.WarTycoonAutoBuildHasProductSignal(scope)
+    if not scope then return false end
+    local function check(inst)
+        if not inst then return false end
+        for _, name in ipairs(Automation.WarTycoonAutoBuildProductAttrs) do
+            if inst:GetAttribute(name) ~= nil then return true end
+        end
+        local n = string.lower(inst.Name)
+        if n:find("productid", 1, true) or n:find("gamepassid", 1, true)
+            or n:find("passid", 1, true) or n:find("devproduct", 1, true)
+            or n:find("developerproduct", 1, true) or n:find("robuxprice", 1, true) then
+            if inst:IsA("ValueBase") then
+                local v = tonumber(inst.Value)
+                return v ~= nil and v > 0
+            end
+            return true
+        end
+        return false
+    end
+    if check(scope) then return true end
+    for _, d in ipairs(scope:GetDescendants()) do
+        if check(d) then return true end
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildParseAmount(text)
+    local s = tostring(text or ""):gsub("%s", ""):gsub(",", "")
+    if s == "" then return nil end
+    s = s:gsub("%$", "")
+    local mult = 1
+    local suffix = string.lower(s:sub(-1))
+    if suffix == "k" then mult = 1e3; s = s:sub(1, -2)
+    elseif suffix == "m" then mult = 1e6; s = s:sub(1, -2)
+    elseif suffix == "b" then mult = 1e9; s = s:sub(1, -2)
+    end
+    local n = tonumber(s)
+    if n and n >= 0 then return n * mult end
+    return nil
+end
+
+-- returns price, isRobuxOffer
+local function wtParsePrice(text)
+    local raw = tostring(text or "")
+    if raw == "" then return nil, false end
+    if Automation.WarTycoonAutoBuildIsRobux(raw) then return nil, true end
+    local lowRaw = string.lower(raw)
+    -- Frontier: "Freedom" is not a free pad. Only the standalone word FREE.
+    if lowRaw:find("%f[%a]free%f[%A]") then return 0, false end
+    -- "INCOME $2,500" / "$500/s" -- это не цена, иначе максимум выберет доход
+    if not (lowRaw:find("price", 1, true) or lowRaw:find("cost", 1, true))
+        and (lowRaw:find("income", 1, true) or lowRaw:find("profit", 1, true)
+            or lowRaw:find("yield", 1, true) or lowRaw:find("per second", 1, true)
+            or lowRaw:find("per sec", 1, true) or lowRaw:find("/s", 1, true)
+            or lowRaw:find("balance", 1, true) or lowRaw:find("total", 1, true)
+            or lowRaw:find("earned", 1, true) or lowRaw:find("collected", 1, true)) then
+        return nil, false
+    end
+    local compact = raw:gsub("%s", "")
+    local low = string.lower(compact)
+    local amount = compact:match("%$([%d][%d,%.]*[KkMmBb]?)")
+    if not amount and (low:find("price", 1, true) or low:find("cost", 1, true)
+        or low:find("cash", 1, true) or low:find("money", 1, true)) then
+        amount = compact:match("([%d][%d,%.]*[KkMmBb]?)")
+    end
+    if amount then
+        local n = Automation.WarTycoonAutoBuildParseAmount(amount)
+        if n then return n, false end
+    end
+    -- A bare number is ambiguous (it may be a Robux product price), so it is
+    -- deliberately not treated as a cash price anymore.
+    return nil, false
+end
+
+-- 2 = явный ценник (Price/Cost), 1 = просто "$...", 0 = запасной вариант
+local function wtPriceRank(text)
+    local s = tostring(text or "")
+    local low = string.lower(s)
+    if low:find("price", 1, true) or low:find("cost", 1, true) then return 2 end
+    if s:find("$", 1, true) then return 1 end
+    return 0
 end
 
 -- Pad label and price (GUI / Value objects / attributes)
 function Automation.WarTycoonAutoBuildPadInfo(scope)
-    local texts = {}
+    local entries = {}
+    local function add(text, rank)
+        local t = tostring(text or ""):match("^%s*(.-)%s*$") or ""
+        if t == "" then return end
+        entries[#entries + 1] = { text = t, rank = tonumber(rank) or 0 }
+    end
+    local function guiUsable(inst)
+        local p = inst
+        while p and p ~= scope do
+            if p:IsA("SurfaceGui") or p:IsA("BillboardGui") then
+                local ok, enabled = pcall(function() return p.Enabled end)
+                if ok and enabled == false then return false end
+            end
+            if p:IsA("GuiObject") then
+                local ok, visible = pcall(function() return p.Visible end)
+                if ok and visible == false then return false end
+            end
+            p = p.Parent
+        end
+        return true
+    end
+
     if scope then
-        for _, d in ipairs(scope:GetDescendants()) do
-            if d:IsA("TextLabel") or d:IsA("TextButton") then
-                local txt = tostring(d.Text or "")
-                if txt ~= "" then texts[#texts + 1] = txt end
-            elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
-                local txt = tostring(d.Value or "")
-                if txt ~= "" then texts[#texts + 1] = txt end
+        if scope:IsA("ProximityPrompt") then
+            if scope.Enabled ~= false then
+                add(scope.ActionText, 0)
+                add(scope.ObjectText, wtPriceRank(scope.ObjectText))
             end
         end
-        for _, attrName in ipairs({ "Price", "Cost", "Amount", "price", "cost" }) do
+        for _, d in ipairs(scope:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                if guiUsable(d) then add(d.Text, wtPriceRank(d.Text)) end
+            elseif d:IsA("ProximityPrompt") then
+                if d.Enabled ~= false then
+                    add(d.ActionText, 0)
+                    add(d.ObjectText, wtPriceRank(d.ObjectText))
+                end
+            elseif d:IsA("StringValue") or d:IsA("IntValue") or d:IsA("NumberValue") then
+                local n = string.lower(d.Name)
+                if n:find("price", 1, true) or n:find("cost", 1, true) then
+                    add(d.Value, 3)
+                end
+            end
+        end
+        for _, attrName in ipairs({ "Price", "Cost", "price", "cost" }) do
             local a = scope:GetAttribute(attrName)
-            if a ~= nil then texts[#texts + 1] = tostring(a) end
+            if a ~= nil then add(a, 3) end
         end
     end
 
-    local function toPrice(txt)
-        local s = tostring(txt):gsub("%s", "")
-        if s:find("$", 1, true) then
-            local n = tonumber((s:gsub("%$", ""):gsub(",", "")))
-            if n then return n end
+    local label, best, bestRank, weak, robux = nil, nil, 0, nil, false
+    local texts = {}
+    local generic = false
+    for _, e in ipairs(entries) do
+        texts[#texts + 1] = e.text
+        if Automation.WarTycoonAutoBuildIsRobux(e.text) then robux = true end
+        local n, isRobux = wtParsePrice(e.text)
+        if isRobux then robux = true end
+        if n ~= nil then
+            if e.rank > 0 then
+                if e.rank > bestRank then
+                    bestRank, best = e.rank, n
+                elseif e.rank == bestRank then
+                    if e.rank == 1 then
+                        if n < best then best = n end
+                    elseif n > best then
+                        best = n
+                    end
+                end
+            elseif not weak or n > weak then
+                weak = n
+            end
+        elseif e.rank == 0 and #e.text <= 60 and not string.match(e.text, "^%d") then
+            local low = string.lower(e.text)
+            if not low:find("sold", 1, true) and not low:find("owned", 1, true)
+                and not low:find("bought", 1, true) and not low:find("income", 1, true)
+                and not low:find("profit", 1, true) and not low:find("total", 1, true)
+                and not low:find("balance", 1, true) then
+                -- "Buy" / "Open" / "Press" are prompt instructions, not the pad
+                -- name; keep the longest descriptive label instead (e.g. Oil
+                -- Extractor 2) so priority and diagnostics stay readable.
+                local shortAction = #low <= 12 and (low:find("buy", 1, true)
+                    or low:find("purchase", 1, true) or low:find("open", 1, true)
+                    or low:find("press", 1, true) or low:find("hold", 1, true)
+                    or low:find("use", 1, true) or low:find("click", 1, true))
+                if not shortAction then
+                    if not label or #e.text > #label then label = e.text end
+                else
+                    generic = true
+                end
+            end
         end
-        if s:match("^%d[%d,.]*$") then
-            local n = tonumber((s:gsub(",", "")))
-            if n then return n end
+    end
+    if not label and generic then
+        for _, e in ipairs(entries) do
+            if e.rank == 0 and #e.text <= 12 then label = e.text; break end
         end
-        return nil
+    end
+    return label, best or weak, robux, table.concat(texts, " ")
+end
+
+function Automation.WarTycoonAutoBuildIsFlatDisc(part)
+    if not part or not part:IsA("BasePart") then return false end
+    local s = part.Size
+    if s.Y > 2.5 then return false end
+    if math.abs(s.X - s.Z) > 4 then return false end
+    return math.max(s.X, s.Z) >= 4
+end
+
+function Automation.WarTycoonAutoBuildHasClick(part)
+    if not part then return false end
+    local function check(obj)
+        if not obj then return false end
+        local ok, found = pcall(function() return obj:FindFirstChildOfClass("ClickDetector") end)
+        if not ok or not found then return false end
+        local distance = tonumber(found.MaxActivationDistance)
+        return distance == nil or distance > 0
+    end
+    return check(part) or (part.Parent and check(part.Parent)) or false
+end
+
+function Automation.WarTycoonAutoBuildHasPrompt(part)
+    if not part then return false end
+    local function check(obj)
+        if not obj then return false end
+        local ok, found = pcall(function() return obj:FindFirstChildOfClass("ProximityPrompt") end)
+        if not ok or not found then return false end
+        if found.Enabled == false then return false end
+        local distance = tonumber(found.MaxActivationDistance)
+        return distance == nil or distance > 0
+    end
+    return check(part) or (part.Parent and check(part.Parent)) or false
+end
+
+-- A sign must be enabled and contain a visible text/image element. Disabled or
+-- fully hidden purchase screens are exactly what used to look like a pad that
+-- "was here before".
+function Automation.WarTycoonAutoBuildHasVisibleSign(part, model)
+    local roots = { part }
+    if model and model ~= part then roots[#roots + 1] = model end
+    for _, root in ipairs(roots) do            if root then
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("SurfaceGui") or d:IsA("BillboardGui") then
+                    local enabled = true
+                    pcall(function() enabled = d.Enabled ~= false end)
+                    if enabled then
+                        for _, t in ipairs(d:GetDescendants()) do
+                            if t:IsA("TextLabel") or t:IsA("TextButton")
+                                or t:IsA("ImageLabel") or t:IsA("ImageButton") then
+                                local visible = true
+                                pcall(function() visible = t.Visible ~= false end)
+                                if visible then return true end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+Automation.WarTycoonAutoBuildBuyWords = {
+    "buy", "purchase", "unlock", "upgrade", "provider",
+}
+Automation.WarTycoonAutoBuildWeakPadWords = {
+    "button", "pad", "circle", "plate", "sign", "platform",
+}
+Automation.WarTycoonAutoBuildDisplayWords = {
+    "total cash", "balance", "income", "profit", "earnings", "per second",
+    "per sec", "/s",    "stats", "earned", "collected", "cash to collect",
+}
+Automation.WarTycoonAutoBuildDeadPatterns = {
+    "%f[%a]sold%f[%A]", "%f[%a]owned%f[%A]", "%f[%a]bought%f[%A]",
+    "%f[%a]purchased%f[%A]", "%f[%a]claimed%f[%A]", "%f[%a]locked%f[%A]",
+    "maxed out", "max level", "%f[%a]complete%f[%A]", "%f[%a]completed%f[%A]",
+    "unavailable", "coming soon", "%f[%a]max%f[%A]", "%f[%a]maxed%f[%A]",
+}
+
+function Automation.WarTycoonAutoBuildHasWords(text, words)
+    local h = string.lower(tostring(text or ""))
+    for _, w in ipairs(words) do
+        if h:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildHasDeadHint(text)
+    local h = string.lower(tostring(text or ""))
+    if h == "" then return false end
+    for _, pattern in ipairs(Automation.WarTycoonAutoBuildDeadPatterns) do
+        if h:find(pattern) then return true end
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildHasDisplayHint(text)
+    return Automation.WarTycoonAutoBuildHasWords(text, Automation.WarTycoonAutoBuildDisplayWords)
+end
+
+-- A bare number (no $ / cash / money / FREE) can be a Robux product price, so it
+-- is treated as suspicious. Level/Tier numbers are not prices.
+function Automation.WarTycoonAutoBuildHasBarePrice(text)
+    local s = string.lower(tostring(text or ""))
+    if s == "" then return false end
+    if s:find("$", 1, true) or s:find("cash", 1, true) or s:find("money", 1, true)
+        or s:find("free", 1, true) then return false end
+    if s:find("level", 1, true) or s:find("tier", 1, true) or s:find("stage", 1, true) then
+        return false
+    end
+    for token in s:gmatch("%d[%d,%.]*[kmb]?") do
+        local n = Automation.WarTycoonAutoBuildParseAmount(token)
+        if n and n >= 20 then return true end
+    end
+    return false
+end
+
+function Automation.WarTycoonAutoBuildTriggerScore(part)
+    if not part or not part:IsA("BasePart") then return 0 end
+    local score = 0
+    if Automation.WarTycoonAutoBuildIsFlatDisc(part) then score = score + 4 end
+    if Automation.WarTycoonAutoBuildHasClick(part) then score = score + 3 end
+    if Automation.WarTycoonAutoBuildHasPrompt(part) then score = score + 2 end
+    if (tonumber(part.Transparency) or 0) < 0.98 then score = score + 1 end
+    return score
+end
+
+-- Pads are often a Model with a floor circle and a separate sign. Choose the
+-- actual floor circle/button, never a random invisible anchor or an old sign.
+function Automation.WarTycoonAutoBuildBestTrigger(obj, model, base)
+    if not obj then return nil end
+    local best = obj
+    local bestScore = Automation.WarTycoonAutoBuildTriggerScore(obj)
+    local root = model
+    local maxDist = 30
+    if not root or root == base then
+        -- Pads can be direct children of the plot with a separate sign. Look
+        -- nearby for the floor circle, but never combine prices from the base.
+        root = base
+        maxDist = 12
+    end
+    if root and root ~= obj then
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("BasePart") and d ~= obj then
+                local score = Automation.WarTycoonAutoBuildTriggerScore(d)
+                if score > 0 then
+                    local dist = (d.Position - obj.Position).Magnitude
+                    if dist <= maxDist then
+                        local weighted = score - (dist * 0.02)
+                        if weighted > bestScore then best, bestScore = d, weighted end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Evaluate one part. A purchase pad now requires a parsed CASH price; bare
+-- numbers, Robux prices and product ids are rejected. Returns nil, reason for
+-- anything that must not be teleported to.
+function Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
+    if not obj or not obj.Parent or not obj:IsA("BasePart") then return nil, "no part" end
+    if not obj:IsDescendantOf(workspace) then return nil, "not in workspace" end
+    local label, price, robux, textAll = info.label, info.price, info.robux, info.texts
+    local nameLow = string.lower(obj.Name)
+    local modelLow = (model and model ~= base) and string.lower(model.Name) or ""
+    local labelLow = string.lower(tostring(label or ""))
+    local combined = nameLow .. " " .. modelLow .. " " .. labelLow .. " " .. string.lower(tostring(textAll or ""))
+    robux = robux or Automation.WarTycoonAutoBuildIsRobux(combined)
+        or info.product or Automation.WarTycoonAutoBuildHasProductSignal(scope or obj)
+    if robux then return nil, "robux/donation" end
+    if Automation.WarTycoonAutoBuildHasDeadHint(combined) then return nil, "sold/owned/locked" end
+    if Automation.WarTycoonAutoBuildHasBarePrice(textAll) then
+        return nil, "bare price (possible Robux)"
+    end
+    -- A cash pack offer ("100K Cash") is a Robux product in this game, not a
+    -- base pad. Real income pads say Oil/Extractor/Bank, not just Cash.
+    local cashHint = nameLow .. " " .. modelLow .. " " .. labelLow
+    if cashHint:find("cash", 1, true) and not cashHint:find("collect", 1, true)
+        and not cashHint:find("oil", 1, true) and not cashHint:find("extract", 1, true)
+        and not cashHint:find("bank", 1, true) then
+        return nil, "cash offer"
+    end
+    -- Cheap rejection first: most BaseParts in a plot have no cash price, and
+    -- scanning their model GUI for a visible sign would be wasted work.
+    if price == nil then return nil, "no cash price" end
+    -- [ v90 ] Tiny round prices on an otherwise unnamed pad are the typical
+    -- Robux donation button ("$5"/"$10") that survived text scraping.
+    if price > 0 and price <= 10
+        and Automation.WarTycoonAutoBuildCategory(nameLow .. " " .. modelLow .. " " .. labelLow) == "other" then
+        return nil, "tiny price (donation?)"
+    end
+    -- A real base pad names the building ("Oil Extractor", "Wall", "Base").
+    -- A bare "BUY"/price-only pad is the usual Robux/donation button, so it is
+    -- skipped instead of being teleported to.
+    if Automation.WarTycoonAutoBuildCategory(nameLow .. " " .. modelLow .. " " .. labelLow) == "other" then
+        local generic = labelLow == "" or labelLow == "buy" or labelLow == "purchase"
+            or labelLow == "buy now" or labelLow == "purchase now" or labelLow == "unlock"
+            or labelLow == "press" or labelLow == "use" or labelLow:find("^%$?%d") ~= nil
+        if generic then return nil, "unlabeled pad" end
     end
 
-    local label, price
-    for _, txt in ipairs(texts) do
-        local p = toPrice(txt)
-        if p ~= nil then
-            if not price or p > price then price = p end
-        elseif not label and #(txt:gsub("%s", "")) > 0 then
-            label = txt
-        end
+    local click = Automation.WarTycoonAutoBuildHasClick(obj)
+    local prompt = Automation.WarTycoonAutoBuildHasPrompt(obj)
+    -- Never scan the whole base for a "visible sign": only the pad's own small
+    -- model, or the sign paired with this pad, may provide one.
+    local visualModel = (model and model ~= base and #model:GetChildren() <= 40) and model or nil
+    local visual = Automation.WarTycoonAutoBuildHasVisibleSign(obj, visualModel)
+        or (scope and scope ~= obj and Automation.WarTycoonAutoBuildHasVisibleSign(scope, nil))
+    local flat = Automation.WarTycoonAutoBuildIsFlatDisc(obj)
+    local buyText = Automation.WarTycoonAutoBuildHasWords(combined, Automation.WarTycoonAutoBuildBuyWords)
+    -- Only the pad's own title/name can make it a display board. A normal
+    -- extractor sign may also contain "Income $5/s": that must not hide it.
+    local displayName = nameLow .. " " .. modelLow .. " " .. labelLow
+    if Automation.WarTycoonAutoBuildHasDisplayHint(displayName) and not buyText then
+        return nil, "display, not a pad"
     end
-    return label, price
+    if (tonumber(obj.Transparency) or 0) >= 0.98 and not visual then return nil, "invisible" end
+    -- [ v90 ] War Tycoon is a touch tycoon: you BUY by standing on the pad.
+    -- Only a flat, touchable floor with a visible cash sign is a pad; signs and
+    -- disabled/ghost plates are not teleport targets anymore.
+    if not flat then return nil, "not a floor pad" end
+    if obj.CanTouch == false then return nil, "cannot stand on it" end
+    if not visual then return nil, "no visible cash sign" end
+    local trigger = obj
+    return {
+        label = label,
+        price = price,
+        robux = false,
+        trigger = trigger,
+        combined = combined,
+        visible = visual,
+        click = click,
+        prompt = prompt,
+        flat = flat,
+    }
 end
 
 -- Pad category
@@ -11088,81 +12136,206 @@ Automation.WarTycoonAutoBuildPriorityOrder = {
 -- Scan purchase pads inside our own base
 function Automation.WarTycoonAutoBuildScanPads(base)
     local ignoreShield = Config.WarTycoonBuild.IgnoreShield ~= false
-    local padHints = { "buy", "purchase", "button", "pad", "sign", "unlock", "provider", "plate", "circle", "upgrade" }
-    local badHints = { "spawner", "spawnpad", "spawn pad", "spawnpoint", "drone", "uav", "rack", "armory", "prompt", "seat", "collector", "atm" }
+    local badHints = {
+        "spawner", "spawnpad", "spawn pad", "spawnpoint", "prompt", "seat",
+        "collector", "atm", "rebirth", "donat", "tip jar", "tips", "support",
+        "robux", "gamepass", "game pass", "premium", "daily", "reward", "spin", "wheel",
+        "crate", "lucky", "offer", "bundle", "gift", "cash pack", "money pack",
+        "cash shop", "robux shop", "gamepass shop", "premium shop", "donation shop",
+    }
     local shieldHints = { "shield", "spawnprotect", "spawn protect", "protection" }
 
     local function has(hint, words)
-        local h = string.lower(tostring(hint or ""))
-        for _, w in ipairs(words) do
-            if h:find(w, 1, true) then return true end
-        end
-        return false
+        return Automation.WarTycoonAutoBuildHasWords(hint, words)
     end
 
-    local function hasPrompt(part)
-        if part:FindFirstChildOfClass("ProximityPrompt") then return true end
-        if part.Parent and part.Parent:FindFirstChildOfClass("ProximityPrompt") then return true end
-        return false
-    end
+    local infoCache = {}
+    local singleCache = {}
 
-    local function hasVisual(part, model)
-        for _, src in ipairs(model and { part, model } or { part }) do
-            for _, d in ipairs(src:GetChildren()) do
-                if d:IsA("SurfaceGui") or d:IsA("BillboardGui") or d:IsA("Decal") or d:IsA("Texture") then
-                    return true
+    -- A model is safe to treat as one pad only when it has at most one price
+    -- label. Counting labels (not flat discs) keeps a pad that has a decorative
+    -- ring/plate together, while a "Purchases" model with two signs is split.
+    local function singlePadModel(model)
+        if not model or model == base or not model:IsDescendantOf(base) then return false end
+        if #model:GetChildren() > 40 then return false end
+        local cached = singleCache[model]
+        if cached ~= nil then return cached end
+        local priceTexts = 0
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("SurfaceGui") or d:IsA("BillboardGui") then
+                local enabled = true
+                pcall(function() enabled = d.Enabled ~= false end)
+                if enabled then
+                    for _, t in ipairs(d:GetDescendants()) do
+                        if t:IsA("TextLabel") or t:IsA("TextButton") then
+                            local n, isRobux = wtParsePrice(t.Text)
+                            if n ~= nil or isRobux then
+                                priceTexts = priceTexts + 1
+                                if priceTexts > 1 then singleCache[model] = false; return false end
+                            end
+                        end
+                    end
                 end
             end
         end
-        return false
+        singleCache[model] = true
+        return true
     end
 
-    local function isFlatDisc(part)
-        local s = part.Size
-        if s.Y > 2.5 then return false end
-        if math.abs(s.X - s.Z) > 4 then return false end
-        return math.max(s.X, s.Z) >= 4
+    -- [ v90 ] War Tycoon buys on touch: only flat floor pads are candidates.
+    -- Collect parts that carry a price sign so a big multi-pad model can pair
+    -- every pad with its own nearest sign instead of sharing one price.
+    local signParts = {}
+    for _, d in ipairs(base:GetDescendants()) do
+        if d:IsA("BasePart") then
+            for _, g in ipairs(d:GetDescendants()) do
+                if g:IsA("SurfaceGui") or g:IsA("BillboardGui") then
+                    local enabled = true
+                    pcall(function() enabled = g.Enabled ~= false end)
+                    if enabled then
+                        -- Only a sign with real visible text can carry a price;
+                        -- Image-only nameplates must not steal a pad's pairing.
+                        local hasText = false
+                        for _, t in ipairs(g:GetDescendants()) do
+                            if t:IsA("TextLabel") or t:IsA("TextButton") then
+                                local visible = true
+                                pcall(function() visible = t.Visible ~= false end)
+                                if visible then hasText = true; break end
+                            end
+                        end
+                        if hasText then
+                            signParts[#signParts + 1] = d
+                            break
+                        end
+                    end
+                end
+            end
+        end
     end
 
-    local units, byModel = {}, {}
+    local function nearestSignInfo(obj)
+        local best, bestDist = nil, nil
+        for _, s in ipairs(signParts) do
+            if s ~= obj and s.Parent then
+                local dist = (s.Position - obj.Position).Magnitude
+                if dist <= 15 and (not bestDist or dist < bestDist) then
+                    local info = infoCache[s]
+                    if not info then
+                        local label, price, robux, texts = Automation.WarTycoonAutoBuildPadInfo(s)
+                        info = {
+                            label = label,
+                            price = price,
+                            robux = robux,
+                            texts = texts,
+                            product = Automation.WarTycoonAutoBuildHasProductSignal(s),
+                            scope = s,
+                        }
+                        infoCache[s] = info
+                    end
+                    best, bestDist = info, dist
+                end
+            end
+        end
+        return best
+    end
+
+    local units, byKey, skipped, skipSeen = {}, {}, {}, {}
     for _, obj in ipairs(base:GetDescendants()) do
-        if obj:IsA("BasePart") then
+        if obj:IsA("BasePart") and Automation.WarTycoonAutoBuildIsFlatDisc(obj) then
             local model = obj:FindFirstAncestorOfClass("Model")
             if model and not model:IsDescendantOf(base) then model = nil end
-            local scope = obj
-            if model and #model:GetChildren() <= 40 then scope = model end
-
-            local label, price = Automation.WarTycoonAutoBuildPadInfo(scope)
-            local nameLow = string.lower(obj.Name)
-            local modelLow = model and string.lower(model.Name) or ""
-            local labelLow = string.lower(tostring(label or ""))
-            local combined = nameLow .. " " .. modelLow .. " " .. labelLow
-
-            local named = has(nameLow, padHints) or has(modelLow, padHints)
-            local looksLikePad = (price ~= nil) or named or (isFlatDisc(obj) and hasVisual(obj, model))
-            local junk = has(combined, badHints) or hasPrompt(obj)
-
-            if looksLikePad and not junk and not (ignoreShield and has(combined, shieldHints)) then
-                local key = model or obj
-                local unit = byModel[key]
-                if not unit then
-                    unit = { model = model, part = obj, label = label, price = price }
-                    unit.cat = Automation.WarTycoonAutoBuildCategory(combined)
-                    unit.key = (model and model:GetFullName() or obj:GetFullName()) .. "|" .. tostring(label or "")
-                    byModel[key] = unit
-                    units[#units + 1] = unit
-                else
-                    if not unit.price and price then unit.price = price end
-                    if (not unit.label or unit.label == "") and label then unit.label = label end
-                    local pn = string.lower(obj.Name)
-                    if pn:find("hitbox", 1, true) or pn:find("buy", 1, true) or pn:find("button", 1, true) or pn:find("pad", 1, true) then
-                        unit.part = obj
+            local scope, key = obj, obj
+            if model and model ~= base and singlePadModel(model) then
+                scope, key = model, model
+            end
+            local info = infoCache[scope]
+            if not info then
+                local label, price, robux, texts = Automation.WarTycoonAutoBuildPadInfo(scope)
+                info = {
+                    label = label,
+                    price = price,
+                    robux = robux,
+                    texts = texts,
+                    product = Automation.WarTycoonAutoBuildHasProductSignal(scope),
+                    scope = scope,
+                }
+                infoCache[scope] = info
+            end
+            -- [ v90 ] A big "Purchases" model is not one pad. Pair this floor
+            -- pad with its nearest visible sign; never borrow a price from a
+            -- bare/Robux sign in the same model.
+            if scope == obj and info.price == nil and not info.robux
+                and not Automation.WarTycoonAutoBuildHasBarePrice(info.texts) then
+                local near = nearestSignInfo(obj)
+                if near then
+                    info = near
+                    scope = near.scope
+                end
+            end
+            local eval, reason = Automation.WarTycoonAutoBuildPadEval(obj, model, scope, info, base)
+            if eval then
+                local nameLow = string.lower(obj.Name)
+                local modelLow = (model and model ~= base) and string.lower(model.Name) or ""
+                local labelLow = string.lower(tostring(eval.label or ""))
+                local combined = nameLow .. " " .. modelLow .. " " .. labelLow
+                local bad = has(combined, badHints)
+                local shield = ignoreShield and has(combined, shieldHints)
+                if bad or shield then
+                    if not skipSeen[key] then
+                        skipSeen[key] = true
+                        skipped[#skipped + 1] = {
+                            label = eval.label or obj.Name,
+                            part = obj,
+                            model = model,
+                            name = (model and model:GetFullName() or obj:GetFullName()),
+                            reason = bad and "excluded name" or "shield",
+                        }
                     end
-                    if price then unit.cat = Automation.WarTycoonAutoBuildCategory(combined) end
+                else
+                    local unit = byKey[key]
+                    if not unit then
+                        unit = {
+                            model = model,
+                            part = eval.trigger,
+                            anchor = obj,
+                            scope = scope,
+                            label = eval.label,
+                            price = eval.price,
+                            key = key,
+                        }
+                        unit.cat = Automation.WarTycoonAutoBuildCategory(combined)
+                        byKey[key] = unit
+                        units[#units + 1] = unit
+                    else
+                        if eval.price ~= nil then unit.price = eval.price end
+                        if (not unit.label or unit.label == "") and eval.label then unit.label = eval.label end
+                        if Automation.WarTycoonAutoBuildTriggerScore(eval.trigger)
+                            > Automation.WarTycoonAutoBuildTriggerScore(unit.part) then
+                            unit.part = eval.trigger
+                        end
+                        if not unit.anchor or not unit.anchor.Parent then unit.anchor = obj end
+                        unit.cat = Automation.WarTycoonAutoBuildCategory(combined)
+                    end
+                end
+            elseif reason == "robux/donation" or reason == "sold/owned/locked"
+                or reason == "invisible" or reason == "display, not a pad"
+                or reason == "bare price (possible Robux)" or reason == "cash offer"
+                or reason == "tiny price (donation?)" or reason == "unlabeled pad" then
+                if not skipSeen[key] then
+                    skipSeen[key] = true
+                    skipped[#skipped + 1] = {
+                        label = info.label or obj.Name,
+                        part = obj,
+                        model = model,
+                        name = (model and model:GetFullName() or obj:GetFullName()),
+                        reason = reason,
+                    }
                 end
             end
         end
     end
+
+    Automation._wtLastSkipped = skipped
 
     local order = Automation.WarTycoonAutoBuildPriorityOrder[Config.WarTycoonBuild.Priority]
         or Automation.WarTycoonAutoBuildPriorityOrder["Money"]
@@ -11180,7 +12353,8 @@ end
 
 function Automation.WarTycoonAutoBuildPads(base, force)
     local now = tick()
-    if not force and Automation._wtPads and Automation._wtPadsBase == base and (now - (Automation._wtPadsAt or 0)) < 5 then
+    if not force and Automation._wtPads and Automation._wtPadsBase == base
+        and (now - (Automation._wtPadsAt or 0)) < 1 then
         return Automation._wtPads
     end
     local pads = Automation.WarTycoonAutoBuildScanPads(base)
@@ -11189,13 +12363,14 @@ function Automation.WarTycoonAutoBuildPads(base, force)
 end
 
 -- MAIN FIX
-function Automation.WarTycoonAutoBuildHover(part)
+function Automation.WarTycoonAutoBuildHover(part, base)
     local lp = Core.LocalPlayer
     local char = lp and lp.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or not hum or hum.Health <= 0 then return false, "no living character" end
-    if not part or not part.Parent then return false, "pad is gone" end
+    if not part or not part.Parent or not part:IsDescendantOf(workspace) then return false, "pad is gone" end
+    if base and not part:IsDescendantOf(base) then return false, "pad is not in your base" end
 
     local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
     local topY = part.Position.Y + (part.Size.Y * 0.5)
@@ -11206,7 +12381,6 @@ function Automation.WarTycoonAutoBuildHover(part)
     local okTpWrite = pcall(function() hrp.CFrame = CFrame.new(targetPos) end)
     if not okTpWrite then return false, "teleport blocked" end
 
-    -- [ v54 ] Rollback check
     if Config.WarTycoonBuild.VerifyTp ~= false then
         Automation.WarTycoonAutoBuildState()
         local t0 = tick()
@@ -11235,20 +12409,18 @@ function Automation.WarTycoonAutoBuildHover(part)
         end)
     end
 
-    local prompt = part:FindFirstChildOfClass("ProximityPrompt")
-    if not prompt and part.Parent then
-        prompt = part.Parent:FindFirstChildOfClass("ProximityPrompt")
-    end
-    if prompt and prompt.Parent and prompt.Parent:IsA("BasePart") then
+    -- [ v90 ] War Tycoon buys by standing on the pad. Never click GUI buttons
+    -- or activate prompts here: they can belong to Robux/donation offers.
+    -- Fire one touch on the landed position so a teleport that skips a physics
+    -- frame still counts as standing on the pad.
+    if type(firetouchinterest) == "function" and part.Parent then
         pcall(function()
-            if (hrp.Position - prompt.Parent.Position).Magnitude <= (prompt.MaxActivationDistance + 4) then
-                prompt:InputHoldBegin()
-                task.wait(0.1)
-                prompt:InputHoldEnd()
-            end
+            firetouchinterest(hrp, part, 0)
+            task.wait(0.03)
+            firetouchinterest(hrp, part, 1)
         end)
     end
-    task.wait(0.1)
+    task.wait(0.2)
     return true
 end
 
@@ -11280,14 +12452,44 @@ function Automation.WarTycoonAutoBuildMoney()
     for _, attrName in ipairs({ "Cash", "Money", "cash", "money", "CashValue", "MoneyValue" }) do
         local a = lp:GetAttribute(attrName)
         if type(a) == "number" then return a end
+        if type(a) == "string" then
+            local n = Automation.WarTycoonAutoBuildParseAmount(a)
+            if n then return n end
+        end
     end
+
+    local function fromValue(v)
+        if v:IsA("IntValue") or v:IsA("NumberValue") then return tonumber(v.Value) end
+        -- [ v87 ] некоторые игры держат баланс строкой "$1.2M"
+        if v:IsA("StringValue") then return Automation.WarTycoonAutoBuildParseAmount(v.Value) end
+        return nil
+    end
+    local function isMoneyName(name)
+        local n = string.lower(tostring(name or ""))
+        return n:find("cash", 1, true) ~= nil or n:find("money", 1, true) ~= nil
+            or n:find("$", 1, true) ~= nil
+    end
+
+    local containers = {}
     for _, child in ipairs(lp:GetChildren()) do
+        if isMoneyName(child.Name) then
+            local n = fromValue(child)
+            if n then return n end
+        end
         if child.Name == "leaderstats" or child:IsA("Folder") then
-            for _, v in ipairs(child:GetChildren()) do
-                if v:IsA("IntValue") or v:IsA("NumberValue") then
-                    local n = string.lower(v.Name)
-                    if n:find("cash", 1, true) or n:find("money", 1, true) or n:find("$", 1, true) then
-                        return tonumber(v.Value)
+            containers[#containers + 1] = child
+        end
+    end
+    for _, cont in ipairs(containers) do
+        for _, v in ipairs(cont:GetChildren()) do
+            if isMoneyName(v.Name) then
+                local n = fromValue(v)
+                if n then return n end
+            elseif v:IsA("Folder") then
+                for _, vv in ipairs(v:GetChildren()) do
+                    if isMoneyName(vv.Name) then
+                        local n = fromValue(vv)
+                        if n then return n end
                     end
                 end
             end
@@ -11297,30 +12499,55 @@ function Automation.WarTycoonAutoBuildMoney()
 end
 
 function Automation.WarTycoonAutoBuildFindCollector(base)
-    local words = { "collect", "atm", "cash", "bank" }
+    if not base or not base.Parent then return nil end
+    local lp = Core.LocalPlayer
+    local char = lp and lp.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local origin = hrp and hrp.Position
+        or (base:IsA("Model") and base:GetPivot().Position)
+        or Vector3.zero
+    local bad = {
+        "buy", "purchase", "unlock", "donate", "donation", "robux", "gamepass",
+        "product", "vip", "premium", "pack", "bundle", "shop", "store", "rebirth",
+    }
     local function score(hint)
-        local h = string.lower(tostring(hint))
+        local h = string.lower(tostring(hint or ""))
         if h:find("collect", 1, true) or h:find("atm", 1, true) then return 3 end
-        if h:find("cash", 1, true) or h:find("bank", 1, true) then return 2 end
-        for _, w in ipairs(words) do
-            if h:find(w, 1, true) then return 1 end
-        end
+        if h:find("bank", 1, true) then return 2 end
+        if h:find("cash", 1, true) or h:find("money", 1, true) then return 1 end
         return nil
     end
 
-    local best, bestScore
+    local best, bestScore, bestDist
     for _, obj in ipairs(base:GetDescendants()) do
         if obj:IsA("BasePart") then
-            local s = score(obj.Name .. " " .. (obj.Parent and obj.Parent.Name or ""))
-            if s and (not bestScore or s > bestScore) then best, bestScore = obj, s end
-        end
-    end
-    if not best then
-        local center = base:IsA("Model") and base:GetPivot().Position or Vector3.zero
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") and (obj.Position - center).Magnitude < 350 then
-                local s = score(obj.Name .. " " .. (obj.Parent and obj.Parent.Name or ""))
-                if s and (not bestScore or s > bestScore) then best, bestScore = obj, s end
+            local hint = obj.Name .. " " .. (obj.Parent and obj.Parent.Name or "")
+            local s = score(hint)
+            if s and not Automation.WarTycoonAutoBuildHasWords(hint, bad)
+                and not Automation.WarTycoonAutoBuildIsRobux(hint) then
+                local scope = obj
+                if obj.Parent and obj.Parent:IsA("Model") and obj.Parent ~= base
+                    and #obj.Parent:GetChildren() <= 40 then
+                    scope = obj.Parent
+                end
+                local label, price, robux, texts = Automation.WarTycoonAutoBuildPadInfo(scope)
+                local combined = hint .. " " .. tostring(label or "") .. " " .. tostring(texts or "")
+                if not robux and not Automation.WarTycoonAutoBuildIsRobux(combined)
+                    and not Automation.WarTycoonAutoBuildHasProductSignal(scope)
+                    and not Automation.WarTycoonAutoBuildHasDeadHint(combined) then
+                    local usable = Automation.WarTycoonAutoBuildHasClick(obj)
+                        or Automation.WarTycoonAutoBuildHasPrompt(obj)
+                        or Automation.WarTycoonAutoBuildIsFlatDisc(obj)
+                        or (s >= 3 and obj.CanTouch ~= false)
+                    local ok = usable and (s >= 3 or (s >= 2 and price == nil))
+                    if ok then
+                        local dist = (obj.Position - origin).Magnitude
+                        if not bestScore or s > bestScore
+                            or (s == bestScore and dist < (bestDist or math.huge)) then
+                            best, bestScore, bestDist = obj, s, dist
+                        end
+                    end
+                end
             end
         end
     end
@@ -11334,8 +12561,9 @@ function Automation.WarTycoonAutoBuildClickButton(btn)
         if type(getconnections) == "function" then
             for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
                 if c.Fire then
-                    pcall(c.Fire, c)
-                    fired = true
+                    -- A failed Fire must not be reported as a click: the caller would
+                    -- return before the firesignal / Activate fallbacks are tried.
+                    if pcall(c.Fire, c) then fired = true end
                 end
             end
         end
@@ -11355,51 +12583,118 @@ function Automation.WarTycoonAutoBuildClickButton(btn)
     return fired
 end
 
-function Automation.WarTycoonAutoBuildClickGui(needle)
+function Automation.WarTycoonAutoBuildClickGui(needle, strict)
     local lp = Core.LocalPlayer
     local pg = lp and lp:FindFirstChildOfClass("PlayerGui")
     if not pg then return false end
     local needleLow = string.lower(needle)
+
+    local function paidAncestor(gui)
+        local p = gui.Parent
+        for _ = 1, 6 do
+            if not p then break end
+            local n = string.lower(p.Name)
+            if n:find("shop", 1, true) or n:find("store", 1, true)
+                or n:find("gamepass", 1, true) or n:find("robux", 1, true)
+                or n:find("premium", 1, true) or n:find("purchase", 1, true) then
+                return true
+            end
+            p = p.Parent
+        end
+        return false
+    end
+
     for _, gui in ipairs(pg:GetDescendants()) do
-        if gui:IsA("GuiButton") and gui.Visible then
+        if gui:IsA("GuiButton") and gui.Visible
+            and Automation.AutoRespawn and Automation.AutoRespawn.GuiVisible
+            and Automation.AutoRespawn.GuiVisible(gui)
+            and not (ScreenGui and gui:IsDescendantOf(ScreenGui)) then
             local text = ""
             if gui:IsA("TextButton") then text = tostring(gui.Text) end
             for _, d in ipairs(gui:GetDescendants()) do
-                if d:IsA("TextLabel") or d:IsA("TextButton") then text = text .. " " .. tostring(d.Text) end
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    text = text .. " " .. tostring(d.Text)
+                end
             end
-            if string.lower(text):find(needleLow, 1, true) then
-                return Automation.WarTycoonAutoBuildClickButton(gui)
+            local low = string.lower(text)
+            if low:find(needleLow, 1, true)
+                and not Automation.WarTycoonAutoBuildIsRobux(low) then
+                local skip = false
+                if strict then
+                    if low:find("auto", 1, true) or low:find("buy", 1, true)
+                        or low:find("purchase", 1, true) or low:find("gamepass", 1, true)
+                        or low:find("product", 1, true) or low:find("r$", 1, true)
+                        or low:find("vip", 1, true) or low:find("premium", 1, true)
+                        or Automation.WarTycoonAutoBuildHasBarePrice(low)
+                        or paidAncestor(gui) then
+                        skip = true
+                    end
+                end
+                if not skip then
+                    return Automation.WarTycoonAutoBuildClickButton(gui)
+                end
             end
         end
     end
     return false
 end
 
-function Automation.WarTycoonAutoBuildTryRebirth()
+function Automation.WarTycoonAutoBuildTryRebirth(base)
     if not Config.WarTycoonBuild.AutoRebirth then return false end
     Automation.WarTycoonAutoBuildState()
     local now = tick()
     if now - (Automation._wtLastRebirth or 0) < 4 then return false end
     Automation._wtLastRebirth = now
 
+    base = base or Automation._wtBase or Automation.WarTycoonAutoBuildBase()
+    local bad = {
+        "auto", "buy", "purchase", "donate", "donation", "robux", "gamepass",
+        "product", "vip", "premium", "pack", "bundle", "shop", "store", "r$",
+    }
     local target
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and string.lower(obj.Name):find("rebirth", 1, true) then
-            target = obj
-            break
+    if base and base.Parent then
+        for _, obj in ipairs(base:GetDescendants()) do
+            if obj:IsA("BasePart") and string.lower(obj.Name):find("rebirth", 1, true) then
+                local model = obj:FindFirstAncestorOfClass("Model")
+                if model == base or (model and not model:IsDescendantOf(base)) then model = nil end
+                local scope = model or obj
+                local label, price, robux, texts = Automation.WarTycoonAutoBuildPadInfo(scope)
+                local combined = string.lower(obj.Name .. " " .. (model and model.Name or "")
+                    .. " " .. tostring(label or "") .. " " .. tostring(texts or ""))
+                if not robux and not Automation.WarTycoonAutoBuildIsRobux(combined)
+                    and not Automation.WarTycoonAutoBuildHasWords(combined, bad)
+                    and not Automation.WarTycoonAutoBuildHasProductSignal(scope)
+                    and not Automation.WarTycoonAutoBuildHasDeadHint(combined)
+                    and not Automation.WarTycoonAutoBuildHasBarePrice(texts) then
+                    -- [ v90 ] War Tycoon rebirth is also a touch pad. A vertical
+                    -- Rebirth sign/button is not a target; the free GUI button is
+                    -- handled as a fallback below.
+                    local usable = Automation.WarTycoonAutoBuildIsFlatDisc(obj)
+                        and obj.CanTouch ~= false
+                    local visible = (tonumber(obj.Transparency) or 0) < 0.98
+                        or Automation.WarTycoonAutoBuildHasVisibleSign(obj, model)
+                    if usable and visible then
+                        target = obj
+                        break
+                    end
+                end
+            end
         end
     end
     if target then
         Automation.WarTycoonAutoBuildLog("rebirth: stepping on '" .. target.Name .. "'", Color3.fromRGB(255, 255, 0))
+        if not Automation.WarTycoonAutoBuildHover(target, base) then
+            Automation.WarTycoonAutoBuildLog("rebirth: could not reach '" .. target.Name .. "'", Color3.fromRGB(255, 140, 0))
+            return false
+        end
         Automation._wtStats.rebirths = Automation._wtStats.rebirths + 1
         Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  rebirth " .. tostring(Automation._wtStats.rebirths))
-        Automation.WarTycoonAutoBuildHover(target)
         return true
     end
 
-    if Automation.WarTycoonAutoBuildClickGui("rebirth") then
+    if Automation.WarTycoonAutoBuildClickGui("rebirth", true) then
         Automation._wtStats.rebirths = Automation._wtStats.rebirths + 1
-        Automation.WarTycoonAutoBuildLog("rebirth: clicked the UI button", Color3.fromRGB(255, 255, 0))
+        Automation.WarTycoonAutoBuildLog("rebirth: clicked the free UI button", Color3.fromRGB(255, 255, 0))
         Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  rebirth " .. tostring(Automation._wtStats.rebirths))
         return true
     end
@@ -11417,6 +12712,16 @@ function Automation.WarTycoonAutoBuildPadSnapshot(unit)
         anchored = part.Anchored,
         name = part.Name,
         children = unit.model and #unit.model:GetChildren() or 0,
+        position = part.Position,
+        size = part.Size,
+        modelPosition = (function()
+            if not unit.model or not unit.model:IsA("Model") then return nil end
+            local ok, pos = pcall(function() return unit.model:GetPivot().Position end)
+            return ok and pos or nil
+        end)(),
+        anchorAlive = (unit.anchor == nil or unit.anchor.Parent ~= nil),
+        label = unit.label,
+        price = unit.price,
     }
 end
 
@@ -11424,30 +12729,109 @@ function Automation.WarTycoonAutoBuildPadChanged(unit, snap)
     if not snap then return false end
     local part = unit and unit.part
     if not part or not part.Parent then return true end
+    if unit.anchor and not unit.anchor.Parent then return true end
+    if (part.Position - snap.position).Magnitude > 1.5 then return true end
+    if (part.Size - snap.size).Magnitude > 1 then return true end
     if part.CanCollide ~= snap.canCollide then return true end
     if math.abs(part.Transparency - snap.transparency) > 0.01 then return true end
     if part.Anchored ~= snap.anchored then return true end
     if part.Name ~= snap.name then return true end
-    if unit.model and (not unit.model.Parent or #unit.model:GetChildren() ~= snap.children) then return true end
+    -- In a multi-pad model, children change when ANY pad is bought. Only a
+    -- single-pad model may use its children/pivot as proof for this pad.
+    if unit.scope == unit.model and unit.model
+        and (not unit.model.Parent or #unit.model:GetChildren() ~= snap.children) then return true end
+    if unit.scope == unit.model and unit.model and snap.modelPosition then
+        local ok, pos = pcall(function() return unit.model:GetPivot().Position end)
+        if ok and pos and (pos - snap.modelPosition).Magnitude > 2 then return true end
+    end
+    local label, price = Automation.WarTycoonAutoBuildPadInfo(unit.scope or unit.part)
+    if label ~= snap.label then return true end
+    if price ~= snap.price then return true end
     return false
 end
 
 function Automation.WarTycoonAutoBuildTryPad(base, unit)
-    if not unit or not unit.part or not unit.part.Parent then return false end
     Automation.WarTycoonAutoBuildState()
+    if not unit or not unit.key then return false end
+    if not unit.part or not unit.part.Parent then
+        Automation._wtDonePads[unit.key] = tick() + 30
+        Automation._wtPads = nil
+        return false
+    end
+    if not base or not base.Parent or not unit.part:IsDescendantOf(base) then
+        Automation._wtPads = nil
+        return false
+    end
+    local anchor = unit.anchor or unit.part
+    if not anchor.Parent or not anchor:IsDescendantOf(base) then
+        Automation._wtDonePads[unit.key] = math.huge
+        Automation._wtPads = nil
+        return false
+    end
+
+    -- Re-read the pad right before moving. A bought pad often keeps its part but
+    -- disables/hides the sign; a cached unit would keep teleporting to that ghost.
+    local scope = unit.scope or unit.model or anchor
+    local infoLabel, infoPrice, infoRobux, infoTexts = Automation.WarTycoonAutoBuildPadInfo(scope)
+    local info = {
+        label = infoLabel,
+        price = infoPrice,
+        robux = infoRobux,
+        texts = infoTexts,
+        product = Automation.WarTycoonAutoBuildHasProductSignal(scope),
+    }
+    local eval, reason = Automation.WarTycoonAutoBuildPadEval(anchor, unit.model, scope, info, base)
+    if not eval then
+        local cooldown = 30
+        if reason == "robux/donation" then
+            cooldown = math.huge
+        elseif reason == "sold/owned/locked" or reason == "bare price (possible Robux)"
+            or reason == "cash offer" or reason == "tiny price (donation?)"
+            or reason == "unlabeled pad" then
+            cooldown = 120
+        elseif reason == "invisible" or reason == "display, not a pad" or reason == "no cash price" then
+            cooldown = 60
+        end
+        Automation._wtDonePads[unit.key] = tick() + cooldown
+        if reason == "robux/donation" then
+            Automation.WarTycoonAutoBuildLog("skipped donation/Robux pad: "
+                .. tostring(unit.label or unit.part.Name), Color3.fromRGB(255, 170, 0))
+        end
+        Automation._wtPads = nil
+        return false
+    end
+    if eval.trigger and eval.trigger.Parent and eval.trigger:IsDescendantOf(base) then
+        unit.part = eval.trigger
+    end
+    if eval.price ~= nil then unit.price = eval.price end
+    if eval.label then unit.label = eval.label end
+
+    if unit.price ~= nil then
+        local money = Automation.WarTycoonAutoBuildMoney()
+        if money and money < unit.price then
+            Automation._wtPads = nil
+            return false
+        end
+    end
+
     local tag = string.format("'%s'%s", tostring(unit.label or unit.part.Name),
         unit.price and (" ($" .. tostring(math.floor(unit.price)) .. ")") or "")
     local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
     Automation.WarTycoonAutoBuildLog("TP above pad " .. tag .. " (+" .. tostring(hover) .. " studs)")
 
-    local attempts = math.max(1, tonumber(Config.WarTycoonBuild.Attempts) or 3)
+    local attempts = math.clamp(math.floor(tonumber(Config.WarTycoonBuild.Attempts) or 2), 1, 3)
     for i = 1, attempts do
         if not Config.WarTycoonBuild.Enabled or State.Unloading or not IsCurrentInstance() then return false end
         local moneyBefore = Automation.WarTycoonAutoBuildMoney()
         local partBefore = unit.part
         local snapBefore = Automation.WarTycoonAutoBuildPadSnapshot(unit)
-        local okTp, tpErr = Automation.WarTycoonAutoBuildHover(unit.part)
-        if not okTp and tpErr and tostring(tpErr):find("rolled back", 1, true) then
+        local okTp, tpErr = Automation.WarTycoonAutoBuildHover(unit.part, base)
+        if not okTp and tpErr and tpErr:find("no living", 1, true) then return false end
+        if not okTp and tpErr and tpErr:find("not in your base", 1, true) then
+            Automation._wtPads = nil
+            return false
+        end
+        if not okTp and tpErr and tpErr:find("rolled back", 1, true) then
             Automation.WarTycoonAutoBuildLog("TP rolled back -> walking to the pad instead", Color3.fromRGB(255, 140, 0))
             Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  walking (TP blocked)")
             if Config.WarTycoonBuild.WalkFallback ~= false then
@@ -11459,13 +12843,14 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
         local moneyAfter = Automation.WarTycoonAutoBuildMoney()
         local gone = (partBefore == nil) or (partBefore.Parent == nil)
             or (unit.model ~= nil and unit.model.Parent == nil)
-        -- [ v78 ] a plain cash drop counts as a purchase even without a price tag
+            or (anchor ~= nil and anchor.Parent == nil)
         local cashDropped = moneyBefore ~= nil and moneyAfter ~= nil and moneyAfter < moneyBefore
-        local paidKnown = moneyBefore ~= nil and moneyAfter ~= nil and unit.price ~= nil
+        local paidKnown = unit.price ~= nil and unit.price > 0
+            and moneyBefore ~= nil and moneyAfter ~= nil
             and (moneyBefore - moneyAfter) >= (unit.price * 0.6)
         local paid = paidKnown or (unit.price == nil and cashDropped)
-        -- [ v78 ] last resort when cash is unknown: the pad changed state after the touch
-        local changed = (not gone) and (not paid) and Automation.WarTycoonAutoBuildPadChanged(unit, snapBefore)
+        local changed = (not gone) and (not paid)
+            and Automation.WarTycoonAutoBuildPadChanged(unit, snapBefore)
 
         if gone or paid or changed then
             Automation._wtStats.purchases = Automation._wtStats.purchases + 1
@@ -11473,8 +12858,16 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
                 Automation._wtStats.spent = Automation._wtStats.spent + unit.price
             end
             Automation.WarTycoonAutoBuildLog("bought: " .. tag, Color3.fromRGB(0, 255, 120))
-            -- a gone/paid pad stays done; a state-change guess is retried in 2 min
-            Automation._wtDonePads[unit.key] = (gone or paid) and math.huge or (tick() + 120)
+            local retryAt = math.huge
+            if not gone then
+                local confirmed = paidKnown
+                retryAt = confirmed and (tick() + 600) or (tick() + 120)
+            end
+            Automation._wtDonePads[unit.key] = retryAt
+            Automation._wtPadFails[unit.key] = nil
+            Automation._wtPadsSeen = true
+            Automation._wtSaveSince = nil
+            Automation._wtSaveKey = nil
             Automation._wtPads = nil
             Automation._wtStuckSince = nil
             return true
@@ -11482,7 +12875,20 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
         Automation.WarTycoonAutoBuildLog(string.format("pad %s did not register (attempt %d/%d)", tag, i, attempts), Color3.fromRGB(255, 180, 0))
     end
 
-    Automation._wtDonePads[unit.key] = tick() + 12
+    -- [ v90 ] A pad that failed repeatedly is usually a ghost: the sign stayed
+    -- but the purchase button is gone. Back off exponentially instead of
+    -- teleporting to it every 30 s forever.
+    Automation._wtPadFails = Automation._wtPadFails or {}
+    local fails = (Automation._wtPadFails[unit.key] or 0) + 1
+    Automation._wtPadFails[unit.key] = fails
+    local cooldown = math.min(300, 30 * (2 ^ math.min(fails - 1, 3)))
+    Automation._wtDonePads[unit.key] = tick() + cooldown
+    if fails >= 3 then
+        Automation.WarTycoonAutoBuildLog(string.format(
+            "pad %s failed %d times - pausing %ds (old/ghost pad?)",
+            tag, fails, cooldown), Color3.fromRGB(255, 140, 0))
+    end
+    Automation._wtPads = nil
     return false
 end
 
@@ -11516,6 +12922,8 @@ function Automation.WarTycoonAutoBuildWantCash(unit)
 end
 
 function Automation.WarTycoonAutoBuildLoop()
+    if Automation._wtLoopActive then return end
+    Automation._wtLoopActive = true
     task.spawn(function()
         if not Automation.WarTycoonAutoBuildPriorityOrder[Config.WarTycoonBuild.Priority] then
             Config.WarTycoonBuild.Priority = "Money"
@@ -11524,6 +12932,18 @@ function Automation.WarTycoonAutoBuildLoop()
         Automation._wtStats = { purchases = 0, rebirths = 0, rollbacks = 0, spent = 0, errors = 0, startedAt = tick() }
         -- [ v78 ] a leftover "stuck" timer from a previous run must not trigger an instant rebirth
         Automation._wtStuckSince = nil
+        -- [ v89 ] запоминаем точку старта: по ней выбирается СВОЙ плот, если у
+        -- нескольких плотов одинаковый командный владелец
+        local startChar = Core.LocalPlayer and Core.LocalPlayer.Character
+        local startHrp = startChar and startChar:FindFirstChild("HumanoidRootPart")
+        Automation._wtHomePos = startHrp and startHrp.Position or nil
+        Automation._wtLastChar = startChar
+        Automation._wtPadFails = {}
+        -- [ v87 ] rebirth разрешаем только после того, как в этой сессии реально видели пады:
+        -- если сканер сломался, авто-билд не должен ребить базу вслепую
+        Automation._wtPadsSeen = false
+        Automation._wtSaveSince = nil
+        Automation._wtSaveKey = nil
         Automation.WarTycoonAutoBuildLog("started. Priority: " .. tostring(Config.WarTycoonBuild.Priority)
             .. ", TP above pad: +" .. tostring(Config.WarTycoonBuild.Hover) .. " studs", Color3.fromRGB(0, 255, 150))
         Automation.WarTycoonAutoBuildStatus("AUTO BUILD  >  starting...")
@@ -11540,14 +12960,41 @@ function Automation.WarTycoonAutoBuildLoop()
                 break
             end
             local ok, err = pcall(function()
+                -- [ v90 ] a respawn / plot reset invalidates cached pads and the
+                -- base; otherwise Auto Build keeps TP-ing to the old pad spots.
+                local curChar = Core.LocalPlayer and Core.LocalPlayer.Character
+                if curChar and Automation._wtLastChar ~= curChar then
+                    Automation._wtLastChar = curChar
+                    Automation._wtBase = nil
+                    Automation._wtBaseAt = 0
+                    Automation._wtPads = nil
+                    Automation._wtPadsBase = nil
+                    Automation._wtDonePads = {}
+                    Automation._wtPadFails = {}
+                    Automation._wtPadsSeen = false
+                    Automation._wtSaveSince = nil
+                    Automation._wtSaveKey = nil
+                    Automation._wtStuckSince = nil
+                    local chrHrp = curChar:FindFirstChild("HumanoidRootPart")
+                    if chrHrp then Automation._wtHomePos = chrHrp.Position end
+                end
                 local base = Automation.WarTycoonAutoBuildBase(false)
                 if not base or not base.Parent then
                     Automation._wtBase = nil
+                    -- [ v87 ] не молчим вечно: без своей базы авто-билд ничего не делает
+                    if tick() - (Automation._wtNoBaseAt or 0) > 30 then
+                        Automation._wtNoBaseAt = tick()
+                        Automation.WarTycoonAutoBuildLog(
+                            "own base not found - stand on your plot; use 'Dump pads to F9' to check",
+                            Color3.fromRGB(255, 170, 0))
+                    end
                     task.wait(2)
                     return
                 end
+                Automation._wtNoBaseAt = nil
 
                 local pads = Automation.WarTycoonAutoBuildPads(base, false)
+                if #pads > 0 then Automation._wtPadsSeen = true end
                 local unit = nil
                 if #pads > 0 then
                     unit = Automation.WarTycoonAutoBuildNextPad(pads)
@@ -11565,6 +13012,33 @@ function Automation.WarTycoonAutoBuildLoop()
                     end
                 end
 
+                -- [ v87 ] не телепортируемся к недоступному паду: сначала копим/собираем
+                if unit and unit.price and unit.price > 0 then
+                    -- The saving timer belongs to one pad. Without a key, a timer left by
+                    -- the previous (now skipped) pad made the next purchase attempt fire at once.
+                    if Automation._wtSaveKey ~= unit.key then
+                        Automation._wtSaveKey = unit.key
+                        Automation._wtSaveSince = nil
+                    end
+                    local money = Automation.WarTycoonAutoBuildMoney()
+                    if money and money < unit.price then
+                        -- не ждём вечно, если ценник распознан неверно: через 10 s пробуем всё равно
+                        Automation._wtSaveSince = Automation._wtSaveSince or tick()
+                        if tick() - Automation._wtSaveSince < 10 then
+                            Automation.WarTycoonAutoBuildUpdateStatus(nil, string.format(
+                                "saving up $%s / $%s",
+                                Automation.WarTycoonAutoBuildFormatMoney(money),
+                                Automation.WarTycoonAutoBuildFormatMoney(unit.price)))
+                            task.wait(0.8)
+                            return
+                        end
+                        Automation._wtSaveSince = nil
+                    else
+                        Automation._wtSaveSince = nil
+                        Automation._wtSaveKey = nil
+                    end
+                end
+
                 if not unit then
                     -- [ v78 ] One failed pad must not wipe the base. Pads are often just on
                     -- cooldown - rebirth only when the plot has nothing left to buy.
@@ -11572,6 +13046,8 @@ function Automation.WarTycoonAutoBuildLoop()
                     -- [ v78 ] If nothing is buyable for a full minute (every pad keeps
                     -- bouncing back), treat the base as stuck and allow a rebirth again.
                     Automation._wtStuckSince = Automation._wtStuckSince or tick()
+                    Automation._wtSaveSince = nil
+                    Automation._wtSaveKey = nil
                     local stuckFor = tick() - Automation._wtStuckSince
                     local allBought = #pads > 0
                     for _, u in ipairs(pads) do
@@ -11589,6 +13065,33 @@ function Automation.WarTycoonAutoBuildLoop()
                         task.wait(1)
                         return
                     end
+                    -- [ v87 ] если денег меньше самого дешёвого пада, это не "застряло":
+                    -- ребёрт обнулит базу, поэтому ждём и копим
+                    local cheapest, moneyNow
+                    for _, u in ipairs(pads) do
+                        local skipUntil = Automation._wtDonePads[u.key]
+                        if (not skipUntil or tick() >= skipUntil) and u.price and u.price > 0 then
+                            if not cheapest or u.price < cheapest then cheapest = u.price end
+                        end
+                    end
+                    if cheapest then moneyNow = Automation.WarTycoonAutoBuildMoney() end
+                    local tooPoor = cheapest ~= nil and moneyNow ~= nil and moneyNow < cheapest
+
+                    if tooPoor and not allBought then
+                        Automation.WarTycoonAutoBuildUpdateStatus(nil, string.format(
+                            "saving up $%s / $%s - rebirth paused",
+                            Automation.WarTycoonAutoBuildFormatMoney(moneyNow),
+                            Automation.WarTycoonAutoBuildFormatMoney(cheapest)))
+                        if tick() - (Automation._wtPoorLog or 0) > 20 then
+                            Automation._wtPoorLog = tick()
+                            Automation.WarTycoonAutoBuildLog(
+                                "not enough cash for the cheapest pad - waiting instead of rebirthing",
+                                Color3.fromRGB(255, 200, 0))
+                        end
+                        task.wait(1.5)
+                        return
+                    end
+
                     Automation._wtStuckSince = nil
                     if #pads > 0 and not allBought then
                         Automation.WarTycoonAutoBuildLog("pads stayed un-buyable for " .. tostring(math.floor(stuckFor)) .. "s - trying a rebirth", Color3.fromRGB(255, 200, 0))
@@ -11596,16 +13099,26 @@ function Automation.WarTycoonAutoBuildLoop()
                     Automation.WarTycoonAutoBuildUpdateStatus(nil, #pads == 0 and "waiting for pads" or (allBought and "base built - waiting for rebirth" or "stuck - rebirth"))
                     if #pads == 0 and (tick() - (Automation._wtNoPadLog or 0)) > 30 then
                         Automation._wtNoPadLog = tick()
-                        Automation.WarTycoonAutoBuildLog("no purchase pads detected - turn on 'Dump pads to F9' to check", Color3.fromRGB(255, 170, 0))
+                        Automation.WarTycoonAutoBuildLog(Automation._wtPadsSeen
+                            and "no purchase pads detected - turn on 'Dump pads to F9' to check"
+                            or "no purchase pads detected - auto-rebirth paused until pads appear (use 'Dump pads to F9' to check)",
+                            Color3.fromRGB(255, 170, 0))
                     end
-                    if Config.WarTycoonBuild.AutoRebirth then
+                    if Config.WarTycoonBuild.AutoRebirth and Automation._wtPadsSeen then
                         local didRb = Automation.WarTycoonAutoBuildTryRebirth()
                         if didRb then
                             -- the plot resets on rebirth, so rescan everything
                             Automation._wtPads = nil
                             Automation._wtDonePads = {}
                             Automation._wtBaseAt = 0
+                            Automation._wtPadsSeen = false
+                            Automation._wtHomePos = nil
+                            local rbChar = Core.LocalPlayer and Core.LocalPlayer.Character
+                            local rbHrp = rbChar and rbChar:FindFirstChild("HumanoidRootPart")
+                            if rbHrp then Automation._wtHomePos = rbHrp.Position end
                         end
+                    elseif Config.WarTycoonBuild.AutoRebirth then
+                        Automation.WarTycoonAutoBuildUpdateStatus(nil, "no pads found - rebirth paused")
                     end
                     task.wait(2.5)
                     return
@@ -11619,6 +13132,7 @@ function Automation.WarTycoonAutoBuildLoop()
                 task.wait(1)
             end
         end
+        Automation._wtLoopActive = false
         if IsCurrentInstance() and not State.Unloading then
             Automation.WarTycoonAutoBuildReport(stopReason)
         end
@@ -11641,6 +13155,15 @@ function Automation.WarTycoonAutoBuildDump()
         print(string.format("[AUTO-BUILD] #%d cat=%-6s price=%-9s label='%s' part=%s",
             i, tostring(u.cat), tostring(u.price), tostring(u.label or ""),
             u.part and u.part:GetFullName() or "-"))
+    end
+    local skipped = Automation._wtLastSkipped or {}
+    if #skipped > 0 then
+        Automation.WarTycoonAutoBuildLog("dump: skipped Robux/donation offers: " .. #skipped,
+            Color3.fromRGB(255, 180, 0))
+        for i, s in ipairs(skipped) do
+            print(string.format("[AUTO-BUILD] skip #%d [%s] label='%s' part=%s",
+                i, tostring(s.reason or "excluded"), tostring(s.label or ""), tostring(s.name or "-")))
+        end
     end
     local coll = Automation.WarTycoonAutoBuildFindCollector(base)
     print("[AUTO-BUILD] collector: " .. tostring(coll and coll:GetFullName() or "NOT FOUND"))
@@ -20711,7 +22234,7 @@ end, function(p)
     end, spRow:FindFirstChild("TextLabel"), nil, true)
 end, nil, nil, "Blox Strike")
 
-createModule("No Fall Damage", "War Tycoon: disables fall/ragdoll/freefall states, resets the fall timer and caps landing speed", "Movement", Config.Cheat.NoFallDamage, function(v)
+createModule("No Fall Damage", "War Tycoon: disables fall/ragdoll/freefall states and softens only the last studs of a fall, so normal falling stays fast", "Movement", Config.Cheat.NoFallDamage, function(v)
     Config.Cheat.NoFallDamage = v
     if v and Automation.NoFall then Automation.NoFall.LastReset = 0 end
     if not v then
@@ -20977,7 +22500,7 @@ end, true, "Universal")
 -- VISUALS
 
 -- MISC
-createModule("Auto Build", "Auto-builds the base (priority: money / house / yard / bunker), collects cash and does rebirth. Teleports slightly ABOVE the pad so the purchase registers.", "Auto farming", Config.WarTycoonBuild.Enabled, function(v)
+createModule("Auto Build", "Auto-builds the base (priority: money / house / yard / bunker), collects cash and does rebirth. Robux and donation offers are always skipped; it stands on cash pads because War Tycoon buys on touch.", "Auto farming", Config.WarTycoonBuild.Enabled, function(v)
     Config.WarTycoonBuild.Enabled = v
     if v then Automation.WarTycoonAutoBuildLoop() end
 end, function(p)
@@ -21008,6 +22531,7 @@ end, function(p)
     -- [ v54 ] IgnoreShield was read by the scanner but had no switch at all
     local rowShield = Internal.createSettingRow(sub, "Skip Shield Generator")
     Internal.createiOSSwitch(rowShield, Config.WarTycoonBuild.IgnoreShield ~= false, function(v) Config.WarTycoonBuild.IgnoreShield = v end, rowShield:FindFirstChild("TextLabel"), nil, true)
+    Internal.createLabel(sub, "Robux / donation offers are always skipped")
     Internal.createLabel(sub, "Reliability")
     local rowVerify = Internal.createSettingRow(sub, "Detect TP rollback")
     Internal.createiOSSwitch(rowVerify, Config.WarTycoonBuild.VerifyTp ~= false, function(v) Config.WarTycoonBuild.VerifyTp = v end, rowVerify:FindFirstChild("TextLabel"), nil, true)
@@ -21042,6 +22566,76 @@ end, function(p)
     Internal.createiOSSwitch(rowReport, Config.WarTycoonBuild.ReportFile ~= false, function(v) Config.WarTycoonBuild.ReportFile = v end, rowReport:FindFirstChild("TextLabel"), nil, true)
     local rowDump = Internal.createSettingRow(sub, "Dump pads to F9 (diagnostics)")
     Internal.createiOSSwitch(rowDump, false, function(v) if v then Automation.WarTycoonAutoBuildDump() end end, rowDump:FindFirstChild("TextLabel"), nil, true)
+end, nil, "War Tycoon")
+
+-- [ v88 ] War Tycoon AFK bypass card
+createModule("Anti-AFK (War Tycoon)", "Keeps you active so War Tycoon does not move you to the AFK place after ~10-15 minutes. Micro-steps and jumps, resets Roblox idle, answers AFK prompts and blocks the client-side AFK teleport.", "Auto farming", Config.WarTycoonAntiAFK.Enabled, function(v)
+    Config.WarTycoonAntiAFK.Enabled = v
+    if v then
+        Automation.WTAFK.Start()
+    else
+        Automation.WTAFK.Stop()
+    end
+end, function(p)
+    local cfg = Automation.WTAFK.Cfg()
+    local sub = Internal.createSubCard(p)
+
+    Internal.createSlider(sub, "Activity every", 15, 120, cfg.Interval, function(v)
+        Config.WarTycoonAntiAFK.Interval = v
+    end, { Unit = "s", Desc = "How often the character performs a small activity pulse. War Tycoon moves idle players after ~10-15 minutes, so 45 s is safe." })
+
+    local moveRow = Internal.createSettingRow(sub, "Micro-step / jump",
+        "A small step forward and back plus a jump on the ground. This is the part the server can actually see; synthetic input alone is not enough for most position-based AFK checks.")
+    Internal.createiOSSwitch(moveRow, cfg.Move, function(v) Config.WarTycoonAntiAFK.Move = v end,
+        moveRow:FindFirstChild("TextLabel"), nil, true)
+
+    local blockRow = Internal.createSettingRow(sub, "Block AFK teleport",
+        "Cancels a client-side TeleportService call while you have been idle for 2+ minutes, so an AFK-place teleport cannot start.")
+    Internal.createiOSSwitch(blockRow, cfg.BlockTeleport, function(v)
+        Config.WarTycoonAntiAFK.BlockTeleport = v
+        if v and Automation.WTAFK.Enabled() then Automation.WTAFK.InstallGuard() end
+    end, blockRow:FindFirstChild("TextLabel"), nil, true)
+
+    local promptRow = Internal.createSettingRow(sub, "Answer AFK prompt",
+        "Clicks I'M HERE / STILL HERE / STAY if the game shows an AFK countdown before moving you.")
+    Internal.createiOSSwitch(promptRow, cfg.ClickPrompts, function(v) Config.WarTycoonAntiAFK.ClickPrompts = v end,
+        promptRow:FindFirstChild("TextLabel"), nil, true)
+
+    local pulseBtn = Internal.createActionButton(sub, "SEND PULSE NOW", {
+        Height = 30,
+        Color = Color3.fromRGB(28, 92, 72),
+        HoverColor = Color3.fromRGB(36, 122, 95),
+        Stroke = Color3.fromRGB(52, 160, 122),
+        Tip = "Runs one activity pulse immediately. Use it to check that the character steps and the status in F9 updates.",
+    })
+    pulseBtn.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local ok, err = pcall(Automation.WTAFK.Pulse, "manual")
+            if not ok and _G.Log then _G.Log("Anti-AFK: " .. tostring(err), Color3.fromRGB(255, 80, 80)) end
+        end)
+    end)
+
+    local statusStrip, setStatus = Internal.createStatusStrip(sub, "idle")
+    task.spawn(function()
+        local lastText, lastOk = nil, nil
+        while statusStrip.Parent and not State.Unloading and IsCurrentInstance() do
+            local text = tostring(Automation.WTAFK.Status or "idle")
+            local nextAt = tonumber(Automation.WTAFK.NextPulse) or 0
+            if Automation.WTAFK.Enabled() and nextAt > 0 then
+                text = text .. string.format(" | next %ds", math.max(0, math.floor(nextAt - os.clock())))
+            end
+            if (Automation.WTAFK.Blocked or 0) > 0 then
+                text = text .. " | blocked " .. tostring(Automation.WTAFK.Blocked)
+            end
+            local ok = Automation.WTAFK.StatusOk ~= false
+            -- The strip tweens on every call; skip redraws when nothing visible changed.
+            if text ~= lastText or ok ~= lastOk then
+                lastText, lastOk = text, ok
+                setStatus(text, ok and Color3.fromRGB(0, 220, 160) or Color3.fromRGB(255, 110, 110))
+            end
+            task.wait(0.5)
+        end
+    end)
 end, nil, "War Tycoon")
 
 createModule("Vehicles Farm Helper", "Vehicles farm helper (War Tycoon)\nTeleports to the vehicle spawn and auto-spawns the selected vehicle. Auto Death finishes downed players; Auto Skip leaves the death screen.", "Auto farming", Config.VehiclesFarm.Enabled, function(v)
@@ -22777,6 +24371,29 @@ _G.OvermindBeginUnload = function()
         end
         table.clear(State.Connections)
 
+        -- [ v88 ] restore the __namecall hook used by the War Tycoon AFK guard
+        pcall(function()
+            if Automation.WTAFK and Automation.WTAFK.RemoveGuard then Automation.WTAFK.RemoveGuard() end
+            local char = Core.LocalPlayer and Core.LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then hum:Move(Vector3.zero, false) end
+        end)
+
+        -- [ v88 ] release the Auto Death key and restore the humanoid states disabled
+        -- by No Fall; otherwise they stay disabled after the script is unloaded.
+        pcall(function()
+            if Automation.AutoRespawn and Automation.AutoRespawn.ReleaseKey then
+                Automation.AutoRespawn.ReleaseKey()
+            end
+            local char = Core.LocalPlayer and Core.LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+                hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+                hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+            end
+        end)
+
         -- [ v30 ] AntiAim
         pcall(function()
             if State.AntiAimRestore then State.AntiAimRestore() end
@@ -23313,6 +24930,15 @@ pcall(function()
         if Automation.AutoRespawn and Automation.AutoRespawn.Cfg then
             local ar = Automation.AutoRespawn.Cfg()
             if ar.Death or ar.Skip then Automation.AutoRespawn.Start() end
+        end
+        -- [ v87 ] Auto Build тоже продолжает работу после загрузки конфига,
+        -- а не ждёт повторного клика по карточке
+        if Config.WarTycoonBuild and Config.WarTycoonBuild.Enabled then
+            if Automation.WarTycoonAutoBuildLoop then pcall(Automation.WarTycoonAutoBuildLoop) end
+        end
+        -- [ v88 ] Anti-AFK keeps working after a saved config is loaded
+        if Automation.WTAFK and Automation.WTAFK.Enabled and Automation.WTAFK.Enabled() then
+            if Automation.WTAFK.Start then pcall(Automation.WTAFK.Start) end
         end
     end)
 end)
