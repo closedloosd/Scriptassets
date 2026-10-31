@@ -870,8 +870,8 @@ Config = {
     Teleport = { Points = {} },
     WarTycoonBuild = {
         Enabled = false,
-        Priority = "Money",  -- Money / House / Yard / Bunker / Cheapest
-        Hover = 1.5,  -- studs ABOVE the pad top (main fix
+        Priority = "Money",  -- Money / House / Yard / Bunker / Cheapest / All
+        Hover = 2.5,  -- studs ABOVE the pad top before landing (main fix
         Delay = 0.35,  -- pause after TP (sec)
         Attempts = 3,  -- tries per pad
         AutoCollect = true,  -- auto-collect cash at the Cash Collector
@@ -1254,6 +1254,8 @@ Config = {
     -- [UI THEMING]
     Theme = {
         Dark = true, Opacity = 0, Blur = 15, Dim = 0,
+        NeonGlow = true,  -- [ v85 ] мягкое белое свечение по краям меню
+        Outline = true,   -- [ v90 ] тонкая обводка окна (тумблер в Gui Settings)
         Bind = Enum.KeyCode.RightShift,
         Accent = Color3.fromRGB(123, 97, 255),
         Accent2 = Color3.fromRGB(160, 100, 255),
@@ -2092,240 +2094,245 @@ Internal.createSlider = function(parent, name, min, max, default, callback, disp
     return Container
 end
 
-Internal.createSelector = function(parent, text, options, current, callback, desc)
-    local row = Internal.createSettingRow(parent, text)
-    row.ZIndex = 5  -- Ensure rows can layer
+-- [ v90 · QUICK BAR ] Все выпадающие списки заменены на инлайн-док из макета
+-- (Designes/priority_dropdown_redesign.html, вариант «dock quick bar»):
+-- выбранный сегмент залит accent-цветом, остальные прозрачные с ховером,
+-- длинный набор прокручивается колесом по горизонтали.
+Internal.BuildQuickBar = function(parent, text, options, isSelected, onPick, multi, desc)
+    local block = Instance.new("Frame")
+    block.Name = "QuickBar"
+    block.Size = UDim2.new(1, 0, 0, 0)
+    block.AutomaticSize = Enum.AutomaticSize.Y
+    block.BackgroundTransparency = 1
+    block.Parent = parent
 
-    local SelectorFrame = Instance.new("Frame")
-    SelectorFrame.Name = "Selector"
-    SelectorFrame.Size = UDim2.new(0, 85, 0, 24)
-    SelectorFrame.Position = UDim2.new(1, -85, 0.5, -12)
-    SelectorFrame.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
-    SelectorFrame.ClipsDescendants = true  -- Support truncation clipping
-    SelectorFrame.Parent = row
-    Instance.new("UICorner", SelectorFrame).CornerRadius = UDim.new(0, 6)
+    local blockPad = Instance.new("UIPadding", block)
+    blockPad.PaddingTop = UDim.new(0, 3)
+    blockPad.PaddingBottom = UDim.new(0, 3)
 
-    local MainBtn = Instance.new("TextButton")
-    MainBtn.Size = UDim2.new(1, 0, 1, 0)
-    MainBtn.BackgroundTransparency = 1
-    MainBtn.Text = "  " .. (current or "Default")
-    MainBtn.TextColor3 = Color3.new(1, 1, 1)
-    MainBtn.Font = Enum.Font.GothamMedium
-    MainBtn.TextSize = 11
-    MainBtn.TextXAlignment = Enum.TextXAlignment.Left
-    MainBtn.TextTruncate = Enum.TextTruncate.AtEnd
-    MainBtn.Parent = SelectorFrame
+    local blockLayout = Instance.new("UIListLayout", block)
+    blockLayout.Padding = UDim.new(0, 5)
+    blockLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
-    local Chevron = Instance.new("ImageLabel")
-    Chevron.Size = UDim2.new(0, 10, 0, 10)
-    Chevron.Position = UDim2.new(1, -18, 0.5, -5)
-    Chevron.BackgroundTransparency = 1
-    Chevron.Image = "rbxassetid://6034818372"  -- Simple arrow icon
-    Chevron.ImageColor3 = Color3.fromRGB(150, 150, 170)
-    Chevron.Parent = SelectorFrame
+    local head = Instance.new("Frame")
+    head.Name = "Head"
+    head.LayoutOrder = 1
+    head.Size = UDim2.new(1, 0, 0, 14)
+    head.BackgroundTransparency = 1
+    head.Parent = block
 
-    local DropdownList = Instance.new("ScrollingFrame")
-    DropdownList.Size = UDim2.new(1, 0, 0, 0)
-    DropdownList.Position = UDim2.new(0, 0, 1, 5)
-    DropdownList.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
-    DropdownList.BorderSizePixel = 0
-    DropdownList.Visible = false
-    DropdownList.ZIndex = 100
-    DropdownList.ScrollBarThickness = 2
-    DropdownList.ScrollBarImageColor3 = Config.Theme.Accent
-    DropdownList.CanvasSize = UDim2.new(0, 0, 0, #options * 22)
-    DropdownList.Parent = SelectorFrame
-    Instance.new("UICorner", DropdownList).CornerRadius = UDim.new(0, 6)
-    local dStroke = Instance.new("UIStroke", DropdownList)
-    dStroke.Color = Config.Theme.Accent
-    dStroke.Transparency = 0.5
-    table.insert(Internal.UIObjects.Accents, dStroke)
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -108, 1, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = text
+    nameLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
+    nameLabel.TextSize = 11
+    nameLabel.Font = Enum.Font.GothamMedium
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLabel.Parent = head
 
-    local dLayout = Instance.new("UIListLayout")
-    dLayout.Parent = DropdownList
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Name = "Value"
+    valueLabel.AnchorPoint = Vector2.new(1, 0)
+    valueLabel.Position = UDim2.new(1, 0, 0, 0)
+    valueLabel.Size = UDim2.new(0, 104, 1, 0)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Text = ""
+    valueLabel.TextColor3 = Config.Theme.Accent
+    valueLabel.TextSize = 10
+    valueLabel.Font = Enum.Font.GothamBold
+    valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valueLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    valueLabel.Parent = head
 
-    local isOpen = false
-    local function toggle(state)
-        if state == isOpen then return end
-        isOpen = state
+    local dock = Instance.new("Frame")
+    dock.Name = "Dock"
+    dock.LayoutOrder = 2
+    dock.Size = UDim2.new(1, 0, 0, 32)
+    dock.BackgroundColor3 = Color3.fromRGB(5, 7, 12)
+    dock.BackgroundTransparency = 0.4
+    dock.BorderSizePixel = 0
+    dock.Parent = block
+    Instance.new("UICorner", dock).CornerRadius = UDim.new(0, 9)
 
-        if isOpen then
-            SelectorFrame.ClipsDescendants = false  -- Allow dropdown to overflow
-            DropdownList.Visible = true
-            row.ZIndex = 10  -- Bring row to front
-            Core.TweenService:Create(DropdownList, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, math.min(#options * 22, 110))}):Play()
-            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 180}):Play()
-        else
-            local tw = Core.TweenService:Create(DropdownList, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0)})
-            tw:Play()
-            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 0}):Play()
-            tw.Completed:Connect(function()
-                if not isOpen then
-                    DropdownList.Visible = false
-                    row.ZIndex = 5
-                    SelectorFrame.ClipsDescendants = true
-                end
-            end)
+    local dockStroke = Instance.new("UIStroke", dock)
+    dockStroke.Color = Color3.fromRGB(96, 100, 128)
+    dockStroke.Transparency = 0.82
+    dockStroke.Thickness = 1
+    dockStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+    local dockPad = Instance.new("UIPadding", dock)
+    dockPad.PaddingTop = UDim.new(0, 3)
+    dockPad.PaddingBottom = UDim.new(0, 4)
+    dockPad.PaddingLeft = UDim.new(0, 3)
+    dockPad.PaddingRight = UDim.new(0, 3)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "Scroll"
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 2
+    scroll.ScrollBarImageColor3 = Config.Theme.Accent
+    scroll.ScrollBarImageTransparency = 0.45
+    scroll.ScrollingDirection = Enum.ScrollingDirection.X
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+    scroll.ElasticBehavior = Enum.ElasticBehavior.Never
+    scroll.Parent = dock
+
+    local row = Instance.new("UIListLayout", scroll)
+    row.FillDirection = Enum.FillDirection.Horizontal
+    row.Padding = UDim.new(0, 4)
+    row.SortOrder = Enum.SortOrder.LayoutOrder
+    row.VerticalAlignment = Enum.VerticalAlignment.Center
+
+    local buttons = {}
+
+    local function refreshValueText()
+        if not multi then
+            local shown = nil
+            for _, opt in ipairs(options) do
+                if isSelected(opt) then shown = opt break end
+            end
+            valueLabel.Text = shown and tostring(shown) or "—"
+            return
         end
-    end
-
-    MainBtn.MouseButton1Click:Connect(function() toggle(not isOpen) end)
-
-    local function updateOptions(newOptions)
-        for _, v in ipairs(DropdownList:GetChildren()) do if v:IsA("TextButton") then v:Destroy() end end
-        for _, opt in ipairs(newOptions) do
-            local OptBtn = Instance.new("TextButton")
-            OptBtn.Size = UDim2.new(1, 0, 0, 22)
-            OptBtn.BackgroundColor3 = Color3.fromRGB(30, 31, 45)
-            OptBtn.BackgroundTransparency = 1
-            OptBtn.Text = "  " .. opt
-            OptBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
-            OptBtn.Font = Enum.Font.GothamMedium
-            OptBtn.TextSize = 11
-            OptBtn.TextXAlignment = Enum.TextXAlignment.Left
-            OptBtn.TextTruncate = Enum.TextTruncate.AtEnd
-            OptBtn.Parent = DropdownList
-
-            OptBtn.MouseEnter:Connect(function()
-                Core.TweenService:Create(OptBtn, TweenInfo.new(0.2), {BackgroundTransparency = 0, TextColor3 = Color3.new(1, 1, 1)}):Play()
-            end)
-            OptBtn.MouseLeave:Connect(function()
-                Core.TweenService:Create(OptBtn, TweenInfo.new(0.2), {BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(180, 180, 200)}):Play()
-            end)
-
-            OptBtn.MouseButton1Click:Connect(function()
-                MainBtn.Text = "  " .. opt
-                callback(opt)
-                toggle(false)
-            end)
-        end
-        DropdownList.CanvasSize = UDim2.new(0, 0, 0, #newOptions * 22)
-    end
-
-    updateOptions(options)
-
-    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
-        Internal.AttachTip(row, desc)
-    end
-    return { Button = MainBtn, Update = updateOptions, Row = row }
-end
-
-Internal.createMultiSelector = function(parent, text, options, currentConfig, callback)
-    local row = Internal.createSettingRow(parent, text)
-    row.ZIndex = 5
-
-    local SelectorFrame = Instance.new("Frame")
-    SelectorFrame.Name = "MultiSelector"
-    SelectorFrame.Size = UDim2.new(0, 110, 0, 24)
-    SelectorFrame.Position = UDim2.new(1, -110, 0.5, -12)
-    SelectorFrame.BackgroundColor3 = Color3.fromRGB(35, 36, 48)
-    SelectorFrame.ClipsDescendants = true
-    SelectorFrame.Parent = row
-    Instance.new("UICorner", SelectorFrame).CornerRadius = UDim.new(0, 6)
-
-    local MainBtn = Instance.new("TextButton")
-    MainBtn.Size = UDim2.new(1, 0, 1, 0)
-    MainBtn.BackgroundTransparency = 1
-    MainBtn.Text = "  Select..."
-    MainBtn.TextColor3 = Color3.new(1, 1, 1)
-    MainBtn.Font = Enum.Font.GothamMedium
-    MainBtn.TextSize = 11
-    MainBtn.TextXAlignment = Enum.TextXAlignment.Left
-    MainBtn.TextTruncate = Enum.TextTruncate.AtEnd
-    MainBtn.Parent = SelectorFrame
-
-    local Chevron = Instance.new("ImageLabel")
-    Chevron.Size = UDim2.new(0, 10, 0, 10)
-    Chevron.Position = UDim2.new(1, -18, 0.5, -5)
-    Chevron.BackgroundTransparency = 1
-    Chevron.Image = "rbxassetid://6034818372"
-    Chevron.ImageColor3 = Color3.fromRGB(150, 150, 170)
-    Chevron.Parent = SelectorFrame
-
-    local DropdownList = Instance.new("ScrollingFrame")
-    DropdownList.Size = UDim2.new(1, 0, 0, 0)
-    DropdownList.Position = UDim2.new(0, 0, 1, 5)
-    DropdownList.BackgroundColor3 = Color3.fromRGB(25, 26, 38)
-    DropdownList.BorderSizePixel = 0
-    DropdownList.Visible = false
-    DropdownList.ZIndex = 100
-    DropdownList.ScrollBarThickness = 2
-    DropdownList.ScrollBarImageColor3 = Config.Theme.Accent
-    DropdownList.CanvasSize = UDim2.new(0, 0, 0, #options * 22)
-    DropdownList.Parent = SelectorFrame
-    Instance.new("UICorner", DropdownList).CornerRadius = UDim.new(0, 6)
-    local dStroke = Instance.new("UIStroke", DropdownList)
-    dStroke.Color = Config.Theme.Accent
-    dStroke.Transparency = 0.5
-    table.insert(Internal.UIObjects.Accents, dStroke)
-
-    local dLayout = Instance.new("UIListLayout")
-    dLayout.Parent = DropdownList
-
-    local isOpen = false
-    local function toggle(state)
-        if state == isOpen then return end
-        isOpen = state
-
-        if isOpen then
-            SelectorFrame.ClipsDescendants = false
-            DropdownList.Visible = true
-            row.ZIndex = 10
-            Core.TweenService:Create(DropdownList, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, math.min(#options * 22, 110))}):Play()
-            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 180}):Play()
-        else
-            local tw = Core.TweenService:Create(DropdownList, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0)})
-            tw:Play()
-            Core.TweenService:Create(Chevron, TweenInfo.new(0.3), {Rotation = 0}):Play()
-            tw.Completed:Connect(function()
-                if not isOpen then
-                    DropdownList.Visible = false
-                    row.ZIndex = 5
-                    SelectorFrame.ClipsDescendants = true
-                end
-            end)
-        end
-    end
-
-    MainBtn.MouseButton1Click:Connect(function() toggle(not isOpen) end)
-
-    local function refreshDisplayText()
-        local selected = {}
+        local picked = {}
         for _, opt in ipairs(options) do
-            if currentConfig[opt] then
-                table.insert(selected, opt)
+            if isSelected(opt) then table.insert(picked, opt) end
+        end
+        valueLabel.Text = (#picked == 0) and "None" or table.concat(picked, " · ")
+    end
+
+    local function paintAll()
+        for opt, btn in pairs(buttons) do
+            local active = isSelected(opt) and true or false
+            btn.BackgroundColor3 = Config.Theme.Accent
+            btn.BackgroundTransparency = active and 0 or 1
+            btn.TextColor3 = active and Color3.new(1, 1, 1) or Color3.fromRGB(152, 153, 170)
+            local stroke = btn:FindFirstChild("BarStroke")
+            if stroke then stroke.Transparency = active and 0.55 or 1 end
+            if multi then
+                btn.Text = (active and "✓  " or "") .. tostring(opt)
             end
         end
-        if #selected == 0 then
-            MainBtn.Text = "  None"
-        else
-            MainBtn.Text = "  " .. table.concat(selected, ", ")
-        end
+        refreshValueText()
     end
 
-    for _, opt in ipairs(options) do
-        local OptBtn = Instance.new("TextButton")
-        OptBtn.Size = UDim2.new(1, 0, 0, 22)
-        OptBtn.BackgroundColor3 = Color3.fromRGB(30, 31, 45)
-        OptBtn.BackgroundTransparency = 1
-        OptBtn.Text = (currentConfig[opt] and "  [X] " or "  [ ] ") .. opt
-        OptBtn.TextColor3 = currentConfig[opt] and Color3.new(1, 1, 1) or Color3.fromRGB(180, 180, 200)
-        OptBtn.Font = Enum.Font.GothamMedium
-        OptBtn.TextSize = 11
-        OptBtn.TextXAlignment = Enum.TextXAlignment.Left
-        OptBtn.TextTruncate = Enum.TextTruncate.AtEnd
-        OptBtn.Parent = DropdownList
+    local function rebuild(newOptions)
+        if newOptions ~= nil then options = newOptions end
+        buttons = {}
+        for _, child in ipairs(scroll:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
 
-        OptBtn.MouseButton1Click:Connect(function()
-            currentConfig[opt] = not currentConfig[opt]
-            OptBtn.Text = (currentConfig[opt] and "  [X] " or "  [ ] ") .. opt
-            OptBtn.TextColor3 = currentConfig[opt] and Color3.new(1, 1, 1) or Color3.fromRGB(180, 180, 200)
-            refreshDisplayText()
-            callback(opt, currentConfig[opt])
+        for index, opt in ipairs(options) do
+            local btn = Instance.new("TextButton")
+            btn.Name = "Bar" .. index
+            btn.LayoutOrder = index
+            btn.Size = UDim2.fromOffset(0, 24)
+            btn.AutomaticSize = Enum.AutomaticSize.X
+            btn.BackgroundColor3 = Config.Theme.Accent
+            btn.BackgroundTransparency = 1
+            btn.AutoButtonColor = false
+            btn.BorderSizePixel = 0
+            btn.Text = tostring(opt)
+            btn.TextSize = 10
+            btn.Font = Enum.Font.GothamBold
+            btn.TextColor3 = Color3.fromRGB(152, 153, 170)
+            btn.ZIndex = 2
+            btn.Parent = scroll
+            Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+
+            local btnPad = Instance.new("UIPadding", btn)
+            btnPad.PaddingLeft = UDim.new(0, 9)
+            btnPad.PaddingRight = UDim.new(0, 9)
+
+            local btnStroke = Instance.new("UIStroke", btn)
+            btnStroke.Name = "BarStroke"
+            btnStroke.Color = Color3.new(1, 1, 1)
+            btnStroke.Transparency = 1
+            btnStroke.Thickness = 1
+            btnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+            buttons[opt] = btn
+
+            btn.MouseEnter:Connect(function()
+                if isSelected(opt) then return end
+                btn.BackgroundColor3 = Color3.new(1, 1, 1)
+                Core.TweenService:Create(btn, TweenInfo.new(0.15), {
+                    BackgroundTransparency = 0.9,
+                    TextColor3 = Color3.new(1, 1, 1)
+                }):Play()
+                if Internal.CelestialPlaySound then Internal.CelestialPlaySound("hover") end
+            end)
+            btn.MouseLeave:Connect(function()
+                if isSelected(opt) then return end
+                Core.TweenService:Create(btn, TweenInfo.new(0.18), {
+                    BackgroundTransparency = 1,
+                    TextColor3 = Color3.fromRGB(152, 153, 170)
+                }):Play()
+            end)
+
+            btn.MouseButton1Click:Connect(function()
+                onPick(opt)
+                paintAll()
+                if Internal.CelestialPlaySound then Internal.CelestialPlaySound("click") end
+            end)
+        end
+
+        paintAll()
+
+        -- док прокручивается к выбранному сегменту, чтобы он не оставался за краем
+        task.spawn(function()
+            task.wait()
+            if not scroll.Parent then return end
+            local target = nil
+            for opt, btn in pairs(buttons) do
+                if isSelected(opt) then target = btn break end
+            end
+            if target then
+                local offset = target.AbsolutePosition.X - scroll.AbsolutePosition.X
+                if offset > 0 then
+                    scroll.CanvasPosition = Vector2.new(math.max(0, scroll.CanvasPosition.X + offset - 6), 0)
+                end
+            end
         end)
     end
 
-    refreshDisplayText()
+    rebuild(options)
+
+    if type(desc) == "string" and desc ~= "" and Internal.AttachTip then
+        Internal.AttachTip(block, desc)
+    end
+
+    return {
+        Row = block,
+        Dock = dock,
+        Update = function(newOptions) rebuild(newOptions) end
+    }
+end
+
+Internal.createSelector = function(parent, text, options, current, callback, desc)
+    return Internal.BuildQuickBar(parent, text, options,
+        function(opt) return current == opt end,
+        function(opt)
+            current = opt
+            callback(opt)
+        end,
+        false, desc)
+end
+
+Internal.createMultiSelector = function(parent, text, options, currentConfig, callback)
+    return Internal.BuildQuickBar(parent, text, options,
+        function(opt) return currentConfig[opt] == true end,
+        function(opt)
+            currentConfig[opt] = not currentConfig[opt]
+            callback(opt, currentConfig[opt])
+        end,
+        true, nil)
 end
 
 Internal.createLabel = function(parent, text)
@@ -5115,36 +5122,264 @@ State.Connections.CelestialAnim = Core.RunService.RenderStepped:Connect(function
 end)
 
 -- [ ПЕРЕТАСКИВАНИЕ ОКНА (Celestial-стиль) ]
+-- [ ФИКС v90 ] У каждого окна свой цикл перетаскивания. Раньше коннект RenderStepped
+-- лежал в одном поле State.Connections.CelestialDrag: второе окно (консоль)
+-- отключало цикл главного меню — поэтому меню переставало двигаться целиком.
 local function CelestialMakeDraggable(frame, handle)
-    local dragging, dragInput, dragStart, startPos
+    if not frame or not handle then return end
+
+    local drag = {
+        Active = false,
+        StartPos = nil,
+        StartInput = nil,
+        MoveInput = nil,
+    }
+
+    local function isPointer(input)
+        return input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch
+    end
+
+    local function isMove(input)
+        return input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch
+    end
+
+    local function stop()
+        drag.Active = false
+        drag.StartInput = nil
+        drag.MoveInput = nil
+    end
+
     handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
+        if State.Unloading or not frame.Parent then return end
+        if not isPointer(input) then return end
+        drag.Active = true
+        drag.StartPos = frame.Position
+        drag.StartInput = input
+        drag.MoveInput = input
     end)
+
     handle.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
+        if not drag.Active or not isMove(input) then return end
+        drag.MoveInput = input
     end)
-    -- [ ФИКС УТЕЧКИ ] повторный вызов (главное окно + консоль) затирал ссылку на прошлый коннект
-    if State.Connections.CelestialDrag then pcall(function() State.Connections.CelestialDrag:Disconnect() end) end
-    State.Connections.CelestialDrag = Core.RunService.RenderStepped:Connect(function()
+
+    Core.UserInputService.InputEnded:Connect(function(input)
+        if not isPointer(input) then return end
+        stop()
+    end)
+
+    Core.RunService.RenderStepped:Connect(function()
         if not IsCurrentInstance() then return end
-        if dragging and dragInput then
-            local delta = dragInput.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-            if Internal.Celestial.SettingsFrame and Internal.Celestial.ActiveSettingsModule then
-                Internal.Celestial.SettingsFrame.Position = UDim2.new(frame.Position.X.Scale, frame.Position.X.Offset + (frame.AbsoluteSize.X / 2) + 15, frame.Position.Y.Scale, frame.Position.Y.Offset)
-            end
+        if not drag.Active or not drag.StartInput or not drag.MoveInput then return end
+        if not frame.Parent then stop() return end
+
+        local delta = drag.MoveInput.Position - drag.StartInput.Position
+        frame.Position = UDim2.new(
+            drag.StartPos.X.Scale, drag.StartPos.X.Offset + delta.X,
+            drag.StartPos.Y.Scale, drag.StartPos.Y.Offset + delta.Y
+        )
+
+        -- панель настроек модуля едет вместе с окном
+        local settings = Internal.Celestial and Internal.Celestial.SettingsFrame
+        if settings and settings.Parent and Internal.Celestial.ActiveSettingsModule then
+            settings.Position = UDim2.new(
+                frame.Position.X.Scale,
+                frame.Position.X.Offset + (frame.AbsoluteSize.X / 2) + 15,
+                frame.Position.Y.Scale,
+                frame.Position.Y.Offset
+            )
         end
     end)
 end
 
 Internal.setupDrag = CelestialMakeDraggable  -- совместимость с плавающей консолью
+
+
+-- [ v85 · NEON GLOW ] Мягкий белый контур по краям меню.
+-- Несколько UIStroke-слоёв дают чёткую кромку + плавное свечение внутрь/наружу.
+Internal.NeonGlowSets = Internal.NeonGlowSets or {}
+
+function Internal.ApplyNeonGlow(enabled, instant)
+    local on = enabled == true
+    for i = #Internal.NeonGlowSets, 1, -1 do
+        local setData = Internal.NeonGlowSets[i]
+        local container = setData.Container
+        if not container or not container.Parent then
+            table.remove(Internal.NeonGlowSets, i)
+        else
+            setData.Token = (setData.Token or 0) + 1
+            local token = setData.Token
+
+            for _, item in ipairs(setData.Items) do
+                local stroke = item.Stroke
+                if stroke and stroke.Parent then
+                    local target = on and item.Base or 1
+                    if instant then
+                        stroke.Transparency = target
+                    else
+                        Core.TweenService:Create(
+                            stroke,
+                            TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                            { Transparency = target }
+                        ):Play()
+                    end
+                end
+            end
+
+            if on then
+                container.Visible = true
+            elseif instant then
+                container.Visible = false
+            else
+                task.delay(0.34, function()
+                    if token == setData.Token and container and container.Parent then
+                        container.Visible = false
+                    end
+                end)
+            end
+        end
+    end
+end
+
+function Internal.BuildNeonGlow(parent, radius)
+    if not parent then return end
+
+    local container = Instance.new("Frame")
+    container.Name = "NeonGlow"
+    container.Size = UDim2.fromScale(1, 1)
+    container.BackgroundTransparency = 1
+    container.BorderSizePixel = 0
+    container.Active = false
+    container.Selectable = false
+    container.ClipsDescendants = false
+    container.ZIndex = 90
+    container.Parent = parent
+
+    local items = {}
+    local function addLayer(name, inset, thickness, transparency, z)
+        local frame = Instance.new("Frame")
+        frame.Name = name
+        frame.AnchorPoint = Vector2.new(0.5, 0.5)
+        frame.Position = UDim2.fromScale(0.5, 0.5)
+        frame.Size = UDim2.new(1, -inset * 2, 1, -inset * 2)
+        frame.BackgroundTransparency = 1
+        frame.BorderSizePixel = 0
+        frame.Active = false
+        frame.Selectable = false
+        frame.ZIndex = z
+        frame.Parent = container
+
+        local corner = Instance.new("UICorner", frame)
+        corner.CornerRadius = UDim.new(0, math.max(1, radius - inset))
+
+        local stroke = Instance.new("UIStroke", frame)
+        stroke.Color = Color3.fromRGB(255, 255, 255)
+        stroke.Thickness = thickness
+        stroke.Transparency = transparency
+        stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        stroke.LineJoinMode = Enum.LineJoinMode.Round
+
+        table.insert(items, { Frame = frame, Stroke = stroke, Base = transparency })
+    end
+
+    addLayer("NeonEdge", 0, 1.1, 0.02, 95)    -- чёткая белая кромка
+    addLayer("NeonOuter", -2, 2.5, 0.90, 94)  -- лёгкий внешний ореол
+    addLayer("NeonHalo1", 1, 3, 0.82, 93)     -- мягкое свечение у кромки
+    addLayer("NeonHalo2", 3, 6, 0.91, 92)
+    addLayer("NeonHalo3", 6, 10, 0.96, 91)
+    addLayer("NeonHalo4", 11, 14, 0.98, 90) -- растворяется в фоне
+
+    table.insert(Internal.NeonGlowSets, { Container = container, Items = items, Token = 0 })
+    Internal.ApplyNeonGlow(Config and Config.Theme and Config.Theme.NeonGlow ~= false, true)
+    return container
+end
+
+-- [ v90 · ОБВОДКА ] Аккуратная тонкая кромка окна: градиент по контуру + верхний блик.
+-- Раньше окно держалось только на белом свечении (NeonGlow): чёткой линии не было,
+-- и на пёстром фоне край «плыл». Теперь есть отдельная линия 1px (+ мягкий блик
+-- сверху), которую можно выключить тумблером Window Outline в Gui Settings.
+Internal.OutlineItems = Internal.OutlineItems or {}
+
+function Internal.RegisterOutlineObject(obj, prop, base)
+    if not obj then return end
+    table.insert(Internal.OutlineItems, { Object = obj, Prop = prop or "Transparency", Base = base or 0 })
+    obj[prop or "Transparency"] = (Config.Theme.Outline ~= false) and (base or 0) or 1
+end
+
+function Internal.ApplyOutline(enabled)
+    local on = enabled == true
+    for i = #Internal.OutlineItems, 1, -1 do
+        local item = Internal.OutlineItems[i]
+        local obj = item.Object
+        if not obj or not obj.Parent then
+            table.remove(Internal.OutlineItems, i)
+        else
+            Core.TweenService:Create(obj, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                [item.Prop] = on and item.Base or 1
+            }):Play()
+        end
+    end
+end
+
+function Internal.BuildWindowOutline(parent, radius)
+    if not parent then return end
+
+    local rim = Instance.new("Frame")
+    rim.Name = "WindowOutline"
+    rim.Size = UDim2.fromScale(1, 1)
+    rim.BackgroundTransparency = 1
+    rim.BorderSizePixel = 0
+    rim.Active = false
+    rim.Selectable = false
+    rim.ZIndex = 97
+    rim.Parent = parent
+    Instance.new("UICorner", rim).CornerRadius = UDim.new(0, math.max(1, radius))
+
+    local stroke = Instance.new("UIStroke", rim)
+    stroke.Name = "OutlineStroke"
+    stroke.Color = Config.Theme.Accent
+    stroke.Thickness = 1.4
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.LineJoinMode = Enum.LineJoinMode.Round
+    table.insert(Internal.UIObjects.Accents, stroke)
+
+    -- градиент по кромке: у углов линия растворяется, по центру сторон читается чётко
+    local grad = Instance.new("UIGradient", stroke)
+    grad.Name = "OutlineGradient"
+    grad.Rotation = 90
+    grad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.00, 0.85),
+        NumberSequenceKeypoint.new(0.18, 0.10),
+        NumberSequenceKeypoint.new(0.82, 0.10),
+        NumberSequenceKeypoint.new(1.00, 0.85),
+    })
+
+    Internal.RegisterOutlineObject(stroke, "Transparency", 0.15)
+
+    -- верхний блик: тонкая светлая полоса, как у дока в макете
+    local sheen = Instance.new("Frame")
+    sheen.Name = "OutlineSheen"
+    sheen.AnchorPoint = Vector2.new(0.5, 0)
+    sheen.Position = UDim2.new(0.5, 0, 0, 1)
+    sheen.Size = UDim2.new(0.52, 0, 0, 1)
+    sheen.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    sheen.BackgroundTransparency = 0.45
+    sheen.BorderSizePixel = 0
+    sheen.ZIndex = 97
+    sheen.Parent = rim
+
+    local sheenGrad = Instance.new("UIGradient", sheen)
+    sheenGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.00, 1),
+        NumberSequenceKeypoint.new(0.50, 0.45),
+        NumberSequenceKeypoint.new(1.00, 1),
+    })
+
+    Internal.RegisterOutlineObject(sheen, "BackgroundTransparency", 0.45)
+    return rim
+end
 
 Content = nil  -- легаси-шим (остальные ссылки не используются)
 
@@ -5165,13 +5400,14 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
     MainCorner.CornerRadius = UDim.new(0, 12)
     MainCorner.Parent = Internal.MainFrame
 
-    -- [ ХЕДЕР ДЛЯ ПЕРЕТАСКИВАНИЯ ]
-    DragHeader = Instance.new("Frame")
-    DragHeader.Name = "DragHeader"
-    DragHeader.Size = UDim2.new(1, 0, 0, 50)
-    DragHeader.BackgroundTransparency = 1
-    DragHeader.Parent = Internal.MainFrame
-    CelestialMakeDraggable(Internal.MainFrame, DragHeader)
+    if Internal.BuildNeonGlow then
+        Internal.BuildNeonGlow(Internal.MainFrame, 12)
+    end
+    if Internal.BuildWindowOutline then
+        Internal.BuildWindowOutline(Internal.MainFrame, 12)
+    end
+
+    -- [ ХЕДЕР ДЛЯ ПЕРЕТАСКИВАНИЯ ] создаётся ниже, после RAIL_W / CONTENT_X
 
     -- [ БОКОВАЯ ПАНЕЛЬ ]
     -- [ v57 ] САЙДБАР-РЕЙЛ (дизайн из мокапа)
@@ -5184,6 +5420,20 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
     local FOOTER_H = 92  -- нижний блок рейла
     local CONTENT_X = RAIL_W + 15  -- левый край зоны контента
     local CONTENT_R = 15  -- правый отступ контента
+
+    -- [ ХЕДЕР ДЛЯ ПЕРЕТАСКИВАНИЯ ]
+    -- [ ФИКС v90 ] раньше DragHeader лежал ПОД топбаром и поиском (ZIndex 1),
+    -- клики до него не доходили — меню нельзя было сдвинуть.
+    -- Теперь тянем за шапку рейла и вордмарк, а поиск остаётся кликабельным.
+    DragHeader = Instance.new("Frame")
+    DragHeader.Name = "DragHeader"
+    DragHeader.Size = UDim2.fromOffset(CONTENT_X + 112, 55)
+    DragHeader.Position = UDim2.fromOffset(0, 0)
+    DragHeader.BackgroundTransparency = 1
+    DragHeader.BorderSizePixel = 0
+    DragHeader.ZIndex = 9
+    DragHeader.Parent = Internal.MainFrame
+    CelestialMakeDraggable(Internal.MainFrame, DragHeader)
 
     Internal.Sidebar = Instance.new("Frame")
     Internal.Sidebar.Name = "Internal.Sidebar"
@@ -5999,7 +6249,7 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
     SkinList.Parent = Internal.SkinChangerUI
 
     -- [ СТРУКТУРА ВКЛАДОК ] порядок как в старом скрипте (Themes
-    local TabOrder = {"Rage", "Legit", "Movement", "Auto farming", "Exploit", "Visuals", "Skins", "Misc", "Fun", "Gui", "Friends", "Themes"}
+    local TabOrder = {"Rage", "Legit", "Movement", "Auto farming", "Exploit", "Visuals", "Skins", "Misc", "Gui", "Friends", "Themes"}
     local TabIcons = {
         ["Legit"] = "rbxassetid://10723352321",
         ["Rage"] = "rbxassetid://10723352321",
@@ -6009,7 +6259,6 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
         ["Visuals"] = "rbxassetid://10723351333",
         ["Skins"] = "rbxassetid://10723351333",
         ["Misc"] = "rbxassetid://10723348633",
-        ["Fun"] = "rbxassetid://10723348633",
         ["Gui"] = "rbxassetid://10723352321",
         -- [ v65 ] иконку вкладки друзей можно заменить любым своим rbxassetid
         ["Friends"] = "rbxassetid://10723348633",
@@ -6030,7 +6279,6 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
         ["Visuals"] = {"Visuals"},
         ["Skins"] = {"Skinchanger_off", "Skinchanger_on"},
         ["Misc"] = {"Misc_on", "Misc"},
-        ["Fun"] = {"Fun"},
         ["Gui"] = {"Gui"},
         ["Friends"] = {"Friends"},
         ["Themes"] = {"Themes"},
@@ -6055,7 +6303,7 @@ Content = nil  -- легаси-шим (остальные ссылки не ис
     local RailGlyphs = {
         ["Rage"] = "target", ["Legit"] = "target", ["Movement"] = "move",
         ["Auto farming"] = "farm", ["Exploit"] = "move", ["Visuals"] = "eye",
-        ["Skins"] = "knife", ["Misc"] = "grid", ["Fun"] = "grid",
+        ["Skins"] = "knife", ["Misc"] = "grid",
         ["Gui"] = "chip", ["Friends"] = "friends", ["Themes"] = "palette",
     }
 
@@ -7104,6 +7352,13 @@ function CelestialOpenRightSettingsPanel(moduleName, schema)
     panel.Parent = ScreenGui
     Internal.Celestial.SettingsFrame = panel
 
+    if Internal.BuildNeonGlow then
+        Internal.BuildNeonGlow(panel, 12)
+    end
+    if Internal.BuildWindowOutline then
+        Internal.BuildWindowOutline(panel, 12)
+    end
+
     Core.TweenService:Create(panel, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
         GroupTransparency = 0,
         Position = finalPos
@@ -7294,7 +7549,8 @@ Internal.ResetModuleConfig = function(modName)
             ["Vehicles Farm Helper"] = {"VehiclesFarm"},
             ["Auto Build"] = {"WarTycoonBuild"},
             ["Anti-AFK (War Tycoon)"] = {"WarTycoonAntiAFK"},
-            ["Interface Settings"] = {"Theme"},
+            ["Gui Settings"] = {"Theme"},
+            ["Interface Settings"] = {"Theme"},  -- старые конфиги и бинды продолжают работать
             ["Dynamic Island"] = {"Island"},
         }
 
@@ -7358,7 +7614,9 @@ DebugTitle.TextSize = 10
 DebugTitle.Font = Enum.Font.GothamBold
 DebugTitle.TextXAlignment = Enum.TextXAlignment.Left
 
-Internal.setupDrag(DebugHeader, Internal.DebugFrame)
+Internal.setupDrag(Internal.DebugFrame, DebugHeader)
+-- заголовок лежит ПОВЕРХ шапки, поэтому тянем и за него
+Internal.setupDrag(Internal.DebugFrame, DebugTitle)
 
 -- RESIZE HANDLE (Right Bottom Corner)
 local ResizeBtn = Instance.new("ImageButton")
@@ -7528,6 +7786,13 @@ local function LoadConfig(name)
                 -- [ ФИКС БИНДОВ МОДУЛЕЙ ПРИ ЗАГРУЗКЕ КОНФИГА ]
                 if Config.ModuleBinds then
                     State.ModuleBinds = Config.ModuleBinds
+
+                -- [ v90 ] вкладка «Interface Settings» переименована в «Gui Settings»: переносим старые бинды
+                if Config.ModuleBinds and Config.ModuleBinds["Interface Settings"] then
+                    Config.ModuleBinds["Gui Settings"] = Config.ModuleBinds["Gui Settings"] or Config.ModuleBinds["Interface Settings"]
+                    Config.ModuleBinds["Interface Settings"] = nil
+                    State.ModuleBinds = Config.ModuleBinds
+                end
                     for modName, bind in pairs(State.ModuleBinds) do
                         local bk = (type(bind) == "table") and bind.Key or bind
                         local keyCode = Internal.CoerceKeyBind(bk, nil)
@@ -7634,6 +7899,13 @@ local function LoadConfig(name)
                 end
 
                 SyncModules()
+
+                if Internal.ApplyNeonGlow then
+                    pcall(Internal.ApplyNeonGlow, Config.Theme.NeonGlow ~= false)
+                end
+                if Internal.NeonGlowSwitch and Internal.NeonGlowSwitch.Set then
+                    pcall(Internal.NeonGlowSwitch.Set, Config.Theme.NeonGlow ~= false, false, true)
+                end
 
                 if Internal.ShowIslandNotification then Internal.ShowIslandNotification("CONFIG LOADED: " .. cleanName:upper(), Config.Theme.Accent) end
                 _G.Log("Successfully loaded config: " .. cleanName, Color3.fromRGB(0, 255, 150))
@@ -12146,10 +12418,14 @@ function Automation.WarTycoonAutoBuildCategory(hint)
         end
         return false
     end
-    if has({ "oil", "extract", "drill", "derrick", "gas", "generator", "income", "money", "cash" }) then return "money" end
-    if has({ "bunker", "missile", "silo", "drone", "laboratory", "lab" }) then return "bunker" end
-    if has({ "garage", "vehicle", "dock", "airport", "hangar", "tank", "boat", "plane", "helipad" }) then return "yard" end
-    if has({ "wall", "floor", "door", "glass", "path", "roof", "main", "hq", "second", "third", "level", "stair", "house", "home", "barrack" }) then return "house" end
+    if has({ "oil", "extract", "drill", "derrick", "gas", "generator", "income", "money", "cash",
+        "factory", "mine", "mining", "bank", "refinery", "trade", "trading" }) then return "money" end
+    if has({ "bunker", "missile", "silo", "drone", "laboratory", "lab", "radar", "defense", "defence" }) then return "bunker" end
+    if has({ "garage", "vehicle", "dock", "airport", "hangar", "tank", "boat", "plane", "helipad",
+        "airforce", "airfield", "aircraft", "jet", "heli", "naval", "ship", "warship", "submarine" }) then return "yard" end
+    if has({ "wall", "floor", "door", "glass", "path", "roof", "main", "hq", "second", "third", "level", "stair",
+        "house", "home", "barrack", "barracks", "armory", "medbay", "medical", "hospital", "bed", "beds",
+        "first", "1st", "2nd", "3rd", "4th", "office", "quarters", "storage" }) then return "house" end
     return "other"
 end
 
@@ -12159,6 +12435,7 @@ Automation.WarTycoonAutoBuildPriorityOrder = {
     ["Yard"] = { yard = 1, money = 2, house = 3, bunker = 4, other = 5 },
     ["Bunker"] = { bunker = 1, money = 2, house = 3, yard = 4, other = 5 },
     ["Cheapest"] = { money = 1, house = 1, yard = 1, bunker = 1, other = 1 },
+    ["All"] = { money = 1, house = 1, yard = 1, bunker = 1, other = 1 },
 }
 
 -- Scan purchase pads inside our own base
@@ -12168,6 +12445,7 @@ function Automation.WarTycoonAutoBuildScanPads(base)
         "spawner", "spawnpad", "spawn pad", "spawnpoint", "prompt", "seat",
         "collect", "collector", "atm", "cash to collect", "rebirth", "donat", "tip jar", "tips", "support", "giver",
         "attachments", "abrams",
+        "join the group", "join group", "group reward", "group pad", "group only", "group", "famas",
         "robux", "gamepass", "game pass", "premium", "daily", "reward", "spin", "wheel",
         "crate", "lucky", "offer", "bundle", "gift", "cash pack", "money pack",
         "cash shop", "robux shop", "gamepass shop", "premium shop", "donation shop",
@@ -12271,6 +12549,12 @@ function Automation.WarTycoonAutoBuildScanPads(base)
             if pa ~= pb then return pa < pb end
             return tostring(a.label or "") < tostring(b.label or "")
         end)
+        if Config.WarTycoonBuild.Priority == "All" then
+            for i = #units, 2, -1 do
+                local j = math.random(i)
+                units[i], units[j] = units[j], units[i]
+            end
+        end
         return units
     end
 
@@ -12472,6 +12756,7 @@ function Automation.WarTycoonAutoBuildScanPads(base)
                 local modelLow = (model and model ~= base) and string.lower(model.Name) or ""
                 local labelLow = string.lower(tostring(eval.label or ""))
                 local combined = nameLow .. " " .. modelLow .. " " .. labelLow
+                    .. " " .. string.lower(tostring(info.texts or ""))
                 local bad = has(combined, badHints)
                 local shield = ignoreShield and has(combined, shieldHints)
                 if bad or shield then
@@ -12544,6 +12829,12 @@ function Automation.WarTycoonAutoBuildScanPads(base)
         if pa ~= pb then return pa < pb end
         return tostring(a.label or a.part.Name) < tostring(b.label or b.part.Name)
     end)
+    if Config.WarTycoonBuild.Priority == "All" then
+        for i = #units, 2, -1 do
+            local j = math.random(i)
+            units[i], units[j] = units[j], units[i]
+        end
+    end
     return units
 end
 
@@ -12568,7 +12859,7 @@ function Automation.WarTycoonAutoBuildHover(part, base)
     if not part or not part.Parent or not part:IsDescendantOf(workspace) then return false, "pad is gone" end
     if base and not part:IsDescendantOf(base) then return false, "pad is not in your base" end
 
-    local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
+    local hover = tonumber(Config.WarTycoonBuild.Hover) or 2.5
     local topY = part.Position.Y + (part.Size.Y * 0.5)
     local targetPos = Vector3.new(part.Position.X, topY + hover, part.Position.Z)
     pcall(function() hum.PlatformStand = false end)
@@ -12600,8 +12891,10 @@ function Automation.WarTycoonAutoBuildHover(part, base)
 
     task.wait(tonumber(Config.WarTycoonBuild.Delay) or 0.35)
     if part.Parent then
+        -- [ v90 ] Land a bit higher above the pad. The old 0.15 studs clipped
+        -- the character into the plate and some touch purchases did not register.
         pcall(function()
-            hrp.CFrame = CFrame.new(Vector3.new(part.Position.X, topY + 0.15, part.Position.Z))
+            hrp.CFrame = CFrame.new(Vector3.new(part.Position.X, topY + 0.75, part.Position.Z))
         end)
     end
 
@@ -13035,7 +13328,7 @@ function Automation.WarTycoonAutoBuildTryPad(base, unit)
 
     local tag = string.format("'%s'%s", tostring(unit.label or unit.part.Name),
         unit.price and (" ($" .. tostring(math.floor(unit.price)) .. ")") or "")
-    local hover = tonumber(Config.WarTycoonBuild.Hover) or 1.5
+    local hover = tonumber(Config.WarTycoonBuild.Hover) or 2.5
     Automation.WarTycoonAutoBuildLog("TP above pad " .. tag .. " (+" .. tostring(hover) .. " studs)")
 
     local attempts = math.clamp(math.floor(tonumber(Config.WarTycoonBuild.Attempts) or 2), 1, 3)
@@ -19866,8 +20159,2105 @@ end)(Internal.Fortline)
 -- [ ULTIMATE MODULE DEFINITIONS ]
 
 -- COMBAT MODULES
+
+-- ============================================================================
+-- [ BLOXSTRIKE ENGINE INTEGRATION: Aimbot, SilentAim, Triggerbot, Ragebot, BunnyHop ]
+-- ============================================================================
+local osClock = os.clock
+local vector2New = Vector2.new
+local cframeLookAt = CFrame.lookAt
+local Players = game:GetService("Players")
+local Workspace = workspace
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local LocalPlayer = Players.LocalPlayer
+
+local xDTaraZ = setmetatable({}, {
+    __newindex = function(self, key, value)
+        rawset(self, key, type(value) == "function" and LPH_JIT(value) or value)
+    end,
+})
+
+xDTaraZ.Config = {
+    Discord = "https://discord.gg/pzVJV34AH8",
+    UpdateLog = {
+        { "2026-10-10", "Silent Aim and Ragebot hit again after the game update\nFixed the game crashing when you shoot\nFixed ESP Team Check and health\nAim and ESP now include bots\nSkin pictures, turning skins off restores the stock look\nAuto Rebuy works from round 1, No Flash/No Smoke/FOV restore when off" },
+        { "2026-10-03", "Cybrion UI is back\nBetter executor support\nImproved Combat & Movement" },
+    },
+    SaveFolder = "Cybrion",
+    StatusInterval = 1,
+    AimRenderPriority = Enum.RenderPriority.Camera.Value + 1,
+    RefireGap = 0.12,
+    TriggerRay = 2000,
+    SilentFocusTime = 1,
+    SeeThrough = { "Characters", "Debris", "ThirdPersonWeaponStash" },
+    EspCacheMax = 256,
+    SoundSelfRange = 6,
+    GhostSnap = 45,
+    LeadExtra = 0.02,
+    LeadMaxSpeed = 60,
+    SpreadMethods = { "getTrueSpread", "getSpreadForConfig", "getMovementSpreadForConfig", "getBaseSpreadForConfig", "getBaseSpread" },
+    SoundMaxMarks = 24,
+    SoundColor = Color3.fromRGB(255, 196, 64),
+    RedeemGap = 1.1,
+    RebuyGap = 0.25,
+    AlertTries = 20,
+    AlertGap = 0.5,
+    RequireTimeout = 5,
+    MaxFails = 5,
+    FailWindow = 10,
+    CombatToggles = { "Aimbot", "Triggerbot", "Ragebot", "AimbotShowFov", "SilentShowFov" },
+    ModuleFeatures = {
+        Net = { "AutoRebuy" },
+        Character = { "BunnyHop" },
+        Skins = { "SkinChanger" },
+    },
+    Codes = {
+        "1MGROUPMEMBERS", "MYFAULTYALL", "RIANOMINATED2026", "LORE", "DUST_II", "MICHAELSRETURN",
+        "FREEDOM", "HAPPYBDAYYUUTO", "GAMEBROKE318", "OHNEPIXEL", "NEBULA", "REACTORDELAY", "BUTTERFLYCASE", "TRADEUPS",
+    },
+    BoneParts = {
+        Head = { "Head" },
+        Torso = { "UpperTorso", "Torso", "HumanoidRootPart" },
+    },
+    BuyStates = { ["Buy Period"] = true, ["Warmup"] = true },
+    StickySlack = 1.5,
+    HopGap = 0.05,
+    HookSettle = 1,
+    SkinFile = "BloxStrike/skins.json",
+    SkinWears = { "Factory New", "Minimal Wear", "Field-Tested", "Well-Worn", "Battle-Scarred" },
+    SkinKinds = { Melee = "Knives", Glove = "Gloves", Grenade = "Grenades", C4 = "Gear", ["Zeus x27"] = "Gear" },
+    SkinOrder = { "Pistol", "SMG", "Rifle", "Sniper", "Heavy", "Shotgun", "Machine Gun", "Knives", "Gloves", "Grenades", "Gear" },
+    SkinRanks = { Forbidden = 9, Special = 8, Red = 7, Pink = 6, Purple = 5, Blue = 4, LightBlue = 3, Gray = 2, White = 1 },
+    SkinMainRows = 5,
+    SkinArms = { ["Left Arm"] = true, ["Right Arm"] = true },
+    GloveKey = "@Glove",
+    FovColors = {
+        Aimbot = Color3.fromRGB(232, 160, 76),
+        Silent = Color3.fromRGB(110, 170, 255),
+    },
+    EspFocusColor = Color3.fromRGB(255, 214, 64),
+    FovLayer = 50,
+}
+
+xDTaraZ.State = {
+    Alive = true,
+    Connections = {},
+    Halted = {},
+    Notices = {},
+    AimTarget = nil,
+    AimPart = nil,
+    RageTarget = nil,
+    RagePart = nil,
+    SilentTarget = nil,
+    Firing = false,
+    PressedAt = 0,
+    LastShot = 0,
+    Shots = 0,
+    Redirected = 0,
+    Bought = {},
+    LightSaved = nil,
+    FovSaved = nil,
+    ViewSaved = nil,
+    Hooks = {},
+    TriggerWarned = false,
+    HopAt = 0,
+    HopCrouched = false,
+    SpaceHeld = false,
+    FovBound = false,
+    FovBase = 0,
+}
+
+xDTaraZ.Options = {
+    Aimbot = false,
+    AimbotSmooth = 1,
+    AimbotBone = "Head",
+    AimbotPriority = "Crosshair",
+    AimbotFov = 150,
+    AimbotShowFov = false,
+    AimbotVisible = true,
+    AimbotSticky = true,
+    AimbotMaxDistance = 1500,
+    SilentAim = false,
+    SilentHitChance = 100,
+    SilentHeadChance = 100,
+    SilentPriority = "Crosshair",
+    SilentFov = 220,
+    SilentShowFov = false,
+    SilentVisible = true,
+    SilentMaxDistance = 2000,
+    SilentPredict = false,
+    Triggerbot = false,
+    TriggerDelay = 0,
+    TriggerHitChance = 100,
+    Ragebot = false,
+    RageVisible = true,
+    RageMaxDistance = 2000,
+    NoRecoil = false,
+    NoSpread = false,
+    Fullbright = false,
+    NoFlash = false,
+    NoSmoke = false,
+    SoundEsp = false,
+    SoundEspLife = 3,
+    EspMemory = 5,
+    CameraFov = false,
+    CameraFovValue = 100,
+    InfiniteJump = false,
+    BunnyHop = false,
+    BunnyCrouch = true,
+    SkinChanger = false,
+    AutoRebuy = false,
+    AntiAfk = false,
+}
+
+---Executor capability probes. The old UI library shipped these; AirFlow does not, so the script owns them now.
+---Every probe runs the API on a throwaway fixture, because some executors ship stubs that pass type() but do nothing.
+xDTaraZ.Compat = { Probes = {} }
+
+xDTaraZ.Compat.Api = {
+    HookFunction = hookfunction or replaceclosure,
+    RestoreFunction = restorefunction,
+    IsFunctionHooked = isfunctionhooked,
+    GetGc = getgc,
+    GetUpvalue = getupvalue or (debug and debug.getupvalue),
+}
+
+---Probes run inline (this __index cannot yield), so a probe that yields counts as unsupported.
+xDTaraZ.Compat.Caps = setmetatable({}, {
+    __index = function(caps, name)
+        local probe = xDTaraZ.Compat.Probes[name]
+        if not probe then return false end
+        local thread = coroutine.create(probe)
+        local ok, works = coroutine.resume(thread)
+        local has = ok and coroutine.status(thread) == "dead" and works == true
+        if coroutine.status(thread) == "suspended" then pcall(coroutine.close, thread) end
+        rawset(caps, name, has)
+        return has
+    end,
+})
+
+function xDTaraZ.Compat.Probes.HookFunction()
+    local hook = xDTaraZ.Compat.Api.HookFunction
+    if not hook then return false end
+    local function Target() return "plain" end
+    local original = hook(Target, function() return "hooked" end)
+    local works = Target() == "hooked" and type(original) == "function" and original() == "plain"
+    if type(original) == "function" then pcall(hook, Target, original) end
+    return works
+end
+
+function xDTaraZ.Compat.Probes.Gc()
+    local getGc = xDTaraZ.Compat.Api.GetGc
+    if not getGc then return false end
+    local function Marker() return "gc" end
+    for _, value in ipairs(getGc(false)) do
+        if value == Marker then return true end
+    end
+    return false
+end
+
+function xDTaraZ.Compat.Probes.Upvalues()
+    local getUpvalue = xDTaraZ.Compat.Api.GetUpvalue
+    if not getUpvalue then return false end
+    local marker = {}
+    local function Holder() return marker end
+    return getUpvalue(Holder, 1) == marker
+end
+
+---The FOV circles set these every frame; a shim that only knows Line would throw.
+function xDTaraZ.Compat.Probes.Drawing()
+    if type(Drawing) ~= "table" and type(Drawing) ~= "userdata" then return false end
+    local okNew, circle = pcall(Drawing.new, "Circle")
+    if not okNew or circle == nil then return false end
+    local ok = pcall(function()
+        circle.Thickness, circle.NumSides, circle.Filled = 1.5, 64, false
+        circle.Position, circle.Radius, circle.Visible = Vector2.new(-100, -100), 10, false
+    end)
+    pcall(circle.Remove or circle.Destroy, circle)
+    return ok
+end
+
+---@param caps string|string[]
+---@return boolean, string?  false + the first missing cap
+function xDTaraZ.Compat.Has(caps)
+    for _, name in ipairs(type(caps) == "table" and caps or { caps }) do
+        if not xDTaraZ.Compat.Caps[name] then return false, name end
+    end
+    return true
+end
+
+---Undoes a hook: the executor's restorefunction first, else `rehook`.
+function xDTaraZ.Compat.Unhook(target, rehook)
+    local api = xDTaraZ.Compat.Api
+    if target and api.RestoreFunction and pcall(api.RestoreFunction, target) then
+        if not api.IsFunctionHooked then return end
+        local ok, still = pcall(api.IsFunctionHooked, target)
+        if ok and not still then return end
+    end
+    rehook()
+end
+
+xDTaraZ.Caps = setmetatable({}, {
+    __index = function(_, name)
+        return xDTaraZ.Compat.Caps[name] == true
+    end,
+})
+
+xDTaraZ.Util = {}
+
+---@param detail any  extra context for the warn; the player only sees `text`
+function xDTaraZ.Util.Alert(text, detail)
+    warn("[BloxStrike] menu:", detail or text)
+    task.spawn(function()
+        for _ = 1, xDTaraZ.Config.AlertTries do
+            if pcall(StarterGui.SetCore, StarterGui, "SendNotification", { Title = "Cybrion", Text = text, Duration = 10 }) then return end
+            task.wait(xDTaraZ.Config.AlertGap)
+        end
+    end)
+end
+
+---@return table?  nil after the player was told on screen
+function xDTaraZ.Util.LoadLibrary()
+    local ran, loaded = pcall(LoadAirflow)
+    if ran and type(loaded) == "table" then return loaded end
+    xDTaraZ.Util.Alert("The menu failed to load on this executor: " .. tostring(loaded):match("^[^\n]*"), loaded)
+    return nil
+end
+
+function xDTaraZ.Util.Try(label, fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok then warn("[BloxStrike] " .. label .. ":", err) end
+    return ok
+end
+
+function xDTaraZ.Util.Copy(text)
+    local fn = setclipboard or toclipboard
+    if not fn then return false end
+    return pcall(fn, text)
+end
+
+---@return function?  original, nil when already hooked or the executor can't hook it
+function xDTaraZ.Util.Hook(key, fn, replacement)
+    if type(fn) ~= "function" or xDTaraZ.State.Hooks[key] or not xDTaraZ.Caps.HookFunction then return nil end
+    local ok, original = pcall(hookfunction, fn, replacement)
+    if not ok or type(original) ~= "function" then
+        warn("[BloxStrike] hook " .. key .. ":", ok and "executor returned no original" or original)
+        return nil
+    end
+    xDTaraZ.State.Hooks[key] = { Fn = fn, Original = original }
+    return original
+end
+
+function xDTaraZ.Util.UnhookAll()
+    for key, hook in pairs(xDTaraZ.State.Hooks) do
+        local ok, err = pcall(xDTaraZ.Compat.Unhook, hook.Fn, function() hookfunction(hook.Fn, hook.Original) end)
+        if not ok then warn("[BloxStrike] unhook " .. key .. ":", err) end
+    end
+    table.clear(xDTaraZ.State.Hooks)
+end
+
+function xDTaraZ.Util.Decode(raw)
+    if type(raw) ~= "string" then return nil end
+    local ok, decoded = pcall(HttpService.JSONDecode, HttpService, raw)
+    return ok and decoded or nil
+end
+
+function xDTaraZ:Connect(signal, handler)
+    local conn = signal:Connect(handler)
+    table.insert(self.State.Connections, conn)
+    return conn
+end
+
+xDTaraZ.GameLib = { Missing = {} }
+
+---@param parent Instance?     where it lives today
+---@param home string          parent name a moved copy must still have
+---@return Instance?           nil after a warning that names it
+function xDTaraZ.GameLib.Find(parent, name, class, home)
+    local found = parent and parent:FindFirstChild(name)
+    if found and found:IsA(class) then return found end
+    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+        if desc.Name == name and desc:IsA(class) and desc.Parent and desc.Parent.Name == home then return desc end
+    end
+    xDTaraZ.GameLib.Missing[name] = "Absent"
+    warn("[BloxStrike] " .. home .. "." .. name .. " not found, features that need it are blocked")
+    return nil
+end
+
+---@return any  module, or nil when this executor can't require it (never throws)
+function xDTaraZ.GameLib.Require(inst)
+    if not (inst and inst:IsA("ModuleScript")) then return nil end
+    local ok, mod = pcall(require, inst)
+    if ok then return mod end
+
+    local done, okAgain, again = false, false, nil
+    task.spawn(function()
+        pcall(setthreadidentity, 2)
+        local read, identity = pcall(getthreadidentity)
+        if read and identity == 2 then okAgain, again = pcall(require, inst) end
+        done = true
+    end)
+    local deadline = osClock() + xDTaraZ.Config.RequireTimeout
+    while not done and osClock() < deadline do task.wait() end
+    if okAgain then return again end
+    warn("[BloxStrike] require " .. inst.Name .. ":", mod)
+    return nil
+end
+
+do
+    local database = ReplicatedStorage:FindFirstChild("Database")
+    local security = database and database:FindFirstChild("Security")
+    local custom = database and database:FindFirstChild("Custom")
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    local find = xDTaraZ.GameLib.Find
+    xDTaraZ.GameLib.Net = xDTaraZ.GameLib.Require(find(security, "Remotes", "ModuleScript", "Security"))
+    xDTaraZ.GameLib.Character = xDTaraZ.GameLib.Require(find(controllers, "CharacterController", "ModuleScript", "Controllers"))
+    xDTaraZ.GameLib.Camera = xDTaraZ.GameLib.Require(find(controllers, "CameraController", "ModuleScript", "Controllers"))
+    xDTaraZ.GameLib.WeaponFolder = find(custom, "Weapons", "Folder", "Custom")
+    xDTaraZ.GameLib.Rarities = xDTaraZ.GameLib.Require(find(custom, "Rarities", "ModuleScript", "GameStats"))
+    local vfx = ReplicatedStorage:FindFirstChild("Components") and ReplicatedStorage.Components:FindFirstChild("VFXLibary", true)
+    xDTaraZ.GameLib.Smoke = xDTaraZ.GameLib.Require(find(vfx, "CreateVoxelSmoke", "ModuleScript", "VFXLibary"))
+    xDTaraZ.GameLib.Flash = xDTaraZ.GameLib.Require(find(vfx, "FlashEffect", "ModuleScript", "VFXLibary"))
+end
+
+xDTaraZ.Weapons = {}
+do
+    local folder = xDTaraZ.GameLib.WeaponFolder
+    for _, module in ipairs(folder and folder:GetChildren() or {}) do
+        local data = module:IsA("ModuleScript") and xDTaraZ.GameLib.Require(module)
+        if type(data) == "table" and data.FireRate then xDTaraZ.Weapons[module.Name] = data end
+    end
+end
+
+xDTaraZ.Player = {}
+
+function xDTaraZ.Player.Character()
+    local chars = Workspace:FindFirstChild("Characters")
+    return (chars and chars:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
+end
+
+function xDTaraZ.Player.Alive()
+    local char = xDTaraZ.Player.Character()
+    return char ~= nil and char.Parent ~= nil and tostring(LocalPlayer:GetAttribute("Dead")) ~= "true"
+end
+
+function xDTaraZ.Player.Humanoid()
+    local char = xDTaraZ.Player.Character()
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+---@return table?  the game's own local character state; nil outside a round
+function xDTaraZ.Player.Body()
+    local controller = xDTaraZ.GameLib.Character
+    if not controller then return nil end
+    local ok, body = pcall(controller.getCurrentCharacter)
+    return ok and body or nil
+end
+
+function xDTaraZ.Player.Equipped()
+    return xDTaraZ.Util.Decode(LocalPlayer:GetAttribute("CurrentEquipped"))
+end
+
+xDTaraZ.Target = { Motion = setmetatable({}, { __mode = "k" }) }
+
+local losParams = RaycastParams.new()
+losParams.FilterType = Enum.RaycastFilterType.Exclude
+local losFilter = table.create(3)
+local wallParams = RaycastParams.new()
+wallParams.FilterType = Enum.RaycastFilterType.Exclude
+
+function xDTaraZ.Target.Candidates()
+    local list = {}
+    local chars = Workspace:FindFirstChild("Characters")
+    if not chars then return list end
+    for _, model in ipairs(chars:GetChildren()) do
+        if model.Name ~= LocalPlayer.Name and model:IsA("Model") then list[#list + 1] = model end
+    end
+    return list
+end
+
+function xDTaraZ.Target.Owner(model)
+    return Players:FindFirstChild(model.Name)
+end
+
+---@return string?  team of a character: owner's Team attribute, else the team that wears this character model
+function xDTaraZ.Target.TeamOf(model)
+    local owner = model and xDTaraZ.Target.Owner(model)
+    local team = owner and owner:GetAttribute("Team")
+    if team then return team end
+    local look = model and model:GetAttribute("CharacterName")
+    if not look then return nil end
+    if look == Workspace:GetAttribute("CTCharacter") then return "Counter-Terrorists" end
+    if look == Workspace:GetAttribute("TCharacter") then return "Terrorists" end
+    return nil
+end
+
+function xDTaraZ.Target.MyTeam()
+    return LocalPlayer:GetAttribute("Team") or xDTaraZ.Target.TeamOf(xDTaraZ.Player.Character())
+end
+
+function xDTaraZ.Target.IsEnemy(model)
+    if tostring(model:GetAttribute("Dead")) == "true" then return false end
+    if not xDTaraZ.Target.Owner(model) and model:GetAttribute("Health") == nil then return false end
+    if xDTaraZ.Target.FreeForAll() then return true end
+    local mine = xDTaraZ.Target.MyTeam()
+    if mine == nil then return false end
+    return xDTaraZ.Target.TeamOf(model) ~= mine
+end
+
+---Samples every enemy's head each frame so shots can lead a moving target.
+function xDTaraZ.Target.Track()
+    local motion, now = xDTaraZ.Target.Motion, osClock()
+    for _, model in ipairs(xDTaraZ.Target.Candidates()) do
+        local head = model:FindFirstChild("Head")
+        if not head then continue end
+        local last = motion[head]
+        if last and now > last.Time then
+            local step = (head.Position - last.Pos) / (now - last.Time)
+            last.Vel = last.Vel and last.Vel:Lerp(step, 0.5) or step
+            last.Pos, last.Time = head.Position, now
+        else
+            motion[head] = { Pos = head.Position, Time = now, Vel = Vector3.zero }
+        end
+    end
+end
+
+---@return Vector3  where the part will be once the shot reaches the server
+function xDTaraZ.Target.Lead(part)
+    if not xDTaraZ.Options.SilentPredict then return part.Position end
+    local track = xDTaraZ.Target.Motion[part] or xDTaraZ.Target.Motion[part.Parent and part.Parent:FindFirstChild("Head")]
+    local vel = track and track.Vel or Vector3.zero
+    if vel.Magnitude > xDTaraZ.Config.LeadMaxSpeed then return part.Position end
+    local ok, ping = pcall(LocalPlayer.GetNetworkPing, LocalPlayer)
+    return part.Position + vel * ((ok and ping or 0.05) + xDTaraZ.Config.LeadExtra)
+end
+
+---@return boolean  true in Deathmatch, where the team picker is only cosmetic
+function xDTaraZ.Target.FreeForAll()
+    return tostring(Workspace:GetAttribute("Gamemode")):find("Deathmatch") ~= nil
+end
+
+function xDTaraZ.Target.Part(model, bone)
+    for _, name in ipairs(xDTaraZ.Config.BoneParts[bone] or xDTaraZ.Config.BoneParts.Head) do
+        local part = model:FindFirstChild(name)
+        if part and part:IsA("BasePart") then return part end
+    end
+    return model:FindFirstChild("HumanoidRootPart")
+end
+
+function xDTaraZ.Target.Visible(from, model, point)
+    local skip = { Workspace.CurrentCamera, model }
+    for _, name in ipairs(xDTaraZ.Config.SeeThrough) do
+        local folder = Workspace:FindFirstChild(name)
+        if folder then skip[#skip + 1] = folder end
+    end
+    wallParams.FilterDescendantsInstances = skip
+    return Workspace:Raycast(from, point - from, wallParams) == nil
+end
+
+---@param cfg table  { Bone, Fov?, Visible, MaxDistance, Priority }  Fov nil = whole map
+---@return Model?, BasePart?
+function xDTaraZ.Target.Pick(cfg)
+    local cam = Workspace.CurrentCamera
+    local origin = cam.CFrame.Position
+    local center = cam.ViewportSize / 2
+    local best, bestPart, bestScore
+
+    for _, model in ipairs(xDTaraZ.Target.Candidates()) do
+        if not xDTaraZ.Target.IsEnemy(model) then continue end
+        local part = xDTaraZ.Target.Part(model, cfg.Bone)
+        if not part then continue end
+        local dist = (part.Position - origin).Magnitude
+        if dist > cfg.MaxDistance then continue end
+
+        local screen, onScreen = cam:WorldToViewportPoint(part.Position)
+        local screenDist = (vector2New(screen.X, screen.Y) - center).Magnitude
+        if cfg.Fov and (not onScreen or screenDist > cfg.Fov) then continue end
+        if cfg.Visible and not xDTaraZ.Target.Visible(origin, model, part.Position) then continue end
+
+        local score = dist
+        if cfg.Priority == "Crosshair" then
+            score = onScreen and screenDist or 1e6 + dist
+        elseif cfg.Priority == "Health" then
+            score = (tonumber(model:GetAttribute("Health")) or 100) * 1e4 + dist
+        end
+        if not bestScore or score < bestScore then best, bestPart, bestScore = model, part, score end
+    end
+    return best, bestPart
+end
+
+---@return boolean  still a valid lock, with a looser fov
+function xDTaraZ.Target.StillValid(model, part, cfg)
+    if not (model and part and part.Parent and xDTaraZ.Target.IsEnemy(model)) then return false end
+    local cam = Workspace.CurrentCamera
+    local origin = cam.CFrame.Position
+    if (part.Position - origin).Magnitude > cfg.MaxDistance then return false end
+    if cfg.Visible and not xDTaraZ.Target.Visible(origin, model, part.Position) then return false end
+    if not cfg.Fov then return true end
+    local screen, onScreen = cam:WorldToViewportPoint(part.Position)
+    local center = cam.ViewportSize / 2
+    return onScreen and (vector2New(screen.X, screen.Y) - center).Magnitude <= cfg.Fov * xDTaraZ.Config.StickySlack
+end
+
+---@return Model?  enemy under the crosshair right now
+function xDTaraZ.Target.UnderCrosshair()
+    local cam = Workspace.CurrentCamera
+    losFilter[1], losFilter[2], losFilter[3] = xDTaraZ.Player.Character(), cam, nil
+    losParams.FilterDescendantsInstances = losFilter
+    local hit = Workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * xDTaraZ.Config.TriggerRay, losParams)
+    if not hit then return nil end
+    local chars = Workspace:FindFirstChild("Characters")
+    local model = hit.Instance
+    while model and model.Parent ~= chars do model = model.Parent end
+    if model and model:IsA("Model") and xDTaraZ.Target.IsEnemy(model) then return model end
+    return nil
+end
+
+local function roll(percent)
+    return percent >= 100 or math.random() * 100 < percent
+end
+
+xDTaraZ.Aimbot = {}
+
+function xDTaraZ.Aimbot.Config()
+    local o = xDTaraZ.Options
+    return { Bone = o.AimbotBone, Fov = o.AimbotFov, Visible = o.AimbotVisible, MaxDistance = o.AimbotMaxDistance, Priority = o.AimbotPriority }
+end
+
+function xDTaraZ.Aimbot.Step()
+    local state, o = xDTaraZ.State, xDTaraZ.Options
+    if not o.Aimbot then state.AimTarget, state.AimPart = nil, nil return end
+    local cfg = xDTaraZ.Aimbot.Config()
+    if o.AimbotSticky and xDTaraZ.Target.StillValid(state.AimTarget, state.AimPart, cfg) then return end
+    state.AimTarget, state.AimPart = xDTaraZ.Target.Pick(cfg)
+end
+
+---@param dt number  frame time from RenderStep
+function xDTaraZ.Aimbot.Lock(dt)
+    local o, state = xDTaraZ.Options, xDTaraZ.State
+    local part, smooth = nil, 1
+    if o.Ragebot and state.RagePart and state.RagePart.Parent then
+        part = state.RagePart
+    elseif o.Aimbot and state.AimPart and state.AimPart.Parent then
+        part, smooth = state.AimPart, math.max(o.AimbotSmooth, 1)
+    end
+    if not part then return end
+    local cam = Workspace.CurrentCamera
+    local origin = cam.CFrame.Position
+    local want = (part.Position - origin).Unit
+    local alpha = 1 - (1 - 1 / smooth) ^ ((dt or 1 / 60) * 60)
+    local look = smooth <= 1 and want or cam.CFrame.LookVector:Lerp(want, alpha).Unit
+    cam.CFrame = cframeLookAt(origin, origin + look)
+end
+
+xDTaraZ.Silent = {}
+
+---@param forced boolean  ragebot shot: always hits, no fov
+function xDTaraZ.Silent.Config(bone, forced)
+    local o = xDTaraZ.Options
+    if forced then return { Bone = bone, Visible = o.RageVisible, MaxDistance = o.RageMaxDistance, Priority = "Distance" } end
+    return { Bone = bone, Fov = o.SilentFov, Visible = o.SilentVisible, MaxDistance = o.SilentMaxDistance, Priority = o.SilentPriority }
+end
+
+---@return BasePart?  part this shot should go to, nil = shoot where you look
+function xDTaraZ.Silent.Aim()
+    local o, state = xDTaraZ.Options, xDTaraZ.State
+    state.SilentTarget = nil
+    if not (o.SilentAim or o.Ragebot) then return nil end
+    local forced = o.Ragebot
+    if not forced and not roll(o.SilentHitChance) then return nil end
+    local bone = (forced or roll(o.SilentHeadChance)) and "Head" or "Torso"
+    local target, part = xDTaraZ.Target.Pick(xDTaraZ.Silent.Config(bone, forced))
+    state.SilentTarget = target
+    return part
+end
+
+---The server checks bullets against where you really look, so each new bullet turns the camera to the target and the view goes back as the shot is sent, before anything is drawn.
+function xDTaraZ.Silent.InstallHook()
+    local gun = xDTaraZ.Guns.FindClass()
+    if gun then
+        local original
+        original = xDTaraZ.Util.Hook("Shoot", gun.shoot, function(...)
+            local state = xDTaraZ.State
+            state.LastShot = osClock()
+            state.Shots += 1
+            return original(...)
+        end)
+    end
+    local bullet = xDTaraZ.Guns.FindBullet()
+    if bullet and type(bullet.create) == "function" then
+        local create
+        create = xDTaraZ.Util.Hook("Bullet", bullet.create, function(...)
+            xDTaraZ.Silent.Flick()
+            return create(...)
+        end)
+    end
+    xDTaraZ.Guns.HookSpread()
+
+    local net = xDTaraZ.GameLib.Net
+    local packet = net and net.Inventory and net.Inventory.ShootWeapon
+    if not packet then return end
+    local send
+    send = xDTaraZ.Util.Hook("Send", packet.Send, function(...)
+        xDTaraZ.Silent.RestoreView()
+        return send(...)
+    end)
+end
+
+---Turns the camera onto the silent aim target for this bullet.
+function xDTaraZ.Silent.Flick()
+    local ok, part = pcall(xDTaraZ.Silent.Aim)
+    local cam, state = Workspace.CurrentCamera, xDTaraZ.State
+    if not (ok and part and cam) then return end
+    state.ViewSaved = state.ViewSaved or cam.CFrame
+    cam.CFrame = cframeLookAt(cam.CFrame.Position, xDTaraZ.Target.Lead(part))
+    state.Redirected += 1
+end
+
+---Puts your view back before the game's camera runs, so silent aim never moves what you see.
+function xDTaraZ.Silent.RestoreView()
+    local state, cam = xDTaraZ.State, Workspace.CurrentCamera
+    if not state.ViewSaved then return end
+    if cam then cam.CFrame = state.ViewSaved end
+    state.ViewSaved = nil
+end
+
+xDTaraZ.Trigger = {}
+
+function xDTaraZ.Trigger.Press(down)
+    if down and xDTaraZ.UI.MenuOpen() then return end
+    xDTaraZ.State.Firing = down
+    if down then xDTaraZ.State.PressedAt = osClock() end
+    local center = Workspace.CurrentCamera.ViewportSize / 2
+    pcall(VirtualInputManager.SendMouseButtonEvent, VirtualInputManager, center.X, center.Y, 0, down, game, 0)
+end
+
+---@param want boolean  holds auto guns and re-clicks semi-auto ones
+function xDTaraZ.Trigger.Fire(want)
+    local state, now = xDTaraZ.State, osClock()
+    if not want then
+        if state.Firing then xDTaraZ.Trigger.Press(false) end
+        return
+    end
+    if not state.Firing then
+        xDTaraZ.Trigger.Press(true)
+        return
+    end
+    local gap = xDTaraZ.Config.RefireGap
+    if now - state.PressedAt > gap and now - state.LastShot > gap then xDTaraZ.Trigger.Press(false) end
+end
+
+function xDTaraZ.Trigger.Wanted()
+    local o, state = xDTaraZ.Options, xDTaraZ.State
+    if not o.Triggerbot then return false end
+    local model = xDTaraZ.Target.UnderCrosshair()
+    if model ~= state.TriggerModel then
+        state.TriggerModel = model
+        state.TriggerSeen = model and osClock() or nil
+        state.TriggerRoll = model ~= nil and roll(o.TriggerHitChance)
+    end
+    if not model or not state.TriggerRoll then return false end
+    return osClock() - state.TriggerSeen >= o.TriggerDelay / 1000
+end
+
+xDTaraZ.Rage = {}
+
+function xDTaraZ.Rage.Step()
+    local state = xDTaraZ.State
+    if not xDTaraZ.Options.Ragebot then state.RageTarget, state.RagePart = nil, nil return false end
+    state.RageTarget, state.RagePart = xDTaraZ.Target.Pick(xDTaraZ.Silent.Config("Head", true))
+    return state.RageTarget ~= nil
+end
+
+xDTaraZ.Combat = { Circles = {} }
+
+---@return ScreenGui  made once; hidden gui first, then CoreGui, then PlayerGui
+function xDTaraZ.Combat.Screen()
+    local screen = xDTaraZ.Combat.Gui
+    if screen and screen.Parent then return screen end
+
+    screen = Instance.new("ScreenGui")
+    screen.Name = "CybrionFov"
+    screen.IgnoreGuiInset = true
+    screen.ResetOnSpawn = false
+    screen.DisplayOrder = xDTaraZ.Config.FovLayer
+
+    local function Mount(parent) screen.Parent = parent end
+    local okHui, hui = pcall(gethui)
+    local mounted = okHui and hui ~= nil and pcall(Mount, hui)
+    if not mounted then mounted = pcall(Mount, game:GetService("CoreGui")) end
+    if not mounted then Mount(LocalPlayer:FindFirstChildOfClass("PlayerGui")) end
+
+    xDTaraZ.Combat.Gui = screen
+    return screen
+end
+
+---@return table  { Drawing = circle }, or { Frame = ring } drawn with Gui when Drawing is missing
+function xDTaraZ.Combat.NewCircle(color)
+    if xDTaraZ.Caps.Drawing then
+        local circle = Drawing.new("Circle")
+        circle.Thickness, circle.NumSides, circle.Filled, circle.Color = 1.5, 64, false, color
+        return { Drawing = circle }
+    end
+    local frame = Instance.new("Frame")
+    frame.AnchorPoint = vector2New(0.5, 0.5)
+    frame.BackgroundTransparency = 1
+    local round = Instance.new("UICorner")
+    round.CornerRadius = UDim.new(1, 0)
+    round.Parent = frame
+    local edge = Instance.new("UIStroke")
+    edge.Thickness, edge.Color = 1.5, color
+    edge.Parent = frame
+    frame.Parent = xDTaraZ.Combat.Screen()
+    return { Frame = frame }
+end
+
+function xDTaraZ.Combat.Circle(key, show, radius)
+    local circle = xDTaraZ.Combat.Circles[key]
+    if not circle then
+        if not show then return end
+        circle = xDTaraZ.Combat.NewCircle(xDTaraZ.Config.FovColors[key])
+        xDTaraZ.Combat.Circles[key] = circle
+    end
+    local center = Workspace.CurrentCamera.ViewportSize / 2
+    local drawing, frame = circle.Drawing, circle.Frame
+    if drawing then
+        drawing.Visible, drawing.Position, drawing.Radius = show, center, radius
+        return
+    end
+    frame.Visible = show
+    frame.Position = UDim2.fromOffset(center.X, center.Y)
+    frame.Size = UDim2.fromOffset(radius * 2, radius * 2)
+end
+
+function xDTaraZ.Combat.Step()
+    local o, state = xDTaraZ.Options, xDTaraZ.State
+    xDTaraZ.Combat.Circle("Aimbot", o.AimbotShowFov, o.AimbotFov)
+    xDTaraZ.Combat.Circle("Silent", o.SilentShowFov, o.SilentFov)
+    if not xDTaraZ.Player.Alive() then
+        state.AimTarget, state.AimPart, state.RageTarget, state.RagePart, state.SilentTarget = nil, nil, nil, nil, nil
+        xDTaraZ.Trigger.Fire(false)
+        return
+    end
+    if o.SilentAim or o.Ragebot then xDTaraZ.Target.Track() end
+    xDTaraZ.Aimbot.Step()
+    local rage = xDTaraZ.Rage.Step()
+    xDTaraZ.Trigger.Fire(rage or xDTaraZ.Trigger.Wanted())
+end
+
+function xDTaraZ.Combat.Rest()
+    local state = xDTaraZ.State
+    state.AimTarget, state.AimPart, state.RageTarget, state.RagePart, state.SilentTarget = nil, nil, nil, nil, nil
+    xDTaraZ.Trigger.Fire(false)
+    for key in pairs(xDTaraZ.Combat.Circles) do
+        xDTaraZ.Combat.Circle(key, false, 0)
+    end
+end
+
+function xDTaraZ.Combat.Start()
+    RunService:BindToRenderStep("xDTaraZView", Enum.RenderPriority.First.Value, xDTaraZ.Silent.RestoreView)
+    RunService:BindToRenderStep("xDTaraZAim", xDTaraZ.Config.AimRenderPriority, xDTaraZ.Aimbot.Lock)
+    xDTaraZ:Connect(RunService.Heartbeat, function()
+        local ok, err = pcall(xDTaraZ.Combat.Step)
+        if ok then
+            xDTaraZ.Faults.Clear("Combat")
+        else
+            xDTaraZ.Faults.Report("Combat", err, xDTaraZ.Config.CombatToggles, xDTaraZ.Combat.Rest)
+        end
+    end)
+end
+
+function xDTaraZ.Combat.Unload()
+    xDTaraZ.Trigger.Fire(false)
+    pcall(RunService.UnbindFromRenderStep, RunService, "xDTaraZAim")
+    pcall(RunService.UnbindFromRenderStep, RunService, "xDTaraZView")
+    for key, circle in pairs(xDTaraZ.Combat.Circles) do
+        xDTaraZ.Combat.Circles[key] = nil
+        if circle.Frame then
+            circle.Frame:Destroy()
+        else
+            pcall(function() circle.Drawing:Remove() end)
+        end
+    end
+    if xDTaraZ.Combat.Gui then
+        xDTaraZ.Combat.Gui:Destroy()
+        xDTaraZ.Combat.Gui = nil
+    end
+end
+
+xDTaraZ.Guns = { Signature = nil, Warned = false }
+
+function xDTaraZ.Guns.HookKick()
+    local cam = xDTaraZ.GameLib.Camera
+    if not cam then return end
+    local kick, aim, rotation
+    kick = xDTaraZ.Util.Hook("Kick", cam.weaponKick, function(...)
+        if xDTaraZ.Options.NoRecoil then return end
+        return kick(...)
+    end)
+    aim = xDTaraZ.Util.Hook("Recoil", cam.setWeaponRecoil, function(...)
+        if xDTaraZ.Options.NoRecoil then return end
+        return aim(...)
+    end)
+    rotation = xDTaraZ.Util.Hook("KickRotation", cam.getWeaponKickRotation, function(...)
+        if xDTaraZ.Options.NoRecoil then return Vector3.zero end
+        return rotation(...)
+    end)
+end
+
+---@return boolean  true while any scope or zoom is up
+function xDTaraZ.Guns.Scoped()
+    if LocalPlayer:GetAttribute("IsSniperScoped") == true then return true end
+    local cam = xDTaraZ.GameLib.Camera
+    local getter = cam and cam.getTargetFOV
+    if type(getter) ~= "function" then return false end
+    local ok, target = pcall(getter)
+    if not ok or type(target) ~= "number" then return false end
+
+    local state = xDTaraZ.State
+    if target > state.FovBase then state.FovBase = target end
+    return target < state.FovBase
+end
+
+function xDTaraZ.Guns.StepFov()
+    local camera, state = Workspace.CurrentCamera, xDTaraZ.State
+    if not camera then return end
+    if not xDTaraZ.Options.CameraFov then
+        if state.FovSaved then camera.FieldOfView, state.FovSaved = state.FovSaved, nil end
+        state.FovBase = 0
+        return
+    end
+    if xDTaraZ.Guns.Scoped() then return end
+    state.FovSaved = state.FovSaved or camera.FieldOfView
+    camera.FieldOfView = xDTaraZ.Options.CameraFovValue
+end
+
+function xDTaraZ.Guns.BindFov()
+    local state = xDTaraZ.State
+    if state.FovBound then return end
+    state.FovBound = true
+    RunService:BindToRenderStep("xDTaraZFov", Enum.RenderPriority.Camera.Value + 3, xDTaraZ.Guns.StepFov)
+end
+
+function xDTaraZ.Guns.UnbindFov()
+    local state, camera = xDTaraZ.State, Workspace.CurrentCamera
+    if state.FovSaved and camera then camera.FieldOfView, state.FovSaved = state.FovSaved, nil end
+    state.FovBound = false
+    pcall(RunService.UnbindFromRenderStep, RunService, "xDTaraZFov")
+end
+
+function xDTaraZ.Guns.FindClass()
+    if not xDTaraZ.Caps.Gc or not xDTaraZ.Caps.HookFunction then return nil end
+    for _, entry in ipairs(getgc(true)) do
+        if type(entry) == "table" and rawget(entry, "getSpread") and rawget(entry, "shoot") and rawget(entry, "setupRecoil") then return entry end
+    end
+    return nil
+end
+
+---@return table?  the bullet class that rolls spread for every shot
+function xDTaraZ.Guns.FindBullet()
+    if not xDTaraZ.Caps.Gc or not xDTaraZ.Caps.HookFunction then return nil end
+    for _, entry in ipairs(getgc(true)) do
+        if type(entry) == "table" and rawget(entry, "getTrueSpread") and rawget(entry, "getSpreadForConfig") then return entry end
+    end
+    return nil
+end
+
+---Every spread roll the bullet class makes returns 0 with No Spread, and while a silent aim shot is being built.
+function xDTaraZ.Guns.HookSpread()
+    local bullet = xDTaraZ.Guns.FindBullet()
+    if not bullet then return end
+    for _, method in ipairs(xDTaraZ.Config.SpreadMethods) do
+        if type(bullet[method]) ~= "function" then continue end
+        local original
+        original = xDTaraZ.Util.Hook("Spread:" .. method, bullet[method], function(...)
+            local value = original(...)
+            if type(value) == "number" and (xDTaraZ.Options.NoSpread or xDTaraZ.State.ViewSaved) then return 0 end
+            return value
+        end)
+    end
+end
+
+xDTaraZ.Esp = { Count = 0, Decoded = {}, CacheSize = 0, Ghosts = {}, Folder = nil }
+
+---@return table?  JSON attribute decoded once per distinct raw string
+function xDTaraZ.Esp.Attr(owner, key)
+    local raw = owner:GetAttribute(key)
+    if type(raw) ~= "string" then return nil end
+    local esp = xDTaraZ.Esp
+    if esp.Decoded[raw] == nil then
+        esp.CacheSize += 1
+        if esp.CacheSize > xDTaraZ.Config.EspCacheMax then table.clear(esp.Decoded) esp.CacheSize = 1 end
+        esp.Decoded[raw] = xDTaraZ.Util.Decode(raw) or false
+    end
+    return esp.Decoded[raw] or nil
+end
+
+---@return string  " C4 Kit Helmet Scoped" style tags, "" when none
+function xDTaraZ.Esp.Flags(owner)
+    if not owner then return "" end
+    local flags = {}
+    local armor = xDTaraZ.Esp.Attr(owner, "Armor")
+    local bomb = xDTaraZ.Esp.Attr(owner, "Slot5")
+    if bomb and bomb.Weapon == "C4" then flags[#flags + 1] = "C4" end
+    if owner:GetAttribute("HasDefuseKit") == true then table.insert(flags, "Kit") end
+    if armor and type(armor.Type) == "string" and armor.Type:find("Helmet") then flags[#flags + 1] = "Helmet" end
+    if owner:GetAttribute("IsSniperScoped") == true then flags[#flags + 1] = "Scoped" end
+    return #flags > 0 and " " .. table.concat(flags, " ") or ""
+end
+
+---@return Model?  whatever aimbot, silent aim or ragebot is locked on
+function xDTaraZ.Esp.Focus()
+    local state = xDTaraZ.State
+    local silent = osClock() - state.LastShot < xDTaraZ.Config.SilentFocusTime and state.SilentTarget or nil
+    return state.AimTarget or silent or state.RageTarget
+end
+
+---@return table  one lasting stand-in per player, so a body that blinks in and out of view never rebuilds its box
+function xDTaraZ.Esp.Ghost(name)
+    local esp = xDTaraZ.Esp
+    local ghost = esp.Ghosts[name]
+    if ghost and ghost.Model.Parent then return ghost end
+    if not (esp.Folder and esp.Folder.Parent) then
+        esp.Folder = Instance.new("Folder")
+        esp.Folder.Name = "xDTaraZGhosts"
+        esp.Folder.Parent = Workspace.CurrentCamera
+    end
+    local model = Instance.new("Model")
+    model.Name = name
+    local root = Instance.new("Part")
+    root.Name, root.Size, root.Transparency = "HumanoidRootPart", Vector3.new(2, 2, 1), 1
+    root.Anchored, root.CanCollide, root.CanQuery, root.CanTouch = true, false, false, false
+    root.Parent = model
+    model.PrimaryPart = root
+    model.Parent = esp.Folder
+    ghost = { Model = model, Root = root, Seen = 0, Heard = 0 }
+    esp.Ghosts[name] = ghost
+    return ghost
+end
+
+---@return table  xDTaraZ.Visuals row for one player, live body or last known spot
+function xDTaraZ.Esp.Row(ghost, model, owner, mine, focus)
+    local equipped = owner and xDTaraZ.Esp.Attr(owner, "CurrentEquipped")
+    local label = owner and owner.DisplayName or ghost.Model.Name
+    if equipped and equipped.Name then label = label .. " [" .. equipped.Name .. "]" end
+    local live = model and model:FindFirstChild("HumanoidRootPart")
+    if not live then label = label .. " ?" end
+    return {
+        Model = ghost.Model,
+        Root = live or ghost.Root,
+        Adornee = model or false,
+        Name = label .. xDTaraZ.Esp.Flags(owner),
+        Health = tonumber(owner and owner:GetAttribute("Health")) or tonumber(model and model:GetAttribute("Health")) or 100,
+        MaxHealth = tonumber(model and model:GetAttribute("MaxHealth")) or 100,
+        Friendly = ghost.Friendly,
+        Color = model ~= nil and model == focus and xDTaraZ.Config.EspFocusColor or nil,
+    }
+end
+
+---@return table[]  targets in the shape xDTaraZ.Visuals expects; bots count as enemies
+function xDTaraZ.Esp.Targets()
+    local esp, now = xDTaraZ.Esp, osClock()
+    local list = {}
+    local mine = xDTaraZ.Target.MyTeam()
+    local ffa = xDTaraZ.Target.FreeForAll()
+    local focus = xDTaraZ.Esp.Focus()
+    pcall(xDTaraZ.Sound.Install)
+    local live = {}
+    for _, model in ipairs(xDTaraZ.Target.Candidates()) do
+        if xDTaraZ.Esp.IsDead(model, xDTaraZ.Target.Owner(model)) then
+            xDTaraZ.Esp.Forget(model.Name)
+            continue
+        end
+        local hrp = model:FindFirstChild("HumanoidRootPart")
+        if not hrp then continue end
+        local ghost = esp.Ghost(model.Name)
+        ghost.Root.CFrame, ghost.Seen = hrp.CFrame, now
+        ghost.Friendly = not ffa and mine ~= nil and xDTaraZ.Target.TeamOf(model) == mine
+        live[model.Name] = true
+        list[#list + 1] = esp.Row(ghost, model, xDTaraZ.Target.Owner(model), mine, focus)
+    end
+    local memory = xDTaraZ.Options.EspMemory
+    for name, ghost in pairs(esp.Ghosts) do
+        if live[name] then continue end
+        local owner = Players:FindFirstChild(name)
+        if owner and xDTaraZ.Esp.IsDead(nil, owner) then
+            xDTaraZ.Esp.Forget(name)
+            continue
+        end
+        local gone = not ghost.Model.Parent or (not owner and now - ghost.Seen > memory)
+        if gone or now - math.max(ghost.Seen, ghost.Heard) > memory then
+            if gone and not owner then
+                ghost.Model:Destroy()
+                esp.Ghosts[name] = nil
+            end
+            continue
+        end
+        list[#list + 1] = esp.Row(ghost, nil, owner, mine, focus)
+    end
+    esp.Count = #list
+    return list
+end
+
+---@return boolean  true once a player or bot is dead, by body flag or 0 health
+function xDTaraZ.Esp.IsDead(model, owner)
+    if model and (tostring(model:GetAttribute("Dead")) == "true" or (tonumber(model:GetAttribute("Health")) or 1) <= 0) then return true end
+    if owner and (owner:GetAttribute("Dead") == true or (tonumber(owner:GetAttribute("Health")) or 1) <= 0) then return true end
+    return false
+end
+
+---Drops the remembered spot of someone who died, so no box stays where they fell.
+function xDTaraZ.Esp.Forget(name)
+    local ghost = xDTaraZ.Esp.Ghosts[name]
+    if ghost then ghost.Seen, ghost.Heard = 0, 0 end
+end
+
+---Moves the stand-in of the hidden enemy closest to a footstep or shot, so hidden players keep a box.
+function xDTaraZ.Esp.Hear(pos, weapon)
+    local esp, now = xDTaraZ.Esp, osClock()
+    local best, bestDist = nil, xDTaraZ.Config.GhostSnap
+    for name, ghost in pairs(esp.Ghosts) do
+        if ghost.Friendly or now - ghost.Seen < 0.3 then continue end
+        local owner = Players:FindFirstChild(name)
+        local equipped = owner and xDTaraZ.Esp.Attr(owner, "CurrentEquipped")
+        if weapon and equipped and equipped.Name and equipped.Name ~= weapon then continue end
+        local dist = (ghost.Root.Position - pos).Magnitude
+        if dist < bestDist then best, bestDist = ghost, dist end
+    end
+    if not best then return end
+    best.Root.CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
+    best.Heard = now
+end
+
+xDTaraZ.Sound = { Marks = {}, Entry = nil, Original = nil, Folder = nil }
+
+---Hooks into the game's own sound listener: every footstep and shot of every player arrives with its position, even behind walls.
+function xDTaraZ.Sound.Install()
+    local sound = xDTaraZ.Sound
+    if sound.Entry then return true end
+    local net = xDTaraZ.GameLib.Net
+    local packet = net and net.Sound and net.Sound.ReplicateSound
+    if not (packet and xDTaraZ.Caps.Upvalues) then return false end
+    local ok, listeners = pcall(function() return getupvalues(packet.Listen)[1] end)
+    if not ok or type(listeners) ~= "table" then return false end
+    for _, entry in ipairs(listeners) do
+        if type(entry) == "table" and type(entry.callback) == "function" then
+            sound.Entry, sound.Original = entry, entry.callback
+            entry.callback = function(info, ...)
+                xDTaraZ.Util.Try("sound esp", xDTaraZ.Sound.Heard, info)
+                return sound.Original(info, ...)
+            end
+            return true
+        end
+    end
+    return false
+end
+
+function xDTaraZ.Sound.Uninstall()
+    local sound = xDTaraZ.Sound
+    if sound.Entry then sound.Entry.callback = sound.Original end
+    sound.Entry, sound.Original = nil, nil
+    for _, mark in ipairs(sound.Marks) do mark.Gui:Destroy() end
+    table.clear(sound.Marks)
+end
+
+---@return boolean  true when the sound came from you or a teammate you can see
+function xDTaraZ.Sound.Friendly(pos)
+    local range = xDTaraZ.Config.SoundSelfRange
+    local me = xDTaraZ.Player.Character()
+    if me and (me:GetPivot().Position - pos).Magnitude < range then return true end
+    if xDTaraZ.Target.FreeForAll() then return false end
+    for _, model in ipairs(xDTaraZ.Target.Candidates()) do
+        if not xDTaraZ.Target.IsEnemy(model) and (model:GetPivot().Position - pos).Magnitude < range then return true end
+    end
+    return false
+end
+
+function xDTaraZ.Sound.Heard(info)
+    if type(info) ~= "table" or typeof(info.Position) ~= "Vector3" then return end
+    local floor = info.Class == "FloorSounds"
+    if not floor and info.Name ~= "Shoot" then return end
+    if xDTaraZ.Sound.Friendly(info.Position) then return end
+    xDTaraZ.Esp.Hear(info.Position, not floor and tostring(info.Class) or nil)
+    if xDTaraZ.Options.SoundEsp then xDTaraZ.Sound.Mark(info.Position, floor and "Steps" or tostring(info.Class)) end
+end
+
+function xDTaraZ.Sound.Mark(pos, label)
+    local sound = xDTaraZ.Sound
+    if not (sound.Folder and sound.Folder.Parent) then
+        sound.Folder = Instance.new("Folder")
+        sound.Folder.Name = "xDTaraZSounds"
+        sound.Folder.Parent = Workspace.Terrain
+    end
+    if #sound.Marks >= xDTaraZ.Config.SoundMaxMarks then
+        table.remove(sound.Marks, 1).Gui:Destroy()
+    end
+    local holder = Instance.new("Attachment")
+    holder.WorldPosition = pos
+    local gui = Instance.new("BillboardGui")
+    gui.AlwaysOnTop, gui.Size, gui.LightInfluence = true, UDim2.fromOffset(120, 34), 0
+    local text = Instance.new("TextLabel")
+    text.BackgroundTransparency, text.Size, text.Font, text.TextSize = 1, UDim2.fromScale(1, 1), Enum.Font.GothamBold, 13
+    text.TextColor3, text.TextStrokeTransparency = xDTaraZ.Config.SoundColor, 0.3
+    text.Parent = gui
+    gui.Parent = holder
+    holder.Parent = Workspace.Terrain
+    gui.Adornee = holder
+    sound.Marks[#sound.Marks + 1] = { Gui = holder, Text = text, Label = label, Born = osClock() }
+end
+
+---Fades markers and keeps their distance fresh.
+function xDTaraZ.Sound.Step()
+    local sound, life = xDTaraZ.Sound, xDTaraZ.Options.SoundEspLife
+    local cam = Workspace.CurrentCamera
+    for index = #sound.Marks, 1, -1 do
+        local mark = sound.Marks[index]
+        local age = osClock() - mark.Born
+        if age > life or not xDTaraZ.Options.SoundEsp then
+            mark.Gui:Destroy()
+            table.remove(sound.Marks, index)
+        else
+            local dist = cam and math.floor((mark.Gui.WorldPosition - cam.CFrame.Position).Magnitude) or 0
+            mark.Text.Text = ("%s\n%dm"):format(mark.Label, dist)
+            mark.Text.TextTransparency = age / life * 0.8
+        end
+    end
+end
+
+xDTaraZ.World = {}
+
+function xDTaraZ.World.Step()
+    local opts, state = xDTaraZ.Options, xDTaraZ.State
+    if opts.Fullbright then
+        state.LightSaved = state.LightSaved or { Lighting.Brightness, Lighting.ClockTime, Lighting.FogEnd, Lighting.GlobalShadows, Lighting.Ambient }
+        Lighting.Brightness, Lighting.ClockTime, Lighting.FogEnd, Lighting.GlobalShadows = 2, 14, 1e6, false
+        Lighting.Ambient = Color3.fromRGB(178, 178, 178)
+    elseif state.LightSaved then
+        Lighting.Brightness, Lighting.ClockTime, Lighting.FogEnd, Lighting.GlobalShadows, Lighting.Ambient = table.unpack(state.LightSaved)
+        state.LightSaved = nil
+    end
+end
+
+---No Flash and No Smoke stop the game from making the effect at all, and clear what is already on screen.
+function xDTaraZ.World.HookEffects()
+    local smoke, flash = xDTaraZ.GameLib.Smoke, xDTaraZ.GameLib.Flash
+    if smoke and type(smoke.Create) == "function" then
+        local create
+        create = xDTaraZ.Util.Hook("Smoke", smoke.Create, function(...)
+            if xDTaraZ.Options.NoSmoke then return nil end
+            return create(...)
+        end)
+    end
+    if flash and type(flash.Flash) == "function" then
+        local blind
+        blind = xDTaraZ.Util.Hook("Flash", flash.Flash, function(...)
+            if xDTaraZ.Options.NoFlash then return nil end
+            return blind(...)
+        end)
+    end
+    if xDTaraZ.Options.NoSmoke and smoke then pcall(smoke.DestroyAll) end
+    if xDTaraZ.Options.NoFlash and flash then pcall(flash.CancelFlash) end
+end
+
+function xDTaraZ.World.OnIdled()
+    if not xDTaraZ.Options.AntiAfk then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(vector2New())
+    end)
+end
+
+function xDTaraZ.World.OnJump()
+    if not xDTaraZ.Options.InfiniteJump or xDTaraZ.Player.Body() then return end
+    local hum = xDTaraZ.Player.Humanoid()
+    if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end
+
+function xDTaraZ.World.SetCrouch(down)
+    local state = xDTaraZ.State
+    if state.HopCrouched == down then return end
+    state.HopCrouched = down
+    local controller = xDTaraZ.GameLib.Character
+    if not controller then return end
+    if not down and UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then return end
+    controller.crouch(down)
+end
+
+function xDTaraZ.World.OnSpace(input, down, processed)
+    if input.KeyCode ~= Enum.KeyCode.Space then return end
+    if down and UserInputService:GetFocusedTextBox() then return end
+    xDTaraZ.State.SpaceHeld = down
+end
+
+function xDTaraZ.World.Hop()
+    local opts, state = xDTaraZ.Options, xDTaraZ.State
+    local body = opts.BunnyHop and state.SpaceHeld and xDTaraZ.Player.Alive() and xDTaraZ.Player.Body()
+    if not body or UserInputService:GetFocusedTextBox() then
+        xDTaraZ.World.SetCrouch(false)
+        return
+    end
+    local controller = xDTaraZ.GameLib.Character
+    local grounded = body.OnGround == true
+    xDTaraZ.World.SetCrouch(opts.BunnyCrouch and not grounded)
+    controller.jump(false)
+    if not grounded or osClock() - state.HopAt < xDTaraZ.Config.HopGap then return end
+    state.HopAt = osClock()
+    controller.jump()
+end
+
+function xDTaraZ.World.HopStep()
+    local ok, err = pcall(xDTaraZ.World.Hop)
+    if ok then
+        xDTaraZ.Faults.Clear("Bunny Hop")
+    else
+        xDTaraZ.Faults.Report("Bunny Hop", err, { "BunnyHop" }, xDTaraZ.World.Hop)
+    end
+end
+
+function xDTaraZ.World.Rejoin()
+    pcall(TeleportService.TeleportToPlaceInstance, TeleportService, game.PlaceId, game.JobId, LocalPlayer)
+end
+
+function xDTaraZ.World.ServerHop()
+    pcall(TeleportService.Teleport, TeleportService, game.PlaceId, LocalPlayer)
+end
+
+xDTaraZ.Skins = { Map = {}, Applied = setmetatable({}, { __mode = "k" }), Catalog = nil, Rarity = {}, Images = {}, Colors = {}, Originals = setmetatable({}, { __mode = "k" }) }
+
+function xDTaraZ.Skins.Folder()
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    return assets and assets:FindFirstChild("Skins")
+end
+
+---@return string?  category name, nil = not a weapon look
+function xDTaraZ.Skins.CategoryOf(name, kind)
+    local mapped = xDTaraZ.Config.SkinKinds[kind]
+    if mapped then return mapped end
+    if kind ~= "Weapon" then return nil end
+    local gun = xDTaraZ.Weapons[name]
+    return gun and gun.Type or "Other"
+end
+
+function xDTaraZ.Skins.Build()
+    local skins = xDTaraZ.Skins
+    local folder = skins.Folder()
+    local listing = xDTaraZ.Util.Decode(ReplicatedStorage:GetAttribute("AvaiableSkins")) or {}
+    local ranks = xDTaraZ.Config.SkinRanks
+    local catalog = {}
+    for name, entries in pairs(listing) do
+        if type(entries) ~= "table" or not (folder and folder:FindFirstChild(name)) then continue end
+        local _, first = next(entries)
+        local category = skins.CategoryOf(name, type(first) == "table" and first.type)
+        if not category then continue end
+        catalog[category] = catalog[category] or {}
+        table.insert(catalog[category], name)
+        skins.Rarity[name], skins.Images[name], skins.Colors[name] = {}, {}, {}
+        for skin, entry in pairs(entries) do
+            if type(entry) ~= "table" then continue end
+            skins.Rarity[name][skin] = ranks[entry.rarity] or 0
+            local look = type(entry.wearImages) == "table" and entry.wearImages[1]
+            skins.Images[name][skin] = look and look.assetId
+            local rarity = xDTaraZ.GameLib.Rarities and xDTaraZ.GameLib.Rarities[entry.rarity]
+            skins.Colors[name][skin] = type(rarity) == "table" and rarity.Color or nil
+        end
+    end
+    for _, names in pairs(catalog) do table.sort(names) end
+    skins.Catalog = catalog
+end
+
+---@return string[]  categories in display order
+function xDTaraZ.Skins.Categories()
+    if not xDTaraZ.Skins.Catalog then xDTaraZ.Skins.Build() end
+    local list, seen = {}, {}
+    for _, category in ipairs(xDTaraZ.Config.SkinOrder) do
+        if xDTaraZ.Skins.Catalog[category] then list[#list + 1] = category seen[category] = true end
+    end
+    for category in pairs(xDTaraZ.Skins.Catalog) do
+        if not seen[category] then list[#list + 1] = category end
+    end
+    if #list == 0 then list[1] = "-" end
+    return list
+end
+
+function xDTaraZ.Skins.Items(category)
+    if not xDTaraZ.Skins.Catalog then xDTaraZ.Skins.Build() end
+    local names = xDTaraZ.Skins.Catalog[category or ""]
+    return (names and #names > 0) and names or { "-" }
+end
+
+---@return string[]  rarest first
+function xDTaraZ.Skins.List(weapon)
+    local folder = xDTaraZ.Skins.Folder()
+    local holder = folder and folder:FindFirstChild(weapon or "")
+    if not holder then return { "-" } end
+    local ranks = xDTaraZ.Skins.Rarity[weapon] or {}
+    local names = {}
+    for _, child in ipairs(holder:GetChildren()) do names[#names + 1] = child.Name end
+    table.sort(names, function(a, b)
+        local ra, rb = ranks[a] or 0, ranks[b] or 0
+        if ra ~= rb then return ra > rb end
+        return a < b
+    end)
+    return #names > 0 and names or { "-" }
+end
+
+---@param view string  "Camera" or "Character"
+---@return Folder?     best wear available
+function xDTaraZ.Skins.Source(weapon, skin, view)
+    local folder = xDTaraZ.Skins.Folder()
+    local paint = folder and folder:FindFirstChild(weapon) and folder[weapon]:FindFirstChild(skin)
+    local side = paint and paint:FindFirstChild(view)
+    if not side then return nil end
+    for _, wear in ipairs(xDTaraZ.Config.SkinWears) do
+        if side:FindFirstChild(wear) then return side[wear] end
+    end
+    return side:FindFirstChildOfClass("Folder")
+end
+
+function xDTaraZ.Skins.Paint(model, weapon, skin, view)
+    local source = xDTaraZ.Skins.Source(weapon, skin, view)
+    if not source then return false end
+    local whole = source:FindFirstChild("SurfaceAppearance")
+    local arms = xDTaraZ.Config.SkinArms
+    for _, part in ipairs(model:GetDescendants()) do
+        if not part:IsA("BasePart") then continue end
+        local old = part:FindFirstChildOfClass("SurfaceAppearance")
+        local look = source:FindFirstChild(part.Name)
+        if not look and whole and old and not arms[part.Name] then look = whole end
+        if not look then continue end
+        local originals = xDTaraZ.Skins.Originals
+        if originals[part] == nil then originals[part] = old and old:Clone() or false end
+        if old then old:Destroy() end
+        look:Clone().Parent = part
+    end
+    return true
+end
+
+---Puts back the look each part had before we painted it.
+function xDTaraZ.Skins.Reset(model)
+    local originals = xDTaraZ.Skins.Originals
+    for _, part in ipairs(model:GetDescendants()) do
+        local saved = part:IsA("BasePart") and originals[part]
+        if saved == nil then continue end
+        local current = part:FindFirstChildOfClass("SurfaceAppearance")
+        if current then current:Destroy() end
+        if saved then saved:Clone().Parent = part end
+        originals[part] = nil
+    end
+end
+
+function xDTaraZ.Skins.WeaponOf(model)
+    local folder = xDTaraZ.Skins.Folder()
+    if folder and folder:FindFirstChild(model.Name) then return model.Name end
+    local equipped = xDTaraZ.Player.Equipped()
+    return equipped and (equipped.Weapon or equipped.Name)
+end
+
+function xDTaraZ.Skins.Models()
+    local list = {}
+    for _, child in ipairs(Workspace.CurrentCamera:GetChildren()) do
+        if child:IsA("Model") then list[#list + 1] = { child, "Camera" } end
+    end
+    local char = xDTaraZ.Player.Character()
+    local folder = xDTaraZ.Skins.Folder()
+    if char and folder then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Model") and folder:FindFirstChild(child.Name) then list[#list + 1] = { child, "Character" } end
+        end
+    end
+    return list
+end
+
+function xDTaraZ.Skins.Step()
+    local skins = xDTaraZ.Skins
+    local on = xDTaraZ.Options.SkinChanger
+    local glove = on and skins.Map[xDTaraZ.Config.GloveKey]
+    local gloveSkin = glove and skins.Map[glove]
+    for _, entry in ipairs(skins.Models()) do
+        local model, view = entry[1], entry[2]
+        local weapon = skins.WeaponOf(model)
+        local skin = on and weapon and skins.Map[weapon] or nil
+        local key = (skin or gloveSkin) and (tostring(weapon) .. "|" .. tostring(skin) .. "|" .. tostring(gloveSkin)) or nil
+        if skins.Applied[model] == key then continue end
+        if skins.Applied[model] then skins.Reset(model) end
+        if skin then skins.Paint(model, weapon, skin, view) end
+        if gloveSkin and view == "Camera" then skins.Paint(model, glove, gloveSkin, view) end
+        skins.Applied[model] = key
+    end
+end
+
+function xDTaraZ.Skins.Set(weapon, skin, quiet)
+    if not weapon or weapon == "-" or not skin or skin == "-" then return false end
+    local map, gloveKey = xDTaraZ.Skins.Map, xDTaraZ.Config.GloveKey
+    local isGlove = xDTaraZ.Skins.Catalog and table.find(xDTaraZ.Skins.Catalog.Gloves or {}, weapon)
+    if skin == "Default" then
+        if map[weapon] == nil then return false end
+        map[weapon] = nil
+        if map[gloveKey] == weapon then map[gloveKey] = nil end
+    else
+        if map[weapon] == skin then return false end
+        map[weapon] = skin
+        if isGlove then map[gloveKey] = weapon end
+    end
+    if not quiet then xDTaraZ.Skins.Save() end
+    return true
+end
+
+---@param pick fun(list: string[]): string  chooses one skin per item
+---@return number  items changed
+function xDTaraZ.Skins.SetAll(pick)
+    local count = 0
+    for _, category in ipairs(xDTaraZ.Skins.Categories()) do
+        if category == "Gloves" then continue end
+        for _, weapon in ipairs(xDTaraZ.Skins.Items(category)) do
+            xDTaraZ.Skins.Set(weapon, pick(xDTaraZ.Skins.List(weapon)), true)
+            count += 1
+        end
+    end
+    xDTaraZ.Skins.Save()
+    return count
+end
+
+function xDTaraZ.Skins.Save()
+    if type(writefile) ~= "function" then return end
+    local ok, err = pcall(function()
+        if type(isfolder) == "function" and not isfolder(xDTaraZ.Config.SaveFolder) then makefolder(xDTaraZ.Config.SaveFolder) end
+        writefile(xDTaraZ.Config.SkinFile, HttpService:JSONEncode(xDTaraZ.Skins.Map))
+    end)
+    if not ok then warn("[BloxStrike] skins save:", err) end
+end
+
+function xDTaraZ.Skins.Load()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
+    local ok, raw = pcall(function()
+        if isfile(xDTaraZ.Config.SkinFile) then
+            return readfile(xDTaraZ.Config.SkinFile)
+        elseif isfile("BloxStrike/skins.json") then
+            return readfile("BloxStrike/skins.json")
+        end
+    end)
+    local map = ok and xDTaraZ.Util.Decode(raw)
+    if type(map) == "table" then xDTaraZ.Skins.Map = map end
+end
+
+xDTaraZ.Economy = {}
+
+function xDTaraZ.Economy.RedeemAll()
+    local net = xDTaraZ.GameLib.Net
+    local packet = net and net.Dashboard and net.Dashboard.RedeemCode
+    if not packet or xDTaraZ.State.Redeeming then return 0 end
+    xDTaraZ.State.Redeeming = true
+    local sent = 0
+    for _, code in ipairs(xDTaraZ.Config.Codes) do
+        if pcall(packet.Send, code) then sent += 1 end
+        task.wait(xDTaraZ.Config.RedeemGap)
+    end
+    xDTaraZ.State.Redeeming = false
+    return sent
+end
+
+function xDTaraZ.Economy.HookBuys()
+    local net = xDTaraZ.GameLib.Net
+    local packet = net and net.Inventory and net.Inventory.BuyMenuPurchase
+    if not packet then return end
+    local original
+    original = xDTaraZ.Util.Hook("Buy", packet.Send, function(payload, ...)
+        if type(payload) == "table" and payload.Name and not xDTaraZ.State.Replaying then
+            local list = xDTaraZ.State.Bought
+            for index, entry in ipairs(list) do
+                if entry.Name == payload.Name then table.remove(list, index) break end
+            end
+            list[#list + 1] = { Equipment = payload.Equipment, Path = payload.Path, Name = payload.Name }
+        end
+        return original(payload, ...)
+    end)
+end
+
+function xDTaraZ.Economy.Rebuy()
+    local net = xDTaraZ.GameLib.Net
+    local packet = net and net.Inventory and net.Inventory.BuyMenuPurchase
+    if not packet or #xDTaraZ.State.Bought == 0 or xDTaraZ.State.Replaying then return 0 end
+    xDTaraZ.State.Replaying = true
+    local sent = 0
+    for _, entry in ipairs(xDTaraZ.State.Bought) do
+        if pcall(packet.Send, { Equipment = entry.Equipment, Path = entry.Path, Name = entry.Name }) then sent += 1 end
+        task.wait(xDTaraZ.Config.RebuyGap)
+    end
+    xDTaraZ.State.Replaying = false
+    return sent
+end
+
+---Buys once each time the game enters a buy phase, so warmup and round 1 each get their own rebuy.
+function xDTaraZ.Economy.Step()
+    local state = xDTaraZ.State
+    local phase = Workspace:GetAttribute("GameState")
+    local entered = xDTaraZ.Config.BuyStates[phase] and phase ~= state.LastPhase
+    state.LastPhase = phase
+    if not entered then state.RebuyPending = state.RebuyPending and xDTaraZ.Config.BuyStates[phase] return end
+    state.RebuyPending = true
+end
+
+function xDTaraZ.Economy.Tick()
+    local state = xDTaraZ.State
+    xDTaraZ.Economy.Step()
+    if not (xDTaraZ.Options.AutoRebuy and state.RebuyPending and xDTaraZ.Player.Alive()) then return end
+    state.RebuyPending = false
+    task.spawn(xDTaraZ.Economy.Rebuy)
+end
+
+function xDTaraZ.Economy.BoughtText()
+    local names = {}
+    for _, entry in ipairs(xDTaraZ.State.Bought) do names[#names + 1] = entry.Name end
+    return #names > 0 and table.concat(names, ", ") or "-"
+end
+
+xDTaraZ.Spectators = {}
+
+function xDTaraZ.Spectators.Text()
+    local count = tonumber(LocalPlayer:GetAttribute("Spectators")) or 0
+    if count == 0 then return "None" end
+    local names = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and tostring(player:GetAttribute("IsSpectating")) == "true" and tostring(player:GetAttribute("Dead")) == "true" then
+            names[#names + 1] = player.DisplayName
+        end
+    end
+    return count .. " watching" .. (#names > 0 and (" (dead: " .. table.concat(names, ", ") .. ")") or "")
+end
+
+xDTaraZ.Faults = { Streaks = {} }
+
+function xDTaraZ.Faults.Clear(name)
+    xDTaraZ.Faults.Streaks[name] = nil
+end
+
+function xDTaraZ.Faults.AnyOn(toggles)
+    for _, key in ipairs(toggles) do
+        if xDTaraZ.Options[key] then return true end
+    end
+    return false
+end
+
+---@param restore function?  the feature's own off path
+function xDTaraZ.Faults.Halt(name, err, toggles, restore)
+    warn("[BloxStrike] " .. name .. " stopped:", err)
+    for _, key in ipairs(toggles) do
+        xDTaraZ.Options[key] = false
+    end
+    if restore then xDTaraZ.Util.Try(name .. " restore", restore) end
+    local halted = xDTaraZ.State.Halted
+    halted[#halted + 1] = { name, tostring(err):match("^[^\n]*"), toggles }
+end
+
+---@param toggles string[]   turned off once the feature keeps failing; empty = keeps running, warns once per streak
+---@param restore function?  run once when the feature is stopped
+---@return boolean           true while the feature is stopped
+function xDTaraZ.Faults.Report(name, err, toggles, restore)
+    local now, streaks = osClock(), xDTaraZ.Faults.Streaks
+    local streak = streaks[name]
+    if not streak or (streak.Halted and xDTaraZ.Faults.AnyOn(toggles)) then
+        streak = { Count = 0, First = now, Warned = false, Halted = false }
+        streaks[name] = streak
+    end
+    streak.Count += 1
+    if streak.Warned then return streak.Halted end
+    if streak.Count < xDTaraZ.Config.MaxFails or now - streak.First < xDTaraZ.Config.FailWindow then return false end
+
+    streak.Warned = true
+    if #toggles == 0 then
+        warn("[BloxStrike] " .. name .. " keeps failing:", err)
+        return false
+    end
+    streak.Halted = true
+    xDTaraZ.Faults.Halt(name, err, toggles, restore)
+    return true
+end
+
+xDTaraZ.Scheduler = { Jobs = {} }
+
+---@param toggles string[]   options the job serves; switched off if it keeps failing
+---@param restore function?  the job's off path, run once if it gets stopped
+function xDTaraZ.Scheduler.Every(name, interval, fn, toggles, restore)
+    xDTaraZ.Scheduler.Jobs[name] = { Interval = interval, Fn = fn, Next = 0, Toggles = toggles, Restore = restore }
+end
+
+---@return boolean  a halted job runs again once one of its toggles is back on
+function xDTaraZ.Scheduler.Resume(name, job)
+    if not xDTaraZ.Faults.AnyOn(job.Toggles) then return false end
+    job.Halted = false
+    xDTaraZ.Faults.Clear(name)
+    return true
+end
+
+function xDTaraZ.Scheduler.Boot()
+    xDTaraZ:Connect(RunService.Heartbeat, function()
+        local now = osClock()
+        for name, job in pairs(xDTaraZ.Scheduler.Jobs) do
+            if now < job.Next then continue end
+            job.Next = now + job.Interval
+            if job.Halted and not xDTaraZ.Scheduler.Resume(name, job) then continue end
+
+            local ok, err = pcall(job.Fn)
+            if ok then
+                xDTaraZ.Faults.Clear(name)
+            else
+                job.Halted = xDTaraZ.Faults.Report(name, err, job.Toggles, job.Restore)
+            end
+        end
+    end)
+end
+
+---Player ESP drawn with plain GuiObjects (no Drawing API needed). The old UI library had this built in;
+---AirFlow has no ESP, so it lives in the script now. Targets come from xDTaraZ.Esp.Targets.
+xDTaraZ.Visuals = {
+    Settings = {
+        Enabled = false,
+        Box = true,
+        BoxStyle = "Full",
+        BoxFill = false,
+        Name = true,
+        Health = true,
+        HealthText = false,
+        Distance = true,
+        Tracer = false,
+        TracerOrigin = "Bottom",
+        HeadDot = false,
+        Chams = false,
+        Arrows = false,
+        Radar = false,
+        RadarRange = 250,
+        RadarSize = 180,
+        TeamCheck = true,
+        MaxDistance = 2000,
+        TextSize = 13,
+        EnemyColor = Color3.fromRGB(232, 88, 76),
+        FriendColor = Color3.fromRGB(96, 196, 120),
+    },
+    Entries = {},
+    Targets = {},
+    LastScan = 0,
+    ScanInterval = 0.2,
+    Radar = { Dots = {} },
+}
+
+function xDTaraZ.Visuals.New(class, props)
+    local object = Instance.new(class)
+    local parent = props.Parent
+    props.Parent = nil
+    for key, value in pairs(props) do object[key] = value end
+    if parent then object.Parent = parent end
+    return object
+end
+
+function xDTaraZ.Visuals.EnsureGui()
+    local visuals = xDTaraZ.Visuals
+    if visuals.Gui and visuals.Gui.Parent then return visuals.Gui end
+    local screen = visuals.New("ScreenGui", { Name = "CybrionVisuals", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 5, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+    local function Mount(parent) screen.Parent = parent end
+    local okHui, hui = pcall(gethui)
+    local mounted = okHui and hui ~= nil and pcall(Mount, hui)
+    if not mounted then mounted = pcall(Mount, game:GetService("CoreGui")) end
+    if not mounted then Mount(LocalPlayer:FindFirstChildOfClass("PlayerGui")) end
+    visuals.Gui = screen
+    return screen
+end
+
+function xDTaraZ.Visuals.Label(parent, alignY)
+    return xDTaraZ.Visuals.New("TextLabel", {
+        BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(0.5, alignY),
+        Size = UDim2.fromOffset(200, 16),
+        Font = Enum.Font.GothamBold,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextStrokeTransparency = 0.35,
+        Visible = false,
+        Parent = parent,
+    })
+end
+
+---@return table  reusable GUI pieces for one ESP target
+function xDTaraZ.Visuals.BuildEntry(parent)
+    local new = xDTaraZ.Visuals.New
+    local entry = {}
+    entry.Box = new("Frame", { BackgroundTransparency = 1, Visible = false, Parent = parent })
+    entry.BoxStroke = new("UIStroke", { Thickness = 1.5, Parent = entry.Box })
+    entry.BoxOutline = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(-1, -1), Size = UDim2.new(1, 2, 1, 2), Parent = entry.Box })
+    new("UIStroke", { Thickness = 1, Color = Color3.new(0, 0, 0), Transparency = 0.3, Parent = entry.BoxOutline })
+    entry.Corners = {}
+    for index = 1, 8 do
+        entry.Corners[index] = new("Frame", { BorderSizePixel = 0, Visible = false, Parent = parent })
+    end
+    entry.HealthBack = new("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.35, BorderSizePixel = 0, Visible = false, Parent = parent })
+    entry.HealthFill = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), BorderSizePixel = 0, Parent = entry.HealthBack })
+    entry.HealthText = xDTaraZ.Visuals.Label(parent, 0.5)
+    entry.Name = xDTaraZ.Visuals.Label(parent, 1)
+    entry.Distance = xDTaraZ.Visuals.Label(parent, 0)
+    entry.Tracer = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, BackgroundColor3 = Color3.new(1, 1, 1), Visible = false, Parent = parent })
+    entry.Dot = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(6, 6), BorderSizePixel = 0, Visible = false, Parent = parent })
+    new("UICorner", { CornerRadius = UDim.new(1, 0), Parent = entry.Dot })
+    entry.Arrow = xDTaraZ.Visuals.Label(parent, 0.5)
+    entry.Arrow.Text = "▲"
+    entry.Arrow.Size = UDim2.fromOffset(20, 20)
+    return entry
+end
+
+function xDTaraZ.Visuals.HideEntry(entry)
+    entry.Box.Visible = false
+    for _, corner in ipairs(entry.Corners) do corner.Visible = false end
+    entry.HealthBack.Visible, entry.HealthText.Visible = false, false
+    entry.Name.Visible, entry.Distance.Visible = false, false
+    entry.Tracer.Visible, entry.Dot.Visible, entry.Arrow.Visible = false, false, false
+    if entry.Highlight then entry.Highlight.Enabled = false end
+end
+
+function xDTaraZ.Visuals.DestroyEntry(entry)
+    for _, key in ipairs({ "Box", "HealthBack", "HealthText", "Name", "Distance", "Tracer", "Dot", "Arrow", "Highlight" }) do
+        if entry[key] then pcall(entry[key].Destroy, entry[key]) end
+    end
+    for _, corner in ipairs(entry.Corners) do pcall(corner.Destroy, corner) end
+end
+
+function xDTaraZ.Visuals.SetLine(line, from, to, thickness)
+    local delta = to - from
+    line.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+    line.Size = UDim2.fromOffset(delta.Magnitude, thickness)
+    line.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+    line.Visible = true
+end
+
+---Places the 2D box, bars and labels from a screen rect.
+function xDTaraZ.Visuals.Layout(entry, x, y, w, h, info, color, origin)
+    local settings = xDTaraZ.Visuals.Settings
+    local full = settings.Box and settings.BoxStyle ~= "Corner"
+    entry.Box.Visible = full
+    if full then
+        entry.Box.Position, entry.Box.Size = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h)
+        entry.BoxStroke.Color = color
+        entry.Box.BackgroundTransparency = settings.BoxFill and 0.82 or 1
+        entry.Box.BackgroundColor3 = color
+    end
+
+    local corner = settings.Box and settings.BoxStyle == "Corner"
+    local cw, ch = math.max(w / 4, 3), math.max(h / 5, 3)
+    local spots = {
+        { x, y, cw, 2 }, { x, y, 2, ch }, { x + w - cw, y, cw, 2 }, { x + w - 2, y, 2, ch },
+        { x, y + h - 2, cw, 2 }, { x, y + h - ch, 2, ch }, { x + w - cw, y + h - 2, cw, 2 }, { x + w - 2, y + h - ch, 2, ch },
+    }
+    for index, piece in ipairs(entry.Corners) do
+        piece.Visible = corner
+        if corner then
+            local spot = spots[index]
+            piece.Position, piece.Size, piece.BackgroundColor3 = UDim2.fromOffset(spot[1], spot[2]), UDim2.fromOffset(spot[3], spot[4]), color
+        end
+    end
+
+    local ratio = math.clamp((info.Health or 0) / math.max(info.MaxHealth or 100, 1), 0, 1)
+    entry.HealthBack.Visible = settings.Health
+    if settings.Health then
+        entry.HealthBack.Position, entry.HealthBack.Size = UDim2.fromOffset(x - 6, y), UDim2.fromOffset(3, h)
+        entry.HealthFill.Size = UDim2.fromScale(1, ratio)
+        entry.HealthFill.BackgroundColor3 = Color3.fromRGB(232, 88, 76):Lerp(Color3.fromRGB(96, 214, 110), ratio)
+    end
+    entry.HealthText.Visible = settings.HealthText
+    if settings.HealthText then
+        local hp = math.floor(info.Health or 0)
+        if entry.LastHp ~= hp then
+            entry.LastHp = hp
+            entry.HealthText.Text = tostring(hp)
+        end
+        entry.HealthText.TextSize = settings.TextSize - 2
+        entry.HealthText.Position = UDim2.fromOffset(x - 20, y + h * (1 - ratio))
+    end
+
+    entry.Name.Visible = settings.Name
+    if settings.Name then
+        local name = info.Name or ""
+        if entry.LastName ~= name then
+            entry.LastName = name
+            entry.Name.Text = name
+        end
+        entry.Name.TextSize, entry.Name.TextColor3 = settings.TextSize, color
+        entry.Name.Position = UDim2.fromOffset(x + w / 2, y - 2)
+    end
+    entry.Distance.Visible = settings.Distance and info.Distance ~= nil
+    if entry.Distance.Visible then
+        local distance = math.floor(info.Distance)
+        if entry.LastDist ~= distance then
+            entry.LastDist = distance
+            entry.Distance.Text = distance .. "m"
+        end
+        entry.Distance.TextSize = settings.TextSize - 1
+        entry.Distance.Position = UDim2.fromOffset(x + w / 2, y + h + 2)
+    end
+
+    entry.Dot.Visible = settings.HeadDot
+    if settings.HeadDot then
+        entry.Dot.Position, entry.Dot.BackgroundColor3 = UDim2.fromOffset(x + w / 2, y + h * 0.1), color
+    end
+
+    if settings.Tracer and origin then
+        entry.Tracer.BackgroundColor3 = color
+        xDTaraZ.Visuals.SetLine(entry.Tracer, origin, Vector2.new(x + w / 2, y + h), 1.5)
+    else
+        entry.Tracer.Visible = false
+    end
+end
+
+function xDTaraZ.Visuals.TracerOrigin(viewport)
+    local mode = xDTaraZ.Visuals.Settings.TracerOrigin
+    if mode == "Center" then return viewport / 2 end
+    if mode == "Mouse" then return UserInputService:GetMouseLocation() end
+    return Vector2.new(viewport.X / 2, viewport.Y)
+end
+
+function xDTaraZ.Visuals.Chams(entry, model, color, on)
+    if not on then
+        if entry.Highlight then entry.Highlight.Enabled = false end
+        return
+    end
+    if not entry.Highlight then
+        entry.Highlight = xDTaraZ.Visuals.New("Highlight", { DepthMode = Enum.HighlightDepthMode.AlwaysOnTop, FillTransparency = 0.55, OutlineTransparency = 0, Parent = xDTaraZ.Visuals.EnsureGui() })
+    end
+    entry.Highlight.Adornee = model
+    entry.Highlight.FillColor, entry.Highlight.OutlineColor = color, color
+    entry.Highlight.Enabled = true
+end
+
+function xDTaraZ.Visuals.Arrow(entry, screen, viewport, color)
+    local center = viewport / 2
+    local dir = Vector2.new(screen.X, screen.Y) - center
+    if screen.Z < 0 then dir = -dir end
+    if dir.Magnitude < 1 then return end
+    local unit = dir.Unit
+    local radius = math.min(viewport.X, viewport.Y) / 2 - 40
+    local pos = center + unit * radius
+    entry.Arrow.Position = UDim2.fromOffset(pos.X, pos.Y)
+    entry.Arrow.Rotation = math.deg(math.atan2(unit.Y, unit.X)) + 90
+    entry.Arrow.TextColor3 = color
+    entry.Arrow.TextSize = 18
+    entry.Arrow.Visible = true
+end
+
+function xDTaraZ.Visuals.Scan()
+    local visuals = xDTaraZ.Visuals
+    local now = osClock()
+    if now - visuals.LastScan < visuals.ScanInterval then return end
+    visuals.LastScan = now
+    local ok, list = pcall(xDTaraZ.Esp.Targets)
+    visuals.Targets = ok and type(list) == "table" and list or {}
+end
+
+function xDTaraZ.Visuals.Render()
+    local visuals = xDTaraZ.Visuals
+    local settings = visuals.Settings
+    if not settings.Enabled then return end
+    visuals.Scan()
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local gui = visuals.EnsureGui()
+    local viewport = cam.ViewportSize
+    local origin = visuals.TracerOrigin(viewport)
+    local camPos = cam.CFrame.Position
+    local seen = {}
+
+    for _, info in ipairs(visuals.Targets) do
+        local model = info.Model
+        if typeof(model) ~= "Instance" or not model.Parent then continue end
+        if settings.TeamCheck and info.Friendly then continue end
+        local root = info.Root or model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+        if not root then continue end
+        local distance = (root.Position - camPos).Magnitude
+        if distance > settings.MaxDistance then continue end
+
+        seen[model] = true
+        local entry = visuals.Entries[model]
+        if not entry then
+            entry = visuals.BuildEntry(gui)
+            visuals.Entries[model] = entry
+        end
+        local color = info.Color or (info.Friendly and settings.FriendColor or settings.EnemyColor)
+        visuals.Chams(entry, info.Adornee or model, color, settings.Chams and (info.Adornee ~= false))
+
+        local top, onTop = cam:WorldToViewportPoint(root.Position + Vector3.new(0, 3, 0))
+        local bottom, onBottom = cam:WorldToViewportPoint(root.Position - Vector3.new(0, 3.5, 0))
+        if not (onTop and onBottom) then
+            visuals.HideEntry(entry)
+            if settings.Chams and entry.Highlight and info.Adornee ~= false then entry.Highlight.Enabled = true end
+            if settings.Arrows then visuals.Arrow(entry, cam:WorldToViewportPoint(root.Position), viewport, color) end
+            continue
+        end
+        entry.Arrow.Visible = false
+        local h = math.max(bottom.Y - top.Y, 4)
+        local w = h * 0.55
+        info.Distance = distance
+        visuals.Layout(entry, top.X - w / 2, top.Y, w, h, info, color, origin)
+    end
+
+    for model, entry in pairs(visuals.Entries) do
+        if not seen[model] then
+            if model.Parent then
+                visuals.HideEntry(entry)
+            else
+                visuals.DestroyEntry(entry)
+                visuals.Entries[model] = nil
+            end
+        end
+    end
+end
+
+function xDTaraZ.Visuals.ClearAll()
+    local visuals = xDTaraZ.Visuals
+    for model, entry in pairs(visuals.Entries) do
+        visuals.DestroyEntry(entry)
+        visuals.Entries[model] = nil
+    end
+end
+
+---Circular minimap centred on you, turned with the camera. Drag it to move it.
+function xDTaraZ.Visuals.RadarBuild()
+    local visuals = xDTaraZ.Visuals
+    local radar = visuals.Radar
+    if radar.Frame and radar.Frame.Parent then return radar end
+    local new = visuals.New
+    local frame = new("Frame", { Name = "Radar", Position = UDim2.fromOffset(24, 180), BackgroundColor3 = Color3.fromRGB(16, 16, 22), BackgroundTransparency = 0.25, Active = true, Visible = false, Parent = visuals.EnsureGui() })
+    new("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = frame })
+    new("UIStroke", { Thickness = 2, Color = Color3.fromRGB(232, 160, 76), Transparency = 0.2, Parent = frame })
+    for _, horizontal in ipairs({ true, false }) do
+        new("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+            Size = horizontal and UDim2.new(1, -12, 0, 1) or UDim2.new(0, 1, 1, -12),
+            BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.8, BorderSizePixel = 0, Parent = frame,
+        })
+    end
+    local ring = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Parent = frame })
+    new("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = ring })
+    new("UIStroke", { Thickness = 1, Color = Color3.new(1, 1, 1), Transparency = 0.75, Parent = ring })
+    new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(16, 16), BackgroundTransparency = 1, Text = "▲", TextSize = 14, Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1), ZIndex = 3, Parent = frame })
+
+    local dragStart, startPos
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragStart, startPos = input.Position, frame.Position
+            local release
+            release = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragStart = nil
+                    release:Disconnect()
+                end
+            end)
+        end
+    end)
+    xDTaraZ:Connect(UserInputService.InputChanged, function(input)
+        if not dragStart or not frame.Parent then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            frame.Position = startPos + UDim2.fromOffset(delta.X, delta.Y)
+        end
+    end)
+    radar.Frame = frame
+    return radar
+end
+
+function xDTaraZ.Visuals.RadarDot(index)
+    local radar = xDTaraZ.Visuals.Radar
+    local dot = radar.Dots[index]
+    if not dot then
+        dot = xDTaraZ.Visuals.New("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(7, 7), BorderSizePixel = 0, ZIndex = 2, Parent = radar.Frame })
+        xDTaraZ.Visuals.New("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = dot })
+        radar.Dots[index] = dot
+    end
+    return dot
+end
+
+function xDTaraZ.Visuals.RadarRender()
+    local visuals = xDTaraZ.Visuals
+    local settings, radar = visuals.Settings, visuals.Radar
+    if not settings.Radar then
+        if radar.Frame then radar.Frame.Visible = false end
+        return
+    end
+    visuals.RadarBuild()
+    visuals.Scan()
+    local cam = Workspace.CurrentCamera
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local size = settings.RadarSize
+    radar.Frame.Size = UDim2.fromOffset(size, size)
+    radar.Frame.Visible = cam ~= nil and root ~= nil
+    if not radar.Frame.Visible then return end
+
+    local look = cam.CFrame.LookVector * Vector3.new(1, 0, 1)
+    look = look.Magnitude > 0 and look.Unit or Vector3.new(0, 0, -1)
+    local right = Vector3.new(-look.Z, 0, look.X)
+    local radius = size / 2 - 6
+    local used = 0
+    for _, info in ipairs(visuals.Targets) do
+        local model = info.Model
+        local part = info.Root or (typeof(model) == "Instance" and (model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart))
+        if not part or (settings.TeamCheck and info.Friendly) then continue end
+        local rel = part.Position - root.Position
+        local offset = Vector2.new(rel:Dot(right), -rel:Dot(look)) / settings.RadarRange * radius
+        local outside = offset.Magnitude > radius
+        if outside then offset = offset.Unit * radius end
+        used += 1
+        local dot = visuals.RadarDot(used)
+        dot.Position = UDim2.new(0.5, offset.X, 0.5, offset.Y)
+        dot.BackgroundColor3 = info.Color or (info.Friendly and settings.FriendColor or settings.EnemyColor)
+        dot.BackgroundTransparency = outside and 0.55 or 0
+        dot.Visible = true
+    end
+    for index = used + 1, #radar.Dots do radar.Dots[index].Visible = false end
+end
+
+function xDTaraZ.Visuals.Step()
+    local visuals = xDTaraZ.Visuals
+    local ok, err = pcall(visuals.Render)
+    if not ok then warn("[BloxStrike] esp:", err) end
+    ok, err = pcall(visuals.RadarRender)
+    if not ok then warn("[BloxStrike] radar:", err) end
+end
+
+function xDTaraZ.Visuals:Set(key, value)
+    self.Settings[key] = value
+    if key == "Enabled" and not value then xDTaraZ.Visuals.ClearAll() end
+end
+
+function xDTaraZ.Visuals:Get(key)
+    return self.Settings[key]
+end
+
+function xDTaraZ.Visuals.Destroy()
+    local visuals = xDTaraZ.Visuals
+    visuals.ClearAll()
+    if visuals.Gui then pcall(visuals.Gui.Destroy, visuals.Gui) end
+    visuals.Gui = nil
+    visuals.Radar = { Dots = {} }
+end
+
+-- Start BloxStrike Engine Services
+pcall(function()
+    xDTaraZ.Combat.Start()
+    xDTaraZ.Guns.BindFov()
+    xDTaraZ.Guns.HookKick()
+    xDTaraZ.Guns.HookSpread()
+    xDTaraZ:Connect(UserInputService.InputBegan, function(input, gpe)
+        if not gpe then xDTaraZ.World.OnSpace(input, true, gpe) end
+    end)
+    xDTaraZ:Connect(UserInputService.InputEnded, function(input, gpe)
+        if not gpe then xDTaraZ.World.OnSpace(input, false, gpe) end
+    end)
+    xDTaraZ:Connect(RunService.Heartbeat, xDTaraZ.World.HopStep)
+end)
+
 createModule("Aimbot", "Cube Smart Aimbot & Pull logic", "Legit", Config.Combat.Memesense.Enabled, function(v)
-    Config.Combat.Memesense.Enabled = v
+    Config.Combat.Memesense.Enabled = v; pcall(function() xDTaraZ.Options.Aimbot = v end)
 end, function(p)
     local cfg = Config.Combat.Memesense
     local sub = Internal.createSubCard(p)
@@ -19900,7 +22290,7 @@ end)
 
 -- Silent Aim (Moved to Rage)
 createModule("Silent Aim", "Bullet redirection (Blatant)", "Rage", Config.Combat.SilentAim.Enabled, function(v)
-    Config.Combat.SilentAim.Enabled = v
+    Config.Combat.SilentAim.Enabled = v; pcall(function() xDTaraZ.Options.SilentAim = v; if v then xDTaraZ.Silent.InstallHook() end end)
 end, function(p)
     local cfg = Config.Combat.SilentAim
     local sub = Internal.createSubCard(p)
@@ -19918,7 +22308,7 @@ end)
 
 -- Ragebot
 createModule("Ragebot", "Blatant auto-shooting", "Rage", Config.Combat.Ragebot.Enabled, function(v)
-    Config.Combat.Ragebot.Enabled = v
+    Config.Combat.Ragebot.Enabled = v; pcall(function() xDTaraZ.Options.Ragebot = v; if v then xDTaraZ.Silent.InstallHook() end end)
 end, function(p)
     local cfg = Config.Combat.Ragebot
     local sub = Internal.createSubCard(p)
@@ -22484,7 +24874,7 @@ end, function(p)
 end)
 
 createModule("BunnyHop", "Fast movement + autostrafe", "Movement", Config.Cheat.AutoBhop.Enabled, function(v)
-    Config.Cheat.AutoBhop.Enabled = v
+    Config.Cheat.AutoBhop.Enabled = v; pcall(function() xDTaraZ.Options.BunnyHop = v end)
 end, function(p)
     local sub = Internal.createSubCard(p)
     -- потолок скорости стрейфа в воздухе
@@ -22779,15 +25169,15 @@ end, true, "Universal")
 -- VISUALS
 
 -- MISC
-createModule("Auto Build", "Auto-builds the base (priority: money / house / yard / bunker), collects cash and does rebirth. Robux and donation offers are always skipped; it stands on cash pads because War Tycoon buys on touch.", "Auto farming", Config.WarTycoonBuild.Enabled, function(v)
+createModule("Auto Build", "Auto-builds the base (priority: money / house / yard / bunker / cheapest / all), collects cash and does rebirth. Robux, donation and group-join offers are always skipped; it stands on cash pads because War Tycoon buys on touch.", "Auto farming", Config.WarTycoonBuild.Enabled, function(v)
     Config.WarTycoonBuild.Enabled = v
     if v then Automation.WarTycoonAutoBuildLoop() end
 end, function(p)
     local sub = Internal.createSubCard(p)
     Internal.createSelector(sub, "Priority", {
-        "Money", "House", "Yard", "Bunker", "Cheapest"
+        "Money", "House", "Yard", "Bunker", "Cheapest", "All"
     }, Config.WarTycoonBuild.Priority, function(v) Config.WarTycoonBuild.Priority = v end)
-    Internal.createSlider(sub, "TP height above pad", 5, 60, math.floor((Config.WarTycoonBuild.Hover or 1.5) * 10 + 0.5),
+    Internal.createSlider(sub, "TP height above pad", 5, 60, math.floor((Config.WarTycoonBuild.Hover or 2.5) * 10 + 0.5),
         function(v) Config.WarTycoonBuild.Hover = v / 10 end,
         function(v) return string.format("%.1f studs", v / 10) end)
     Internal.createSlider(sub, "Delay after TP", 1, 10, math.floor((Config.WarTycoonBuild.Delay or 0.35) * 10 + 0.5),
@@ -23902,7 +26292,7 @@ end)
 -- FUN (empty)
 
 -- GUI
-createModule("Interface Settings", "Manage visual interface settings", "Gui", nil, nil, function(p)
+createModule("Gui Settings", "Appearance, glow, outline and UI sounds", "Gui", nil, nil, function(p)
     local sub = Internal.createSubCard(p)
     Internal.createKeybind(sub, "Menu Toggle:", Config.Theme.Bind, function(k)
         Config.Theme.Bind = k
@@ -24138,6 +26528,34 @@ createModule("Interface Settings", "Manage visual interface settings", "Gui", ni
         end
         refresh()
     end
+    Internal.createLabel(sub, "Menu Glow")
+    local neonRow = Internal.createSettingRow(sub, "White Neon Glow", "Soft white glow around the menu edges")
+    local neonSwitch = Internal.createiOSSwitch(neonRow, Config.Theme.NeonGlow ~= false, function(v)
+        Config.Theme.NeonGlow = v
+        if Internal.ApplyNeonGlow then pcall(Internal.ApplyNeonGlow, v) end
+        Internal.ScheduleConfigAutosave()
+        if Internal.ShowIslandNotification then
+            Internal.ShowIslandNotification(
+                v and "White Neon Glow on" or "White Neon Glow off",
+                v and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(255, 90, 90)
+            )
+        end
+    end, nil, nil, true)
+    Internal.NeonGlowSwitch = neonSwitch
+
+    local outlineRow = Internal.createSettingRow(sub, "Window Outline", "Crisp border around the window and the settings panel")
+    Internal.createiOSSwitch(outlineRow, Config.Theme.Outline ~= false, function(v)
+        Config.Theme.Outline = v
+        if Internal.ApplyOutline then pcall(Internal.ApplyOutline, v) end
+        Internal.ScheduleConfigAutosave()
+        if Internal.ShowIslandNotification then
+            Internal.ShowIslandNotification(
+                v and "Window Outline on" or "Window Outline off",
+                v and Config.Theme.Accent or Color3.fromRGB(255, 90, 90)
+            )
+        end
+    end, nil, nil, true)
+
     Internal.createSlider(sub, "Blur Intensity", 0, 50, Config.Theme.Blur, function(v)
         Config.Theme.Blur = v
         if BlurEffect then
